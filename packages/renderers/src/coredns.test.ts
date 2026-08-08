@@ -53,7 +53,7 @@ describe("CoreDNS renderer", () => {
     expect(zone).toContain("api 300 IN A 192.168.1.10");
     expect(zone).not.toContain("192.168.1.20");
     expect(zone).not.toContain("disabled");
-    expect(candidate.corefile).toContain("file zones/home.arpa.zone");
+    expect(candidate.corefile).toContain("file /etc/coredns/zones/home.arpa.zone");
     expect(candidate.corefile).toContain("forward . 10.0.0.53:53");
     expect(candidate.checksum).toHaveLength(64);
   });

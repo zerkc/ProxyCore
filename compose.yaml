@@ -74,6 +74,7 @@ services:
       COREDNS_CONTAINER_NAME: proxycore-coredns
     volumes:
       - candidates:/var/lib/proxycore
+      - coredns-zones:/var/lib/proxycore/coredns-zones
       - control-socket:/run/proxycore
       - /var/run/docker.sock:/var/run/docker.sock:ro
     healthcheck:

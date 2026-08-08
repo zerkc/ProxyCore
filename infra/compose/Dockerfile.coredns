@@ -1,4 +1,3 @@
 FROM coredns/coredns:1.12.2
 
 COPY infra/coredns/Corefile /etc/coredns/Corefile
-RUN mkdir -p /etc/coredns/zones

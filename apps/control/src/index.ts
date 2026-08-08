@@ -14,7 +14,7 @@ export * from "./service";
 export * from "./transport";
 export * from "./docker-control";
 
-if (process.argv[1]?.endsWith("/apps/control/src/index.ts")) {
+async function main() {
   const socketPath = process.env.WORKER_SOCKET_PATH ?? "/run/proxycore/control.sock";
   const { FixedServiceControl } = await import("./service");
   const { startControlServer } = await import("./transport");
@@ -46,6 +46,7 @@ if (process.argv[1]?.endsWith("/apps/control/src/index.ts")) {
     process.env.CONTROL_BACKEND === "docker"
       ? (await import("./docker-control")).createDockerServiceControl({
           candidateRoot: process.env.CANDIDATE_ROOT,
+          corednsZonesRoot: process.env.COREDNS_ZONES_ROOT,
           containers: {
             nginx: process.env.NGINX_CONTAINER_NAME,
             coredns: process.env.COREDNS_CONTAINER_NAME,
@@ -54,4 +55,11 @@ if (process.argv[1]?.endsWith("/apps/control/src/index.ts")) {
       : fallbackControl;
   await startControlServer(socketPath, control);
   process.stdout.write(`proxycore-control listening on ${socketPath}\n`);
+}
+
+if (process.argv[1]?.endsWith("/apps/control/src/index.ts")) {
+  void main().catch((error) => {
+    console.error(error);
+    process.exitCode = 1;
+  });
 }

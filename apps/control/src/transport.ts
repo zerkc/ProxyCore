@@ -15,7 +15,10 @@ export async function startControlServer(
 ): Promise<ReturnType<typeof createServer>> {
   await mkdir(dirname(socketPath), { recursive: true });
   await unlink(socketPath).catch(() => undefined);
-  const server = createServer((socket) => handleConnection(socket, control));
+  const server = createServer({ allowHalfOpen: true }, (socket) => {
+    socket.on("error", () => socket.destroy());
+    handleConnection(socket, control);
+  });
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
     server.listen(socketPath, () => {

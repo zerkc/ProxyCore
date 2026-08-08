@@ -44,7 +44,7 @@ export function renderCoreDnsCandidate(input: CoreDnsRenderInput): CoreDnsCandid
     });
     const relativePath = `zones/${normalizedZone}.zone`;
     files[relativePath] = renderZoneFile(normalizedZone, records, input.ingress);
-    zoneBlocks.push(`${normalizedZone}:53 {\n    file ${relativePath}\n}`);
+    zoneBlocks.push(`${normalizedZone}:53 {\n    file /etc/coredns/${relativePath}\n}`);
   }
 
   const forwardingBlocks = rules
