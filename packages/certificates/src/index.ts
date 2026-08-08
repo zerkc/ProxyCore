@@ -1,10 +1,7 @@
 import { createHash, randomUUID, X509Certificate } from "node:crypto";
 import * as acme from "acme-client";
 import * as selfsigned from "selfsigned";
-import {
-  decryptSecret,
-  encryptSecret,
-} from "@proxycore/crypto";
+import { decryptSecret, encryptSecret } from "@proxycore/crypto";
 import { normalizeDnsName } from "@proxycore/domain";
 
 export type CertificateResult = {
@@ -82,7 +79,10 @@ export async function issueSelfSigned(
       ],
     },
   );
-  const secretId = await options.secretStore.put("certificate-private-key", pems.private);
+  const secretId = await options.secretStore.put(
+    "certificate-private-key",
+    pems.private,
+  );
   return {
     certificatePem: pems.cert,
     privateKeyPem: pems.private,
@@ -125,7 +125,10 @@ export class FakeDns01Adapter implements Dns01Adapter {
   }
 
   async observe(hostname: string): Promise<string[]> {
-    return [...(this.records.get(challengeRecordName(hostname, this.zoneName)) ?? new Set())];
+    return [
+      ...(this.records.get(challengeRecordName(hostname, this.zoneName)) ??
+        new Set()),
+    ];
   }
 
   async cleanup(hostname: string, value: string): Promise<void> {
@@ -134,7 +137,6 @@ export class FakeDns01Adapter implements Dns01Adapter {
     values?.delete(value);
     if (values && values.size === 0) this.records.delete(name);
   }
-
 }
 
 export class CloudflareDns01Adapter implements Dns01Adapter {
@@ -157,7 +159,8 @@ export class CloudflareDns01Adapter implements Dns01Adapter {
       method: "POST",
       body: JSON.stringify({ type: "TXT", name, content: value, ttl: 120 }),
     });
-    if (!response.success) throw new Error("Cloudflare DNS-01 record creation failed");
+    if (!response.success)
+      throw new Error("Cloudflare DNS-01 record creation failed");
   }
 
   async observe(hostname: string): Promise<string[]> {
@@ -203,10 +206,10 @@ export class CloudflareDns01Adapter implements Dns01Adapter {
       throw new Error(`Cloudflare DNS-01 request failed (${response.status})`);
     }
     const body = (await response.json()) as CloudflareResponse;
-    if (!body.success) throw new Error("Cloudflare DNS-01 provider rejected the request");
+    if (!body.success)
+      throw new Error("Cloudflare DNS-01 provider rejected the request");
     return body;
   }
-
 }
 
 export type Http01ChallengeStore = {
@@ -216,7 +219,10 @@ export type Http01ChallengeStore = {
 };
 
 export class InMemoryHttp01ChallengeStore implements Http01ChallengeStore {
-  private readonly values = new Map<string, { keyAuthorization: string; expiresAt?: Date }>();
+  private readonly values = new Map<
+    string,
+    { keyAuthorization: string; expiresAt?: Date }
+  >();
 
   put(token: string, keyAuthorization: string, expiresAt?: Date): void {
     this.values.set(token, { keyAuthorization, expiresAt });
@@ -244,7 +250,11 @@ export async function issueWithAcme(options: {
   challenge: "http-01" | "dns-01";
   http01?: Http01ChallengeStore;
   dns01?: Dns01Adapter;
-}): Promise<{ certificatePem: string; privateKeyPem: string; expiresAt: Date }> {
+}): Promise<{
+  certificatePem: string;
+  privateKeyPem: string;
+  expiresAt: Date;
+}> {
   const names = normalizeHostnames(options.hostnames);
   if (options.challenge === "http-01" && !options.http01) {
     throw new Error("HTTP-01 challenge store is required");
@@ -270,7 +280,9 @@ export async function issueWithAcme(options: {
         options.http01?.put(challenge.token, keyAuthorization);
         return;
       }
-      const dnsValue = createHash("sha256").update(keyAuthorization).digest("base64url");
+      const dnsValue = createHash("sha256")
+        .update(keyAuthorization)
+        .digest("base64url");
       await options.dns01?.present(authz.identifier.value, dnsValue);
     },
     challengeRemoveFn: async (authz, challenge, keyAuthorization) => {
@@ -278,7 +290,9 @@ export async function issueWithAcme(options: {
         options.http01?.remove(challenge.token);
         return;
       }
-      const dnsValue = createHash("sha256").update(keyAuthorization).digest("base64url");
+      const dnsValue = createHash("sha256")
+        .update(keyAuthorization)
+        .digest("base64url");
       await options.dns01?.cleanup(authz.identifier.value, dnsValue);
     },
   });
@@ -312,7 +326,12 @@ function challengeRecordName(hostname: string, zoneName: string): string {
   const normalizedHost = normalizeDnsName(hostWithoutPrefix, false);
   const zone = normalizeDnsName(zoneName, false);
   if (normalizedHost !== zone && !normalizedHost.endsWith(`.${zone}`)) {
-    throw new Error("DNS-01 adapter only accepts _acme-challenge records in its zone");
+    throw new Error(
+      "DNS-01 adapter only accepts _acme-challenge records in its zone",
+    );
   }
   return `_acme-challenge.${normalizedHost}`;
 }
+
+export * from "./basic-auth";
+export * from "./materialize";

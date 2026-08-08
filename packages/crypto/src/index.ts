@@ -32,7 +32,10 @@ export async function hashPassword(password: string): Promise<string> {
   ].join("$");
 }
 
-export async function verifyPassword(password: string, encoded: string): Promise<boolean> {
+export async function verifyPassword(
+  password: string,
+  encoded: string,
+): Promise<boolean> {
   try {
     const [algorithm, n, r, p, saltEncoded, hashEncoded] = encoded.split("$");
     if (algorithm !== "scrypt") {
@@ -46,7 +49,9 @@ export async function verifyPassword(password: string, encoded: string): Promise
       p: Number(p),
       maxmem: 64 * 1024 * 1024,
     });
-    return expected.length === derived.length && timingSafeEqual(expected, derived);
+    return (
+      expected.length === derived.length && timingSafeEqual(expected, derived)
+    );
   } catch {
     return false;
   }
@@ -60,11 +65,17 @@ export function hashOpaqueToken(token: string): string {
   return createHash("sha256").update(token).digest("hex");
 }
 
-export function encryptSecret(plaintext: string, masterKeyBase64: string): string {
+export function encryptSecret(
+  plaintext: string,
+  masterKeyBase64: string,
+): string {
   const key = decodeMasterKey(masterKeyBase64);
   const iv = randomBytes(12);
   const cipher = createCipheriv("aes-256-gcm", key, iv);
-  const ciphertext = Buffer.concat([cipher.update(plaintext, "utf8"), cipher.final()]);
+  const ciphertext = Buffer.concat([
+    cipher.update(plaintext, "utf8"),
+    cipher.final(),
+  ]);
   const tag = cipher.getAuthTag();
   return [
     "v1",
@@ -74,8 +85,12 @@ export function encryptSecret(plaintext: string, masterKeyBase64: string): strin
   ].join(":");
 }
 
-export function decryptSecret(encoded: string, masterKeyBase64: string): string {
-  const [version, ivEncoded, tagEncoded, ciphertextEncoded] = encoded.split(":");
+export function decryptSecret(
+  encoded: string,
+  masterKeyBase64: string,
+): string {
+  const [version, ivEncoded, tagEncoded, ciphertextEncoded] =
+    encoded.split(":");
   if (version !== "v1" || !ivEncoded || !tagEncoded || !ciphertextEncoded) {
     throw new Error("Unsupported encrypted secret format");
   }
@@ -92,6 +107,27 @@ export function decryptSecret(encoded: string, masterKeyBase64: string): string 
   ]).toString("utf8");
 }
 
+/**
+ * Produces an Nginx-compatible htpasswd hash using the `{SHA}` scheme.
+ * The plaintext password is never returned; only the hash string is stored.
+ */
+export function hashBasicAuthPassword(password: string): string {
+  assertBasicAuthPassword(password);
+  return `{SHA}${createHash("sha1").update(password, "utf8").digest("base64")}`;
+}
+
+export function formatBasicAuthFileLine(
+  username: string,
+  passwordHash: string,
+): string {
+  assertBasicAuthUsername(username);
+  assertDomain(
+    passwordHash.startsWith("{SHA}") && passwordHash.length > 6,
+    "Basic Auth password hash is invalid",
+  );
+  return `${username}:${passwordHash}\n`;
+}
+
 export function redactSecrets(value: unknown): unknown {
   if (Array.isArray(value)) {
     return value.map(redactSecrets);
@@ -102,7 +138,9 @@ export function redactSecrets(value: unknown): unknown {
   return Object.fromEntries(
     Object.entries(value).map(([key, entry]) => [
       key,
-      /pass(word)?|secret|token|private.?key|ciphertext|authorization/i.test(key)
+      /pass(word)?|secret|token|private.?key|ciphertext|authorization/i.test(
+        key,
+      )
         ? "[REDACTED]"
         : redactSecrets(entry),
     ]),
@@ -137,5 +175,26 @@ function deriveKey(
 function assertPassword(password: string): void {
   if (password.length < 12) {
     throw new Error("Password must contain at least 12 characters");
+  }
+}
+
+function assertBasicAuthPassword(password: string): void {
+  if (password.length < 8) {
+    throw new Error("Basic Auth password must contain at least 8 characters");
+  }
+  if (/[\r\n]/.test(password)) {
+    throw new Error("Basic Auth password cannot contain newlines");
+  }
+}
+
+function assertBasicAuthUsername(username: string): void {
+  if (!/^[A-Za-z0-9._@+=-]{1,64}$/.test(username)) {
+    throw new Error("Basic Auth username is invalid");
+  }
+}
+
+function assertDomain(condition: boolean, message: string): asserts condition {
+  if (!condition) {
+    throw new Error(message);
   }
 }

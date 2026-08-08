@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest";
 import {
   decryptSecret,
   encryptSecret,
+  formatBasicAuthFileLine,
+  hashBasicAuthPassword,
   hashPassword,
   verifyPassword,
 } from "./index";
@@ -14,7 +16,9 @@ describe("ProxyCore crypto primitives", () => {
 
     expect(encoded).not.toContain(password);
     await expect(verifyPassword(password, encoded)).resolves.toBe(true);
-    await expect(verifyPassword("wrong password", encoded)).resolves.toBe(false);
+    await expect(verifyPassword("wrong password", encoded)).resolves.toBe(
+      false,
+    );
   });
 
   it("encrypts and decrypts secret values with an external master key", () => {
@@ -23,5 +27,16 @@ describe("ProxyCore crypto primitives", () => {
 
     expect(encrypted).not.toContain("cloudflare-token");
     expect(decryptSecret(encrypted, key)).toBe("cloudflare-token");
+  });
+
+  it("hashes Basic Auth passwords into Nginx htpasswd lines without plaintext", () => {
+    const password = "homelab-pass";
+    const hash = hashBasicAuthPassword(password);
+    const line = formatBasicAuthFileLine("operator", hash);
+
+    expect(hash.startsWith("{SHA}")).toBe(true);
+    expect(hash).not.toContain(password);
+    expect(line).toBe(`operator:${hash}\n`);
+    expect(line).not.toContain(password);
   });
 });
