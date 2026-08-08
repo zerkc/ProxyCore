@@ -13,6 +13,7 @@ export type MvpRecordType = (typeof MVP_RECORD_TYPES)[number];
 
 export * from "./dns";
 export * from "./errors";
+export * from "./auth";
 export * from "./jobs";
 export * from "./model";
 export * from "./paths";
