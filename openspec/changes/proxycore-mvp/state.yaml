@@ -3,7 +3,7 @@ status: verified-partial
 mode: hybrid
 delivery_strategy: exception-ok
 current_phase: verify
-docker_verification: blocked-daemon-unavailable
+docker_verification: passed-live-staging-deferred
 completed_phases:
   - explore
   - propose
@@ -11,8 +11,8 @@ completed_phases:
   - design
   - tasks
   - apply
-pending_phases:
   - verify
+pending_phases:
   - archive
 artifacts:
   proposal: openspec/changes/proxycore-mvp/proposal.md

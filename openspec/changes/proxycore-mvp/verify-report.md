@@ -6,7 +6,7 @@
 - Host: macOS Darwin 25.6.0
 - Node: 24.14.1 (the repository requires 24.19.0 in production images)
 - pnpm: 11.16.0
-- Docker phase: BLOCKED — Docker daemon unavailable
+- Docker: Docker Desktop 29.6.2, LinuxKit arm64 backend
 
 ## Normal verification (Docker-independent)
 
@@ -30,14 +30,14 @@ lands.
 | --- | --- | --- | --- |
 | Auth/bootstrap/RBAC | `packages/domain/src/auth.test.ts`, API route test, crypto tests | PASS | PostgreSQL auth store is typechecked; live DB integration remains Docker-dependent |
 | Domain invariants | DNS/proxy/job/snapshot tests | PASS | No production traffic |
-| PostgreSQL schema/migrations | Drizzle schema, generated migration, Pg auth/secret stores | PARTIAL | No live PostgreSQL container run yet |
-| CoreDNS rendering | `packages/renderers/src/coredns.test.ts` | PASS | CoreDNS process/query verification pending |
-| Nginx rendering | `packages/renderers/src/nginx.test.ts` | PASS | `nginx -t` and HTTP/stream checks pending |
+| PostgreSQL schema/migrations | Drizzle schema, generated migration, Pg auth/secret stores, live migration and 16-table query | PASS | Production web context still defaults to in-memory desired-state ports |
+| CoreDNS rendering | `packages/renderers/src/coredns.test.ts`, authoritative and forwarding `dig` checks | PASS | Candidate verification used a temporary `example.test` zone |
+| Nginx rendering | `packages/renderers/src/nginx.test.ts`, helper `nginx -t`, HTTP/HTTPS/TCP/UDP checks | PASS | TLS check used a one-day local self-signed certificate |
 | Certificates/secrets | crypto, self-signed, fake DNS-01 tests | PASS | Live ACME/Cloudflare credentials and network are intentionally absent |
 | Worker lifecycle | apply, rollback, protocol, retention/health tests | PASS | Long-running DB job polling is not yet wired into the worker entrypoint |
-| Control helper | protocol tests and Docker boundary tests | PASS | Docker Engine execution pending |
+| Control helper | protocol tests, private socket, Docker stage/validate/promote/reload/health/rollback | PASS | Fixed operations only; no arbitrary command path |
 | Web API/UI | API handler test, typecheck, production build | PASS | Current web context defaults to in-memory ports for host TDD |
-| Compose topology | static files and Dockerfiles | PARTIAL | Compose config/build/start checks pending |
+| Compose topology | config parse, all image builds, start, healthchecks, socket/mount inspection | PASS | Live ACME/provider staging remains environment-dependent |
 | Secret redaction | crypto redaction and encrypted-store tests | PASS | No live log-volume audit |
 
 ## Known partial items
@@ -56,17 +56,35 @@ lands.
 
 ## Docker phase
 
+The Docker daemon was available for the final verification pass. Temporary
+verification values were used for PostgreSQL and the master key; no repository
+secret was created. A temporary Nginx origin and UDP echo origin were attached
+only to the Compose data network.
+
 | Check | Result | Evidence |
 | --- | --- | --- |
-| Docker daemon | BLOCKED | `docker info` could not connect to `unix:///Users/gustavog/.docker/run/docker.sock`; the daemon is not running |
+| Docker daemon | PASS | `docker info`; Docker Desktop server 29.6.2 |
 | Compose topology parse | PASS | `PROXYCORE_MASTER_KEY_BASE64=<temporary verification value> POSTGRES_PASSWORD=verification docker compose config` |
-| Compose image build | BLOCKED/N/A | Requires the unavailable daemon |
-| Compose start and healthchecks | BLOCKED/N/A | Requires the unavailable daemon |
-| PostgreSQL migration/integration | BLOCKED/N/A | Requires the unavailable daemon |
-| CoreDNS `dig`/forwarding/proxied answers | BLOCKED/N/A | Requires the unavailable daemon |
-| Nginx `nginx -t`, HTTP/HTTPS, streams | BLOCKED/N/A | Requires the unavailable daemon |
-| Apply rollback through Docker helper | BLOCKED/N/A | Requires the unavailable daemon |
-| Live ACME/Cloudflare staging | BLOCKED/N/A | Requires daemon plus user-provided credentials/domains |
+| Compose image build | PASS | `docker compose build`; web, worker, control, CoreDNS, and Nginx images built |
+| Compose start and healthchecks | PASS | `docker compose up -d`; PostgreSQL, web, worker, control, and Nginx healthy; CoreDNS answering |
+| PostgreSQL migration/integration | PASS | `docker compose exec -T web pnpm db:migrate`; 16 public tables queried |
+| CoreDNS managed answer | PASS | `dig @127.0.0.1 app.example.test A` returned authoritative `127.0.0.1` |
+| CoreDNS forwarding | PASS | `dig @127.0.0.1 example.com A` returned upstream answers |
+| Nginx validation and HTTP/HTTPS | PASS | Helper `validate`, HTTP 308 redirect, HTTPS 200 with local self-signed certificate |
+| Nginx TCP/UDP streams | PASS | TCP stream returned origin HTTP 200; UDP stream returned `udp-ok` |
+| Apply and rollback through Docker helper | PASS | Nginx changed candidate returned 418 then rolled back to 200; CoreDNS changed answer `127.0.0.2` then rolled back to `127.0.0.1` |
+| Socket and Docker privilege boundary | PASS | Web had no mounts; worker had no Docker socket; only control had read-only Docker socket |
+| Live ACME/Cloudflare staging | NOT RUN | Requires user-provided credentials, publicly reachable domains, and challenge routing |
 
-No Docker-dependent check is claimed as passed beyond the static Compose
-configuration parse.
+## Docker fixes discovered during verification
+
+1. CoreDNS uses a minimal non-root image, so promotion now writes the Corefile
+   through the Docker archive API and synchronizes zone files through a
+   control-only shared volume. Its fixed reload operation restarts CoreDNS so
+   changed zone contents are loaded deterministically.
+2. CoreDNS renderer `file` directives use the container-absolute
+   `/etc/coredns/zones` path.
+3. Docker `exec` output is drained before completion, and the Unix-socket
+   server tolerates half-closed clients without terminating the helper.
+4. The web image runs the generated Next standalone server instead of emitting
+   the `next start`/standalone incompatibility warning.

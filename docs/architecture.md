@@ -72,7 +72,7 @@ The web process and worker have no raw Docker socket. Dual per-service control s
 - **Proxied A/AAAA/CNAME:** zone data answers with installation proxy ingress address(es), not the origin
 - **DNS-only records:** answers use the configured record value
 
-Candidate validation: start pinned CoreDNS on an isolated port (e.g. 1053), check readiness and representative queries (including proxied vs DNS-only answers), then promote. Active reload uses CoreDNS `reload` / file-plugin serial reload.
+Candidate validation: start pinned CoreDNS on an isolated port (e.g. 1053), check readiness and representative queries (including proxied vs DNS-only answers), then promote. The control helper promotes the Corefile through the Docker API, synchronizes zone files through its private shared volume, and performs a controlled CoreDNS restart so changed zone contents are loaded deterministically.
 
 ### Nginx (derived from proxied records)
 

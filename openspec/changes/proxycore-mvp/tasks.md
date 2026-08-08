@@ -122,8 +122,8 @@ routes/pages and composition.
 - [x] 9.4 Run all normal tests, typecheck, lint, and build before Docker.
 - [x] 9.5 Check Docker availability and run Compose, CoreDNS, Nginx, stream,
   rollback, and certificate staging checks.
-- [x] 9.6 Write the SDD verification matrix; keep the change active when
-  Docker verification is blocked.
+- [x] 9.6 Write and close the SDD verification matrix; keep only
+  environment-dependent ACME/provider staging explicitly deferred.
 
 Focused verification: `pnpm test`, `pnpm typecheck`, `pnpm lint`, `pnpm build`.
 Docker harness: `docker compose config` followed by the documented integration
