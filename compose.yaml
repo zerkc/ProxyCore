@@ -68,6 +68,10 @@ services:
     environment:
       NODE_ENV: production
       WORKER_SOCKET_PATH: /run/proxycore/control.sock
+      CONTROL_BACKEND: docker
+      CANDIDATE_ROOT: /var/lib/proxycore/candidates
+      NGINX_CONTAINER_NAME: proxycore-nginx
+      COREDNS_CONTAINER_NAME: proxycore-coredns
     volumes:
       - candidates:/var/lib/proxycore
       - control-socket:/run/proxycore
@@ -80,19 +84,29 @@ services:
     networks: [control]
 
   coredns:
-    image: coredns/coredns:1.12.2
+    container_name: proxycore-coredns
+    build:
+      context: .
+      dockerfile: infra/compose/Dockerfile.coredns
+    image: proxycore-coredns:local
     command: ["-conf", "/etc/coredns/Corefile"]
     volumes:
-      - ./infra/coredns:/etc/coredns:ro
+      - candidates:/var/lib/proxycore:ro
+      - coredns-zones:/etc/coredns/zones
     ports:
       - "${DNS_PORT:-53}:53/tcp"
       - "${DNS_PORT:-53}:53/udp"
     networks: [data]
 
   nginx:
-    image: ${NGINX_IMAGE:-nginx:1.30.4-alpine-slim}
+    container_name: proxycore-nginx
+    build:
+      context: .
+      dockerfile: infra/compose/Dockerfile.nginx
+      args:
+        NGINX_IMAGE: ${NGINX_IMAGE:-nginx:1.30.4-alpine-slim}
+    image: proxycore-nginx:local
     volumes:
-      - ./infra/nginx:/etc/nginx:ro
       - certificates:/etc/nginx/certs:ro
       - candidates:/var/lib/proxycore:ro
     ports:
@@ -111,6 +125,7 @@ volumes:
   candidates:
   control-socket:
   certificates:
+  coredns-zones:
 
 networks:
   control:

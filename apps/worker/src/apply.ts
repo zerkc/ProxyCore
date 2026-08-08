@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { mkdir, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import {
   transitionJob,
   type ConfigurationSnapshot,
@@ -18,6 +20,7 @@ export type RenderedCandidate = {
   service: ControlService;
   candidatePath: string;
   checksum: string;
+  files?: Record<string, string>;
 };
 
 export type CandidateRenderer = (
@@ -50,6 +53,7 @@ export class ApplyOrchestrator {
     try {
       job = this.setStatus(job, "validating");
       candidate = render(snapshot, job);
+      await writeCandidate(candidate);
       const staged = await this.request(candidate, job, "stage");
       if (!staged.ok) {
         return this.fail(job, staged.error ?? "Candidate staging failed", {
@@ -161,4 +165,27 @@ export class ApplyOrchestrator {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "Apply failed";
+}
+
+async function writeCandidate(candidate: RenderedCandidate): Promise<void> {
+  if (!candidate.files) return;
+  if (
+    !candidate.candidatePath.startsWith("/var/lib/proxycore/") ||
+    candidate.candidatePath.includes("..")
+  ) {
+    throw new Error("Candidate path is outside the worker candidate root");
+  }
+  await mkdir(candidate.candidatePath, { recursive: true });
+  for (const [relativePath, contents] of Object.entries(candidate.files)) {
+    if (
+      relativePath.startsWith("/") ||
+      relativePath.includes("..") ||
+      relativePath.includes("\0")
+    ) {
+      throw new Error("Candidate file path is invalid");
+    }
+    const target = join(candidate.candidatePath, relativePath);
+    await mkdir(join(target, ".."), { recursive: true });
+    await writeFile(target, contents, { encoding: "utf8", mode: 0o640 });
+  }
 }

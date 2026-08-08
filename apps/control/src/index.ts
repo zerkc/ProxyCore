@@ -12,6 +12,7 @@ export type ControlOperation = (typeof CONTROL_OPERATIONS)[number];
 export * from "./protocol";
 export * from "./service";
 export * from "./transport";
+export * from "./docker-control";
 
 if (process.argv[1]?.endsWith("/apps/control/src/index.ts")) {
   const socketPath = process.env.WORKER_SOCKET_PATH ?? "/run/proxycore/control.sock";
@@ -23,7 +24,7 @@ if (process.argv[1]?.endsWith("/apps/control/src/index.ts")) {
     candidatePath: request.candidatePath,
     status: "accepted-by-fixed-boundary",
   });
-  const control = new FixedServiceControl({
+  const fallbackControl = new FixedServiceControl({
     coredns: {
       stage: fixedOperation,
       validate: fixedOperation,
@@ -41,6 +42,16 @@ if (process.argv[1]?.endsWith("/apps/control/src/index.ts")) {
       rollback: fixedOperation,
     },
   });
+  const control =
+    process.env.CONTROL_BACKEND === "docker"
+      ? (await import("./docker-control")).createDockerServiceControl({
+          candidateRoot: process.env.CANDIDATE_ROOT,
+          containers: {
+            nginx: process.env.NGINX_CONTAINER_NAME,
+            coredns: process.env.COREDNS_CONTAINER_NAME,
+          },
+        })
+      : fallbackControl;
   await startControlServer(socketPath, control);
   process.stdout.write(`proxycore-control listening on ${socketPath}\n`);
 }
