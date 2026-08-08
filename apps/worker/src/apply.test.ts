@@ -20,11 +20,11 @@ class FakeControl implements ControlClient {
   }
 }
 
-function setup(failedOperation?: string) {
+async function setup(failedOperation?: string) {
   const revisions = new InMemoryRevisionStore();
-  const revision = revisions.create({ zones: [] });
+  const revision = await revisions.create({ zones: [] });
   const jobs = new InMemoryJobStore();
-  const job = jobs.enqueue({
+  const job = await jobs.enqueue({
     revisionId: revision.id,
     target: "coredns",
     correlationId: "correlation-1",
@@ -36,7 +36,7 @@ function setup(failedOperation?: string) {
 
 describe("apply orchestrator", () => {
   it("validates, reloads, health-checks, and marks the revision applied", async () => {
-    const { worker, jobs, revisions, revision, job, control } = setup();
+    const { worker, jobs, revisions, revision, job, control } = await setup();
     const result = await worker.apply(job.id, { zones: [] }, () => ({
       service: "coredns",
       candidatePath: "/candidates/revision-1",
@@ -44,13 +44,13 @@ describe("apply orchestrator", () => {
     }));
 
     expect(result.status).toBe("applied");
-    expect(revisions.get(revision.id)?.appliedAt).toBeInstanceOf(Date);
+    expect((await revisions.get(revision.id))?.appliedAt).toBeInstanceOf(Date);
     expect(control.operations).toEqual(["stage", "validate", "promote", "reload", "health"]);
-    expect(jobs.get(job.id)?.healthOutput).toBeDefined();
+    expect((await jobs.get(job.id))?.healthOutput).toBeDefined();
   });
 
   it("leaves the active revision unchanged when validation fails", async () => {
-    const { worker, revisions, revision, job, control } = setup("validate");
+    const { worker, revisions, revision, job, control } = await setup("validate");
     const result = await worker.apply(job.id, { zones: [] }, () => ({
       service: "coredns",
       candidatePath: "/candidates/revision-1",
@@ -58,12 +58,12 @@ describe("apply orchestrator", () => {
     }));
 
     expect(result.status).toBe("failed");
-    expect(revisions.get(revision.id)?.appliedAt).toBeUndefined();
+    expect((await revisions.get(revision.id))?.appliedAt).toBeUndefined();
     expect(control.operations).toEqual(["stage", "validate"]);
   });
 
   it("rolls back after a post-promotion health failure", async () => {
-    const { worker, job, control } = setup("health");
+    const { worker, job, control } = await setup("health");
     const result = await worker.apply(job.id, { zones: [] }, () => ({
       service: "coredns",
       candidatePath: "/candidates/revision-1",

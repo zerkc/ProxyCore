@@ -60,6 +60,7 @@ export function requestControl(
 
 function handleConnection(socket: Socket, control: FixedServiceControl): void {
   let buffer = "";
+  socket.on("end", () => socket.destroy());
   socket.on("data", async (chunk: Buffer) => {
     buffer += chunk.toString("utf8");
     let newline = buffer.indexOf("\n");

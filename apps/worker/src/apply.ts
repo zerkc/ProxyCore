@@ -1,10 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import {
-  transitionJob,
-  type ConfigurationSnapshot,
-} from "@proxycore/domain";
+import { transitionJob, type ConfigurationSnapshot } from "@proxycore/domain";
 import type { JobRecord, JobStore, RevisionStore } from "@proxycore/db";
 import type {
   ControlRequest,
@@ -26,7 +23,10 @@ export type RenderedCandidate = {
 export type CandidateRenderer = (
   snapshot: ConfigurationSnapshot,
   job: JobRecord,
-) => RenderedCandidate;
+) =>
+  | RenderedCandidate
+  | RenderedCandidate[]
+  | Promise<RenderedCandidate | RenderedCandidate[]>;
 
 export class ApplyOrchestrator {
   constructor(
@@ -34,6 +34,7 @@ export class ApplyOrchestrator {
       jobs: JobStore;
       revisions: RevisionStore;
       control: ControlClient;
+      candidateRoot?: string;
       now?: () => Date;
     },
   ) {}
@@ -43,104 +44,150 @@ export class ApplyOrchestrator {
     snapshot: ConfigurationSnapshot,
     render: CandidateRenderer,
   ): Promise<JobRecord> {
-    let job = this.requireJob(jobId);
-    if (job.status !== "queued") {
+    let job = await this.requireJob(jobId);
+    if (job.status === "queued") {
+      job = await this.setStatus(job, "validating");
+    } else if (job.status !== "validating") {
       throw new Error(`Job ${jobId} is not queued`);
     }
-    let promoted = false;
-    let candidate: RenderedCandidate | undefined;
+    const promoted: RenderedCandidate[] = [];
+    let candidates: RenderedCandidate[] = [];
 
     try {
-      job = this.setStatus(job, "validating");
-      candidate = render(snapshot, job);
-      await writeCandidate(candidate);
-      const staged = await this.request(candidate, job, "stage");
-      if (!staged.ok) {
-        return this.fail(job, staged.error ?? "Candidate staging failed", {
-          validationOutput: staged.output,
-        });
-      }
-      const validation = await this.request(candidate, job, "validate");
-      if (!validation.ok) {
-        return this.fail(job, validation.error ?? "Candidate validation failed", {
-          validationOutput: validation.output,
-        });
+      const rendered = await render(snapshot, job);
+      candidates = Array.isArray(rendered) ? rendered : [rendered];
+      if (candidates.length === 0) {
+        throw new Error("No candidates were rendered");
       }
 
-      job = this.setStatus(job, "applying", { validationOutput: validation.output });
-      const promotedResponse = await this.request(candidate, job, "promote");
-      if (!promotedResponse.ok) {
-        return this.fail(job, promotedResponse.error ?? "Candidate promotion failed", {
-          applyOutput: promotedResponse.output,
-        });
-      }
-      promoted = true;
-
-      const reload = await this.request(candidate, job, "reload");
-      if (!reload.ok) {
-        throw new Error(reload.error ?? "Service reload failed");
-      }
-      const health = await this.request(candidate, job, "health");
-      if (!health.ok) {
-        const rollback = await this.request(candidate, job, "rollback");
-        if (rollback.ok) {
-          return this.setStatus(job, "rolled-back", {
-            healthOutput: health.output,
-            errorMessage: health.error ?? "Post-reload health failed; rolled back",
-            finishedAt: this.now(),
-          });
+      const validationOutput: Record<string, unknown> = {};
+      for (const candidate of candidates) {
+        await writeCandidate(candidate, this.stores.candidateRoot);
+        const staged = await this.request(candidate, job, "stage");
+        if (!staged.ok) {
+          return await this.fail(
+            job,
+            staged.error ?? "Candidate staging failed",
+            {
+              validationOutput: {
+                service: candidate.service,
+                output: staged.output,
+              },
+            },
+          );
         }
-        return this.fail(
-          job,
-          `${health.error ?? "Post-reload health failed"}; rollback failed`,
-          { healthOutput: health.output },
-        );
+        const validation = await this.request(candidate, job, "validate");
+        validationOutput[candidate.service] = validation.output;
+        if (!validation.ok) {
+          return await this.fail(
+            job,
+            validation.error ?? "Candidate validation failed",
+            {
+              validationOutput,
+            },
+          );
+        }
       }
 
-      this.stores.revisions.markApplied(job.revisionId, this.now());
-      return this.setStatus(job, "applied", {
-        healthOutput: health.output,
+      job = await this.setStatus(job, "applying", { validationOutput });
+      const applyOutput: Record<string, unknown> = {};
+      for (const candidate of candidates) {
+        const promotedResponse = await this.request(candidate, job, "promote");
+        if (!promotedResponse.ok) {
+          throw new Error(
+            promotedResponse.error ?? "Candidate promotion failed",
+          );
+        }
+        promoted.push(candidate);
+        applyOutput[candidate.service] = promotedResponse.output;
+      }
+
+      const healthOutput: Record<string, unknown> = {};
+      for (const candidate of candidates) {
+        const reload = await this.request(candidate, job, "reload");
+        if (!reload.ok) {
+          throw new Error(reload.error ?? "Service reload failed");
+        }
+        const health = await this.request(candidate, job, "health");
+        healthOutput[candidate.service] = health.output;
+        if (!health.ok) {
+          const rollbackSucceeded = await this.rollback(promoted, job);
+          if (rollbackSucceeded) {
+            return await this.setStatus(job, "rolled-back", {
+              healthOutput,
+              errorMessage:
+                health.error ?? "Post-reload health failed; rolled back",
+              finishedAt: this.now(),
+            });
+          }
+          return await this.fail(
+            job,
+            `${health.error ?? "Post-reload health failed"}; rollback failed`,
+            { healthOutput },
+          );
+        }
+      }
+
+      await this.stores.revisions.markApplied(job.revisionId, this.now());
+      return await this.setStatus(job, "applied", {
+        applyOutput,
+        healthOutput,
         finishedAt: this.now(),
       });
     } catch (error) {
-      if (promoted && candidate) {
-        const rollback = await this.request(candidate, job, "rollback").catch(() => ({
-          ok: false,
-          requestId: "",
-          operation: "rollback" as const,
-        }));
-        if (rollback.ok) {
-          return this.setStatus(job, "rolled-back", {
-            errorMessage: errorMessage(error),
-            finishedAt: this.now(),
-          });
-        }
+      if (promoted.length > 0 && (await this.rollback(promoted, job))) {
+        return await this.setStatus(job, "rolled-back", {
+          errorMessage: errorMessage(error),
+          finishedAt: this.now(),
+        });
       }
-      return this.fail(job, errorMessage(error));
+      return await this.fail(job, errorMessage(error));
     }
   }
 
-  private requireJob(jobId: string): JobRecord {
-    const job = this.stores.jobs.get(jobId);
+  private async requireJob(jobId: string): Promise<JobRecord> {
+    const job = await this.stores.jobs.get(jobId);
     if (!job) throw new Error(`Job not found: ${jobId}`);
     return job;
   }
 
-  private setStatus(
+  private async setStatus(
     job: JobRecord,
     status: JobRecord["status"],
     patch: Partial<JobRecord> = {},
-  ): JobRecord {
+  ): Promise<JobRecord> {
     const next = transitionJob(job.status, status);
     return this.stores.jobs.update(job.id, { ...patch, status: next });
   }
 
-  private fail(job: JobRecord, message: string, patch: Partial<JobRecord> = {}): JobRecord {
+  private async fail(
+    job: JobRecord,
+    message: string,
+    patch: Partial<JobRecord> = {},
+  ): Promise<JobRecord> {
     return this.setStatus(job, "failed", {
       ...patch,
       errorMessage: message,
       finishedAt: this.now(),
     });
+  }
+
+  private async rollback(
+    candidates: RenderedCandidate[],
+    job: JobRecord,
+  ): Promise<boolean> {
+    let succeeded = true;
+    for (const candidate of [...candidates].reverse()) {
+      const response = await this.request(candidate, job, "rollback").catch(
+        () => ({
+          ok: false,
+          requestId: "",
+          operation: "rollback" as const,
+        }),
+      );
+      succeeded = response.ok && succeeded;
+    }
+    return succeeded;
   }
 
   private async request(
@@ -167,10 +214,14 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "Apply failed";
 }
 
-async function writeCandidate(candidate: RenderedCandidate): Promise<void> {
+async function writeCandidate(
+  candidate: RenderedCandidate,
+  candidateRoot = "/var/lib/proxycore",
+): Promise<void> {
   if (!candidate.files) return;
+  const normalizedRoot = candidateRoot.replace(/\/+$/, "");
   if (
-    !candidate.candidatePath.startsWith("/var/lib/proxycore/") ||
+    !candidate.candidatePath.startsWith(`${normalizedRoot}/`) ||
     candidate.candidatePath.includes("..")
   ) {
     throw new Error("Candidate path is outside the worker candidate root");
@@ -186,6 +237,7 @@ async function writeCandidate(candidate: RenderedCandidate): Promise<void> {
     }
     const target = join(candidate.candidatePath, relativePath);
     await mkdir(join(target, ".."), { recursive: true });
-    await writeFile(target, contents, { encoding: "utf8", mode: 0o640 });
+    // Nginx workers must read auth/cert candidate files after reload.
+    await writeFile(target, contents, { encoding: "utf8", mode: 0o644 });
   }
 }
