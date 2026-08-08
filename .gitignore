@@ -1,1 +1,10 @@
 .atl/
+node_modules/
+.pnpm-store/
+.next/
+coverage/
+dist/
+*.tsbuildinfo
+.env
+.env.*
+!.env.example
