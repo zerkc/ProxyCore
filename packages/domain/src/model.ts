@@ -43,6 +43,7 @@ export type HeaderRule = {
 export type ProxySettings = {
   origin: UpstreamTarget;
   tlsEnabled: boolean;
+  redirectHttpToHttps?: boolean;
   certificateId?: string;
   http2?: boolean;
   http3?: boolean;
