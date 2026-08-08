@@ -2,12 +2,16 @@ import { randomUUID } from "node:crypto";
 import {
   InMemorySecretStore,
   issueSelfSigned,
+  resolveProxySettingsInput,
   type CertificateResult,
+  type ProxySettingsInput,
 } from "@proxycore/certificates";
 import {
   InMemoryJobStore,
   InMemoryRevisionStore,
+  type AutoApplyResult,
   type JobRecord,
+  type RevisionRecord,
 } from "@proxycore/db";
 import {
   normalizeDnsName,
@@ -22,32 +26,62 @@ import {
   type ResolverPool,
   type StreamRoute,
 } from "@proxycore/domain";
+import type {
+  CertificateStatus,
+  ConfigurationSnapshot,
+  InstallationSettings,
+  ZoneState,
+} from "@proxycore/domain";
 
-export type InstallationSettings = {
-  ingress: IngressAddresses;
-  defaultPool?: ResolverPool;
-  forwardingRules: ForwardingRule[];
-  retentionMaxAgeDays: number;
-  retentionMaxSizeMb: number;
+export type RecordMutationInput = Omit<DnsRecordInput, "id" | "proxy"> & {
+  id?: string;
+  proxy?: ProxySettingsInput;
 };
 
-export type ZoneState = {
-  id: string;
-  name: string;
-  enabled: boolean;
-  records: DnsRecord[];
-};
+export type { CertificateStatus, InstallationSettings, ZoneState };
 
-export type CertificateStatus = {
-  id: string;
-  hostnames: string[];
-  issuer: "self-signed" | "letsencrypt";
-  challenge: "none" | "http-01" | "dns-01";
-  environment: string;
-  status: "pending" | "issued" | "active" | "failed";
-  expiresAt?: Date;
-  secretId?: string;
-};
+export interface ConfigurationStore {
+  getSettings(): Promise<InstallationSettings>;
+  initializeIngress(defaultIngress: IngressAddresses): Promise<boolean>;
+  updateSettings(
+    input: Partial<InstallationSettings>,
+  ): Promise<InstallationSettings>;
+  listZones(): Promise<ZoneState[]>;
+  createZone(
+    name: string,
+    actorUserId: string,
+  ): Promise<AutoApplyResult<ZoneState>>;
+  getZone(id: string): Promise<ZoneState>;
+  addRecord(
+    zoneId: string,
+    input: RecordMutationInput,
+    actorUserId: string,
+  ): Promise<AutoApplyResult<DnsRecord>>;
+  listStreams(): Promise<StreamRoute[]>;
+  addStream(
+    input: Omit<StreamRoute, "id"> & { id?: string },
+  ): Promise<StreamRoute>;
+  listCertificates(): Promise<CertificateStatus[]>;
+  issueCertificate(input: {
+    hostnames: string[];
+    issuer: "self-signed" | "letsencrypt";
+    challenge: "none" | "http-01" | "dns-01";
+    environment?: string;
+  }): Promise<CertificateStatus>;
+  createApplyJob(
+    actorUserId: string,
+  ): Promise<{ revisionId: string; job: JobRecord }>;
+  status(): Promise<{
+    desiredRevision?: RevisionRecord;
+    appliedRevision?: RevisionRecord;
+    jobs: JobRecord[];
+    settings: InstallationSettings;
+    zones: ZoneState[];
+    streams: StreamRoute[];
+    certificates: CertificateStatus[];
+  }>;
+  snapshot(): Promise<ConfigurationSnapshot>;
+}
 
 export class InMemoryConfigurationStore {
   private settings: InstallationSettings = {
@@ -65,18 +99,28 @@ export class InMemoryConfigurationStore {
   private readonly masterKeyBase64?: string;
   private readonly secretStore?: InMemorySecretStore;
 
-  constructor(masterKeyBase64?: string) {
+  constructor(masterKeyBase64?: string, defaultIngress: IngressAddresses = {}) {
     this.masterKeyBase64 = masterKeyBase64;
     this.secretStore = masterKeyBase64
       ? new InMemorySecretStore(masterKeyBase64)
       : undefined;
+    this.settings.ingress = clone(defaultIngress);
   }
 
-  getSettings(): InstallationSettings {
+  async getSettings(): Promise<InstallationSettings> {
     return clone(this.settings);
   }
 
-  updateSettings(input: Partial<InstallationSettings>): InstallationSettings {
+  async initializeIngress(defaultIngress: IngressAddresses): Promise<boolean> {
+    if (this.settings.ingress.ipv4 || this.settings.ingress.ipv6) return false;
+    if (!defaultIngress.ipv4 && !defaultIngress.ipv6) return false;
+    this.settings.ingress = clone(defaultIngress);
+    return true;
+  }
+
+  async updateSettings(
+    input: Partial<InstallationSettings>,
+  ): Promise<InstallationSettings> {
     const next: InstallationSettings = {
       ...this.settings,
       ...input,
@@ -95,11 +139,17 @@ export class InMemoryConfigurationStore {
     return this.getSettings();
   }
 
-  listZones(): ZoneState[] {
+  async listZones(): Promise<ZoneState[]> {
     return clone(this.zones);
   }
 
-  createZone(name: string): ZoneState {
+  async createZone(
+    name: string,
+    actorUserId: string,
+  ): Promise<AutoApplyResult<ZoneState>> {
+    if (!this.settings.defaultPool) {
+      throw new Error("Configure a default resolver pool before saving DNS");
+    }
     const normalized = normalizeDnsName(name, false);
     if (this.zones.some((zone) => zone.name === normalized)) {
       throw new Error("Zone already exists");
@@ -111,44 +161,66 @@ export class InMemoryConfigurationStore {
       records: [],
     };
     this.zones.push(zone);
-    return clone(zone);
+    const apply = await this.createApplyJob(actorUserId);
+    return { value: clone(zone), apply };
   }
 
-  getZone(id: string): ZoneState {
+  async getZone(id: string): Promise<ZoneState> {
     const zone = this.zones.find((item) => item.id === id);
     if (!zone) throw new Error("Zone not found");
     return clone(zone);
   }
 
-  addRecord(
+  async addRecord(
     zoneId: string,
-    input: Omit<DnsRecordInput, "id"> & { id?: string },
-  ): DnsRecord {
+    input: RecordMutationInput,
+    actorUserId: string,
+  ): Promise<AutoApplyResult<DnsRecord>> {
+    if (!this.settings.defaultPool) {
+      throw new Error("Configure a default resolver pool before saving DNS");
+    }
     const zone = this.zones.find((item) => item.id === zoneId);
     if (!zone) throw new Error("Zone not found");
+    const recordId = input.id ?? randomUUID();
+    const existing = zone.records.find((item) => item.id === recordId);
+    const proxy = await resolveProxySettingsInput(input.proxy, {
+      secretStore: this.secretStore,
+      existing: existing?.proxy,
+    });
     const record: DnsRecordInput = {
       ...input,
-      id: input.id ?? randomUUID(),
+      id: recordId,
+      proxy,
     };
-    const records = validateRecordSet([...zone.records, record], {
-      zoneName: zone.name,
-      ingress: this.settings.ingress,
-    });
+    const records = validateRecordSet(
+      [...zone.records.filter((item) => item.id !== recordId), record],
+      {
+        zoneName: zone.name,
+        ingress: this.settings.ingress,
+        certificates: this.certificates,
+      },
+    );
     zone.records = records;
-    return clone(records.find((item) => item.id === record.id)!);
+    const apply = await this.createApplyJob(actorUserId);
+    return {
+      value: clone(records.find((item) => item.id === record.id)!),
+      apply,
+    };
   }
 
-  listStreams(): StreamRoute[] {
+  async listStreams(): Promise<StreamRoute[]> {
     return clone(this.streams);
   }
 
-  addStream(input: Omit<StreamRoute, "id"> & { id?: string }): StreamRoute {
+  async addStream(
+    input: Omit<StreamRoute, "id"> & { id?: string },
+  ): Promise<StreamRoute> {
     const route = { ...input, id: input.id ?? randomUUID() };
     this.streams = validateStreamRoutes([...this.streams, route]);
     return clone(this.streams.find((item) => item.id === route.id)!);
   }
 
-  listCertificates(): CertificateStatus[] {
+  async listCertificates(): Promise<CertificateStatus[]> {
     return clone(this.certificates);
   }
 
@@ -168,7 +240,9 @@ export class InMemoryConfigurationStore {
     };
     if (input.issuer === "self-signed") {
       if (input.challenge !== "none" || !this.secretStore) {
-        throw new Error("Self-signed issuance requires challenge none and a master key");
+        throw new Error(
+          "Self-signed issuance requires challenge none and a master key",
+        );
       }
       const result: CertificateResult = await issueSelfSigned(input.hostnames, {
         secretStore: this.secretStore,
@@ -177,17 +251,23 @@ export class InMemoryConfigurationStore {
       certificate.status = "active";
       certificate.expiresAt = result.expiresAt;
       certificate.secretId = result.secretId;
+      certificate.certificatePem = result.certificatePem;
     }
     this.certificates.push(certificate);
     return clone(certificate);
   }
 
-  createApplyJob(actorUserId: string): { revisionId: string; job: JobRecord } {
+  async createApplyJob(
+    actorUserId: string,
+  ): Promise<{ revisionId: string; job: JobRecord }> {
     if (!this.settings.defaultPool) {
       throw new Error("Configure a default resolver pool before apply");
     }
-    const revision = this.revisions.create(this.snapshot(), actorUserId);
-    const job = this.jobs.enqueue({
+    const revision = await this.revisions.create(
+      await this.snapshot(),
+      actorUserId,
+    );
+    const job = await this.jobs.enqueue({
       revisionId: revision.id,
       target: "combined",
       correlationId: randomUUID(),
@@ -195,26 +275,28 @@ export class InMemoryConfigurationStore {
     return { revisionId: revision.id, job };
   }
 
-  status() {
+  async status() {
+    const desiredRevision = await this.revisions.latest();
+    const appliedRevision = this.appliedRevisionId
+      ? await this.revisions.get(this.appliedRevisionId)
+      : undefined;
     return {
-      desiredRevision: this.revisions.latest(),
-      appliedRevision: this.appliedRevisionId
-        ? this.revisions.get(this.appliedRevisionId)
-        : undefined,
-      jobs: this.jobs.list(),
-      settings: this.getSettings(),
-      zones: this.listZones(),
-      streams: this.listStreams(),
-      certificates: this.listCertificates(),
+      desiredRevision,
+      appliedRevision,
+      jobs: await this.jobs.list(),
+      settings: await this.getSettings(),
+      zones: await this.listZones(),
+      streams: await this.listStreams(),
+      certificates: await this.listCertificates(),
     };
   }
 
-  snapshot(): Record<string, unknown> {
+  async snapshot(): Promise<ConfigurationSnapshot> {
     return {
-      settings: this.getSettings(),
-      zones: this.listZones(),
-      streams: this.listStreams(),
-      certificates: this.listCertificates(),
+      settings: await this.getSettings(),
+      zones: await this.listZones(),
+      streams: await this.listStreams(),
+      certificates: await this.listCertificates(),
     };
   }
 }

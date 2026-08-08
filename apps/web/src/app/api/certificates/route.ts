@@ -5,7 +5,7 @@ export async function GET(request: Request) {
   try {
     await requireUser(request);
     return Response.json({
-      certificates: getWebContext().configuration.listCertificates(),
+      certificates: await getWebContext().configuration.listCertificates(),
     });
   } catch (error) {
     return apiError(error);

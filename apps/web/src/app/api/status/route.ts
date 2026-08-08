@@ -4,7 +4,7 @@ import { apiError, requireUser } from "../../../server/http";
 export async function GET(request: Request) {
   try {
     await requireUser(request);
-    const status = getWebContext().configuration.status();
+    const status = await getWebContext().configuration.status();
     return Response.json({
       ...status,
       desiredRevision: status.desiredRevision

@@ -4,7 +4,7 @@ import { apiError, readJson, requireUser } from "../../../server/http";
 export async function GET(request: Request) {
   try {
     await requireUser(request);
-    return Response.json({ settings: getWebContext().configuration.getSettings() });
+    return Response.json({ settings: await getWebContext().configuration.getSettings() });
   } catch (error) {
     return apiError(error);
   }
@@ -14,7 +14,7 @@ export async function PUT(request: Request) {
   try {
     await requireUser(request);
     const body = await readJson(request);
-    const settings = getWebContext().configuration.updateSettings({
+    const settings = await getWebContext().configuration.updateSettings({
       ingress:
         body.ingress && typeof body.ingress === "object"
           ? {
