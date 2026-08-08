@@ -47,6 +47,8 @@ export type ProxySettings = {
   certificateId?: string;
   http2?: boolean;
   http3?: boolean;
+  /** Raw server-level Nginx directives supplied by the operator. */
+  nginxDirectives?: string;
   headers?: HeaderRule[];
   pathRules?: PathRule[];
   basicAuth?: {
@@ -112,6 +114,35 @@ export type StreamRoute = {
   upstream: UpstreamTarget;
 };
 
+export type InstallationSettings = {
+  ingress: IngressAddresses;
+  defaultPool?: ResolverPool;
+  forwardingRules: ForwardingRule[];
+  retentionMaxAgeDays: number;
+  retentionMaxSizeMb: number;
+};
+
+export type ZoneState = {
+  id: string;
+  name: string;
+  enabled: boolean;
+  records: DnsRecord[];
+};
+
+export type CertificateStatus = {
+  id: string;
+  hostnames: string[];
+  issuer: "self-signed" | "letsencrypt";
+  challenge: "none" | "http-01" | "dns-01";
+  environment: string;
+  status: "pending" | "issued" | "active" | "expired" | "failed";
+  expiresAt?: Date;
+  renewAfter?: Date;
+  secretId?: string;
+  /** Public certificate PEM retained for data-plane materialization. */
+  certificatePem?: string;
+};
+
 export type Http3Capabilities = {
   http3Module: boolean;
   tcp443Published: boolean;
@@ -119,9 +150,4 @@ export type Http3Capabilities = {
 };
 
 export type JobStatus =
-  | "queued"
-  | "validating"
-  | "applying"
-  | "applied"
-  | "failed"
-  | "rolled-back";
+  "queued" | "validating" | "applying" | "applied" | "failed" | "rolled-back";

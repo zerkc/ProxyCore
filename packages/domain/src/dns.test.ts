@@ -108,4 +108,39 @@ describe("DNS domain rules", () => {
     ).toEqual(pool);
     expect(selectForwardingPool("example.net", [])).toBeUndefined();
   });
+
+  it("requires an active certificate covering proxied HTTPS records", () => {
+    const record = {
+      id: "https",
+      name: "api",
+      type: "A" as const,
+      value: "192.168.1.20",
+      enabled: true,
+      proxied: true,
+      proxy: {
+        origin: { ip: "192.168.1.20", port: 80, protocol: "http" as const },
+        tlsEnabled: true,
+        certificateId: "cert-api",
+      },
+    };
+    const options = {
+      zoneName: "home.arpa",
+      ingress: { ipv4: "192.168.1.10" },
+    };
+
+    expect(() => validateRecordSet([record], { ...options, certificates: [] })).toThrow(/certificate/i);
+    expect(
+      validateRecordSet([record], {
+        ...options,
+        certificates: [{
+          id: "cert-api",
+          hostnames: ["api.home.arpa"],
+          issuer: "self-signed",
+          challenge: "none",
+          environment: "staging",
+          status: "active",
+        }],
+      })[0].proxy?.certificateId,
+    ).toBe("cert-api");
+  });
 });

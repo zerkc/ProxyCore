@@ -1,8 +1,10 @@
 import { isIP } from "node:net";
 import { assertDomain } from "./errors";
+import { validateProxySettings } from "./proxy";
 import type {
   DnsRecord,
   DnsRecordInput,
+  CertificateStatus,
   ForwardingRule,
   IngressAddresses,
   MxValue,
@@ -10,7 +12,6 @@ import type {
   ResolverEndpoint,
   ResolverPool,
   SrvValue,
-  UpstreamTarget,
 } from "./model";
 
 export const MIN_TTL = 30;
@@ -57,7 +58,11 @@ export function canonicalRecordName(name: string, zoneName: string): string {
 
 export function validateRecordSet(
   records: DnsRecordInput[],
-  options: { zoneName: string; ingress?: IngressAddresses },
+  options: {
+    zoneName: string;
+    ingress?: IngressAddresses;
+    certificates?: CertificateStatus[];
+  },
 ): DnsRecord[] {
   const zoneName = normalizeDnsName(options.zoneName, false);
   const seenIds = new Set<string>();
@@ -84,9 +89,12 @@ export function validateRecordSet(
       );
       assertDomain(record.proxy, "Proxied records require proxy settings", "PROXY_SETTINGS_REQUIRED");
       validateIngressForRecord(record.type, options.ingress);
-      validateProxyOrigin(record.proxy.origin);
+      const proxy = validateProxySettings(record.proxy);
+      if (options.certificates !== undefined) {
+        validateProxyCertificate(name, proxy.tlsEnabled, proxy.certificateId, options.certificates);
+      }
     } else if (record.proxy) {
-      validateProxyOrigin(record.proxy.origin);
+      validateProxySettings(record.proxy);
     }
 
     return { ...record, name, ttl };
@@ -203,18 +211,33 @@ function validateIngressForRecord(
   }
 }
 
-function validateProxyOrigin(origin: UpstreamTarget): void {
-  assertDomain(origin && typeof origin === "object", "Proxy origin is required", "ORIGIN_REQUIRED");
-  assertDomain(isIP(origin.ip) > 0, "Proxy origin must be a literal IP", "ORIGIN_IP");
+function validateProxyCertificate(
+  hostname: string,
+  tlsEnabled: boolean,
+  certificateId: string | undefined,
+  certificates: CertificateStatus[] | undefined,
+): void {
+  if (!tlsEnabled) return;
+  assertDomain(certificateId, `Proxied TLS record ${hostname} requires a certificate`, "CERTIFICATE_REQUIRED");
+  if (!certificates) return;
+  const certificate = certificates.find((item) => item.id === certificateId);
+  assertDomain(certificate, `Certificate not found: ${certificateId}`, "CERTIFICATE_NOT_FOUND");
   assertDomain(
-    Number.isInteger(origin.port) && origin.port >= 1 && origin.port <= 65_535,
-    "Proxy origin port is invalid",
-    "ORIGIN_PORT",
+    certificate.status === "active" || certificate.status === "issued",
+    `Certificate is not active: ${certificateId}`,
+    "CERTIFICATE_NOT_ACTIVE",
   );
+  const normalizedHostname = hostname.toLowerCase().replace(/\.+$/, "");
   assertDomain(
-    origin.protocol === "http" || origin.protocol === "https",
-    "Proxy origin protocol must be http or https",
-    "ORIGIN_PROTOCOL",
+    certificate.hostnames.some((candidate) => {
+      const normalizedCandidate = candidate.toLowerCase().replace(/\.+$/, "");
+      return normalizedCandidate === normalizedHostname ||
+        (normalizedCandidate.startsWith("*.") &&
+          normalizedHostname.endsWith(normalizedCandidate.slice(1)) &&
+          normalizedHostname.split(".").length === normalizedCandidate.split(".").length);
+    }),
+    `Certificate does not cover ${hostname}`,
+    "CERTIFICATE_HOSTNAME",
   );
 }
 
