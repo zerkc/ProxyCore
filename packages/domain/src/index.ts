@@ -17,3 +17,4 @@ export * from "./jobs";
 export * from "./model";
 export * from "./paths";
 export * from "./proxy";
+export * from "./snapshot";
