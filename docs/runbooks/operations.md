@@ -6,6 +6,16 @@ The worker renders a revision, stages it, validates it, promotes it, reloads
 the target service, and checks health. A failed health check must result in a
 rollback or an explicit recovery-required job.
 
+The worker listens for PostgreSQL job notifications and wakes immediately when
+an apply is committed. It also reconciles the durable queue every 5 minutes by
+default (`WORKER_RECONCILIATION_INTERVAL_MS`). Jobs are claimed with a lease
+and are re-queued after the lease expires, so a missed notification or a
+restart does not discard desired state or an outstanding apply.
+
+Saving a zone or DNS record creates its revision and queues an immediate
+combined CoreDNS/Nginx apply. Consecutive saves are intentionally not batched;
+inspect `/api/status` when several edits are made in succession.
+
 Inspect current jobs and status through the authenticated API:
 
 ```sh
@@ -49,6 +59,10 @@ DNS-01 adapter.
 - HTTP-01 requires public port 80 to reach the challenge handler.
 - DNS-01 requires propagation of only `_acme-challenge` TXT records.
 - Never delete the active certificate during cleanup.
+- On apply, the worker materializes certificate PEM/key and Basic Auth htpasswd
+  files into the Nginx candidate directory under the shared `candidates` volume.
+  Nginx config references those absolute candidate paths; inspect them under
+  `/var/lib/proxycore/candidates/<revisionId>/nginx/` when debugging `nginx -t`.
 
 ## Retention
 

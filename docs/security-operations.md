@@ -41,8 +41,9 @@ Safe enough for a carefully exposed homelab ingress path, without pretending the
 ## Secrets
 
 - Master key outside PostgreSQL
-- Encrypt credentials and certificate private keys at rest
+- Encrypt credentials, Basic Auth password hashes, and certificate private keys at rest
 - Never return plaintext secrets in API/log/audit/rendered non-secret config
+- Basic Auth stores an encrypted `{SHA}` hash referenced by `passwordSecretId`; the worker writes htpasswd files into the Nginx candidate directory
 - Fail closed if the key is unavailable
 
 ## Input safety
@@ -57,7 +58,7 @@ Only explicit DNS IP:port endpoints; ordered fallback; managed zones authoritati
 
 ### Upstreams / Nginx
 
-Literal IP/port/protocol only; typed policy fields (no arbitrary Nginx directives); exact/prefix path rules with deterministic precedence; `nginx -t` before reload; Basic Auth requires client TLS; HTTPS default on but disableable per proxied record; HTTP/2 and HTTP/3 are explicit proxied-record settings; HTTP/3 requires verified binary support plus TCP/UDP 443; proxied DNS answers must be ingress addresses (never origin) while proxy is on; trusted proxy CIDRs only when configured.
+Literal IP/port/protocol only; typed policy fields plus explicitly bounded server-level Nginx directives from the Record dialog; exact/prefix path rules with deterministic precedence; `nginx -t` before reload; Basic Auth requires client TLS; HTTPS default on but disableable per proxied record; HTTP/2 and HTTP/3 are explicit proxied-record settings; HTTP/3 requires verified binary support plus TCP/UDP 443; proxied DNS answers must be ingress addresses (never origin) while proxy is on; trusted proxy CIDRs only when configured.
 
 ## TLS operations
 

@@ -44,7 +44,7 @@ Durable source of truth on the internal Compose network only.
 
 ### Secrets
 
-Master key outside PostgreSQL. Certificate private keys and provider credentials encrypted at rest. Plaintext never in API responses, ordinary logs, or non-secret rendered config.
+Master key outside PostgreSQL. Certificate private keys, Basic Auth password hashes, and provider credentials encrypted at rest. Plaintext never in API responses, ordinary logs, or non-secret rendered config. Basic Auth hashes are materialized by the worker into versioned htpasswd files beside the Nginx candidate on the shared candidates volume; Nginx config references those candidate paths and never embeds credentials.
 
 ### Worker
 
@@ -58,7 +58,7 @@ Separate process that:
 6. promotes and reloads through fixed helper operations;
 7. health-checks and records applied state or rolls back.
 
-The web process and worker have no raw Docker socket. Dual per-service control sidecars are deferred. The helper is the only component that may use the host/container control mechanism, and it exposes only fixed staging, validation, promotion, reload, health, and rollback operations for the named CoreDNS and Nginx services. User input cannot become shell commands or raw Nginx directives.
+The web process and worker have no raw Docker socket. Dual per-service control sidecars are deferred. The helper is the only component that may use the host/container control mechanism, and it exposes only fixed staging, validation, promotion, reload, health, and rollback operations for the named CoreDNS and Nginx services. User input cannot become shell commands; optional custom Nginx input is limited to validated server-level directive lines and cannot create configuration blocks.
 
 ## Data plane
 
@@ -77,7 +77,8 @@ Candidate validation: start pinned CoreDNS on an isolated port (e.g. 1053), chec
 ### Nginx (derived from proxied records)
 
 - HTTP/HTTPS reverse proxy generated from proxied A/AAAA/CNAME proxy settings
-- Typed exact/prefix path routing and redirects, headers, WebSocket, Basic Auth (TLS only)
+- Typed exact/prefix path routing and redirects, safe default headers, WebSocket, Basic Auth (TLS only; htpasswd files versioned with the Nginx candidate)
+- Optional server-level Nginx directives from the Record dialog; block braces and top-level context directives are rejected before rendering
 - HTTP/2 configurable; HTTP/3/QUIC configurable only when the binary exposes `ngx_http_v3_module` and both TCP/443 and UDP/443 are published
 - HTTPS on by default; can be disabled per proxied record
 - TCP/UDP stream proxy as separate resources (not the DNS proxy toggle)
@@ -91,7 +92,13 @@ Literal IPv4/IPv6 + port + protocol. No hostname upstreams. No address-class rej
 
 ### Proxy ingress addresses
 
-Installation-level IPv4/IPv6 values that CoreDNS returns for proxied names. They must reach ProxyCore’s Nginx listener (LAN IP or intended ingress). This is the homelab analogue of Cloudflare edge addresses.
+Installation-level IPv4/IPv6 values that CoreDNS returns for proxied names.
+The web process detects a non-loopback LAN address on a native host; in
+Compose, the first authenticated request made through a literal LAN host
+address initializes the value because a container cannot see the Docker
+host's LAN interfaces. The value is persisted and editable for another
+interface, NAT, or public ingress. It must reach ProxyCore's Nginx listener
+and must never be the internal Docker service address.
 
 ## Configuration lifecycle
 

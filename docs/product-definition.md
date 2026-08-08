@@ -7,11 +7,11 @@ The DNS experience is **Cloudflare-style**: manage a zone, add records, and togg
 ## Quick path
 
 1. Bootstrap the first Owner and create operators as needed.
-2. Set installation proxy ingress address(es) (the IPs clients should hit for proxied names).
-3. Create an internal zone and add records (including wildcards).
-4. Configure default DNS forwarders for names outside managed zones.
+2. Open the dashboard through the host's LAN address; ProxyCore detects and persists the advertised proxy address, which can be overridden in settings.
+3. Configure default DNS forwarders for names outside managed zones.
+4. Create an internal zone and add records (including wildcards); DNS saves apply through the worker automatically.
 5. On an A/AAAA/CNAME, enable proxy (Cloudflare-style), set origin port/protocol and TLS/certificate options.
-6. Apply through the worker; verify DNS + HTTP; roll back if needed.
+6. Verify DNS + HTTP; use manual re-apply or roll back if needed.
 
 ## Product boundary
 
@@ -77,7 +77,8 @@ Path behavior is a typed policy on each proxied record:
 - exact matches win over prefixes, then the longest prefix wins;
 - duplicate or ambiguous patterns are rejected before apply;
 - a rule may redirect with status 301, 302, 307, or 308, or proxy to the record's configured origin with an optional path rewrite;
-- arbitrary Nginx directives are not accepted.
+- optional server-level Nginx directives are accepted from the Record dialog;
+  configuration blocks and top-level context directives are not.
 
 ### TCP/UDP streams
 

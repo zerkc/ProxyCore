@@ -34,8 +34,8 @@ Focused verification: `pnpm test -- --runInBand` where supported and
 - [x] 2.3 Implement resolver pools/rules, literal upstreams, streams, and
   path policy precedence.
 - [x] 2.4 Implement Drizzle PostgreSQL schema and initial migration.
-- [x] 2.5 Implement repositories, transaction ports, in-memory adapters, and
-  retention-safe artifact operations.
+- [x] 2.5 Implement repositories, transaction ports, in-memory adapters,
+  PostgreSQL desired-state/job stores, and retention-safe artifact operations.
 
 Focused verification: domain unit tests plus repository contract tests.
 Runtime harness: `N/A` for pure domain; PostgreSQL contract is final Docker
@@ -88,7 +88,9 @@ boundary: certificate package and secret service.
 
 ## Phase 7 — Worker, control, and operations
 
-- [x] 7.1 Implement worker job claim/serialization and immutable snapshots.
+- [x] 7.1 Implement worker job claim/serialization, immutable snapshots,
+  PostgreSQL notification wake-up, five-minute reconciliation, and stale-claim
+  recovery.
 - [x] 7.2 Implement JSON-lines Unix-socket helper protocol and allowlist.
 - [x] 7.3 Implement candidate stage/validate/promote/reload/health/rollback
   orchestration with evidence.
@@ -101,7 +103,8 @@ boundary: worker/control/operations packages.
 
 ## Phase 8 — Web API and UI
 
-- [x] 8.1 Implement app composition and request/session context.
+- [x] 8.1 Implement app composition, persistent PostgreSQL request/session
+  context, and explicit in-memory test context.
 - [x] 8.2 Implement bootstrap/login/logout/session and users route handlers.
 - [x] 8.3 Implement settings, DNS, forwarding, proxy, streams, certificates,
   jobs, and health route handlers.
@@ -124,6 +127,17 @@ routes/pages and composition.
   rollback, and certificate staging checks.
 - [x] 9.6 Write and close the SDD verification matrix; keep only
   environment-dependent ACME/provider staging explicitly deferred.
+- [x] 9.7 Verify the API-to-worker persistent apply path, local managed DNS
+  answer, and web/worker restart persistence.
+- [x] 9.8 Queue an immediate combined apply when a zone or DNS record is saved,
+  return apply metadata from the mutation routes, and verify the same-transaction
+  behavior.
+- [x] 9.9 Default proxied DNS answers to a detected/persisted LAN advertised
+  address, avoid Docker container addresses, and retain an installation override.
+- [x] 9.10 Configure new DNS records through a dialog with HTTP/HTTPS selection,
+  certificate selection for HTTPS, and server-side certificate coverage checks.
+- [x] 9.11 Keep the worker heartbeat independent of the five-minute
+  reconciliation wait so the Compose healthcheck remains reliable while idle.
 
 Focused verification: `pnpm test`, `pnpm typecheck`, `pnpm lint`, `pnpm build`.
 Docker harness: `docker compose config` followed by the documented integration

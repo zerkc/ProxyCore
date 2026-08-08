@@ -38,7 +38,8 @@ Bootstrap, user CRUD, auth/sessions, desired revisions, jobs, certificate lifecy
 
 ### End-to-end journeys
 
-1. Bootstrap Owner; set proxy ingress addresses; create Operator
+1. Bootstrap Owner; access the dashboard through the LAN address so the proxy
+   advertised address is initialized; create Operator
 2. Create zone + DNS-only records; query via CoreDNS
 3. Query unmanaged name via default forwarder
 4. Enable proxy on an A record (Cloudflare-style); confirm DNS returns ingress IP, not origin

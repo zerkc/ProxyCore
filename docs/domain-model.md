@@ -87,8 +87,10 @@ Attached 1:1 to a proxied A/AAAA/CNAME record. Only one record for a canonical h
 - WebSocket and optional cache policy;
 - backend HTTPS verification policy;
 - timeouts / body limits when not using defaults.
+- optional normalized server-level Nginx directives; configuration blocks are
+  not stored.
 
-Path policies use exact or literal-prefix matches. Exact matches win over prefixes, then the longest prefix wins. A rule can redirect with status 301, 302, 307, or 308, or proxy to the record origin with an optional path rewrite. Regexes and arbitrary Nginx directives are not stored.
+Path policies use exact or literal-prefix matches. Exact matches win over prefixes, then the longest prefix wins. A rule can redirect with status 301, 302, 307, or 308, or proxy to the record origin with an optional path rewrite. Regexes and Nginx configuration blocks are not stored.
 
 Origin resolution for MVP:
 
