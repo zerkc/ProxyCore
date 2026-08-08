@@ -8,4 +8,17 @@ describe("configuration snapshots", () => {
 
     expect(checksumSnapshot(left)).toBe(checksumSnapshot(right));
   });
+
+  it("keeps optional undefined fields valid for JSON snapshots", () => {
+    const snapshot = createSnapshot({
+      settings: { ingress: { ipv4: undefined, ipv6: undefined } },
+      values: [undefined],
+    });
+
+    expect(snapshot).toEqual({
+      settings: { ingress: {} },
+      values: [null],
+    });
+    expect(checksumSnapshot(snapshot)).toHaveLength(64);
+  });
 });
