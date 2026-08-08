@@ -1,0 +1,46 @@
+schema: spec-driven
+
+context: |
+  Product: ProxyCore, a single-installation homelab control plane for local DNS,
+  Cloudflare-style DNS records, Nginx ingress, certificates, and local users.
+  Stack: Next.js App Router, TypeScript, PostgreSQL, Drizzle ORM, a worker,
+  a private service-control helper, CoreDNS, Nginx, and Docker Compose.
+  Testing: TDD with Vitest for domain/application code and Docker-backed
+  service verification only in the final verification phase.
+  Style: Spanish collaboration, English technical artifacts, typed validation,
+  deterministic renderers, least privilege, and explicit redaction.
+
+rules:
+  proposal:
+    - Preserve the reduced MVP boundary from docs/decision-log.md.
+    - Include a rollback plan for every risky configuration or deployment change.
+  specs:
+    - Use RFC 2119 keywords (MUST, SHALL, SHOULD, MAY).
+    - Express acceptance scenarios with Given/When/Then.
+    - Keep deferred features explicitly out of scope.
+  design:
+    - Include rationale for architecture decisions.
+    - Include sequence diagrams for apply, auth, and certificate flows.
+    - Keep the web process separate from service-control privileges.
+  tasks:
+    - Group tasks by phase and use hierarchical numbering.
+    - Keep each work unit verifiable and commit-ready.
+    - Include focused test, runtime harness, and rollback boundary.
+  apply:
+    tdd: true
+    guidelines:
+      - Write or extend a failing test before implementation.
+      - Keep tests with the behavior they verify.
+      - Do not add deferred product scope.
+    test_command: pnpm test
+  verify:
+    test_command: pnpm test
+    build_command: pnpm typecheck && pnpm build
+    coverage_threshold: 0
+  archive:
+    - Never delete archived change artifacts.
+    - Record blocked Docker verification explicitly instead of claiming success.
+
+delivery:
+  strategy: exception-ok
+  line_budget: 400

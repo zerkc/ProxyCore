@@ -1,0 +1,22 @@
+change: proxycore-mvp
+status: active
+mode: hybrid
+delivery_strategy: exception-ok
+current_phase: propose
+completed_phases:
+  - explore
+pending_phases:
+  - propose
+  - spec
+  - design
+  - tasks
+  - apply
+  - verify
+  - archive
+artifacts:
+  proposal: openspec/changes/proxycore-mvp/proposal.md
+  specs: openspec/changes/proxycore-mvp/specs
+  design: openspec/changes/proxycore-mvp/design.md
+  tasks: openspec/changes/proxycore-mvp/tasks.md
+  verify: openspec/changes/proxycore-mvp/verify-report.md
+engram_prefix: sdd/proxycore-mvp
