@@ -1,16 +1,17 @@
 change: proxycore-mvp
-status: active
+status: verified-partial
 mode: hybrid
 delivery_strategy: exception-ok
-current_phase: propose
+current_phase: verify
+docker_verification: blocked-daemon-unavailable
 completed_phases:
   - explore
-pending_phases:
   - propose
   - spec
   - design
   - tasks
   - apply
+pending_phases:
   - verify
   - archive
 artifacts:
