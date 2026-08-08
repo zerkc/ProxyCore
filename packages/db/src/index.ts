@@ -15,3 +15,5 @@ export * from "./schema";
 export * from "./ports";
 export * from "./auth-store";
 export * from "./secret-store";
+export * from "./persistence";
+export * from "./notifications";

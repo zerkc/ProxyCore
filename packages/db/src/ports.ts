@@ -17,16 +17,19 @@ export type RevisionRecord = {
 };
 
 export interface RevisionStore {
-  create(snapshot: ConfigurationSnapshot, actorUserId?: string): RevisionRecord;
-  get(id: string): RevisionRecord | undefined;
-  latest(): RevisionRecord | undefined;
-  markApplied(id: string, appliedAt?: Date): RevisionRecord;
+  create(snapshot: ConfigurationSnapshot, actorUserId?: string): Promise<RevisionRecord>;
+  get(id: string): Promise<RevisionRecord | undefined>;
+  latest(): Promise<RevisionRecord | undefined>;
+  markApplied(id: string, appliedAt?: Date): Promise<RevisionRecord>;
 }
+
+export type JobTarget = "coredns" | "nginx" | "combined" | "certificate";
 
 export type JobRecord = {
   id: string;
   revisionId: string;
-  target: "coredns" | "nginx" | "combined" | "certificate";
+  actorUserId?: string;
+  target: JobTarget;
   status: JobStatus;
   correlationId: string;
   createdAt: Date;
@@ -42,18 +45,19 @@ export type JobRecord = {
 export interface JobStore {
   enqueue(
     job: Omit<JobRecord, "id" | "status" | "createdAt"> & { status?: JobStatus },
-  ): JobRecord;
-  get(id: string): JobRecord | undefined;
-  claimNext(target: JobRecord["target"]): JobRecord | undefined;
-  update(id: string, patch: Partial<JobRecord>): JobRecord;
-  list(): JobRecord[];
+  ): Promise<JobRecord>;
+  get(id: string): Promise<JobRecord | undefined>;
+  claimNext(target?: JobTarget): Promise<JobRecord | undefined>;
+  recoverStale(leaseMs: number, now?: Date): Promise<number>;
+  update(id: string, patch: Partial<JobRecord>): Promise<JobRecord>;
+  list(): Promise<JobRecord[]>;
 }
 
 export class InMemoryRevisionStore implements RevisionStore {
   private readonly records = new Map<string, RevisionRecord>();
   private nextNumber = 1;
 
-  create(snapshot: ConfigurationSnapshot, actorUserId?: string): RevisionRecord {
+  async create(snapshot: ConfigurationSnapshot, actorUserId?: string): Promise<RevisionRecord> {
     const normalized = createSnapshot(snapshot);
     const record: RevisionRecord = {
       id: randomUUID(),
@@ -67,15 +71,15 @@ export class InMemoryRevisionStore implements RevisionStore {
     return record;
   }
 
-  get(id: string): RevisionRecord | undefined {
+  async get(id: string): Promise<RevisionRecord | undefined> {
     return this.records.get(id);
   }
 
-  latest(): RevisionRecord | undefined {
+  async latest(): Promise<RevisionRecord | undefined> {
     return [...this.records.values()].at(-1);
   }
 
-  markApplied(id: string, appliedAt = new Date()): RevisionRecord {
+  async markApplied(id: string, appliedAt = new Date()): Promise<RevisionRecord> {
     const record = this.records.get(id);
     if (!record) {
       throw new Error(`Revision not found: ${id}`);
@@ -90,9 +94,9 @@ export class InMemoryJobStore implements JobStore {
   private readonly records = new Map<string, JobRecord>();
   private readonly activeTargets = new Set<JobRecord["target"]>();
 
-  enqueue(
+  async enqueue(
     job: Omit<JobRecord, "id" | "status" | "createdAt"> & { status?: JobStatus },
-  ): JobRecord {
+  ): Promise<JobRecord> {
     const record: JobRecord = {
       ...job,
       id: randomUUID(),
@@ -103,21 +107,24 @@ export class InMemoryJobStore implements JobStore {
     return record;
   }
 
-  get(id: string): JobRecord | undefined {
+  async get(id: string): Promise<JobRecord | undefined> {
     return this.records.get(id);
   }
 
-  claimNext(target: JobRecord["target"]): JobRecord | undefined {
-    if (this.activeTargets.has(target)) {
+  async claimNext(target?: JobTarget): Promise<JobRecord | undefined> {
+    if (target && this.activeTargets.has(target)) {
       return undefined;
     }
     const next = [...this.records.values()].find(
-      (job) => job.target === target && job.status === "queued",
+      (job) =>
+        (target === undefined || job.target === target) &&
+        job.status === "queued" &&
+        !this.activeTargets.has(job.target),
     );
     if (!next) {
       return undefined;
     }
-    this.activeTargets.add(target);
+    this.activeTargets.add(next.target);
     return this.update(next.id, {
       status: "validating",
       claimedAt: new Date(),
@@ -125,7 +132,28 @@ export class InMemoryJobStore implements JobStore {
     });
   }
 
-  update(id: string, patch: Partial<JobRecord>): JobRecord {
+  async recoverStale(leaseMs: number, now = new Date()): Promise<number> {
+    let recovered = 0;
+    for (const job of this.records.values()) {
+      if (
+        (job.status === "validating" || job.status === "applying") &&
+        job.claimedAt &&
+        now.getTime() - job.claimedAt.getTime() > leaseMs
+      ) {
+        this.records.set(job.id, {
+          ...job,
+          status: "queued",
+          claimedAt: undefined,
+          startedAt: undefined,
+        });
+        this.activeTargets.delete(job.target);
+        recovered += 1;
+      }
+    }
+    return recovered;
+  }
+
+  async update(id: string, patch: Partial<JobRecord>): Promise<JobRecord> {
     const current = this.records.get(id);
     if (!current) {
       throw new Error(`Job not found: ${id}`);
@@ -142,7 +170,7 @@ export class InMemoryJobStore implements JobStore {
     return updated;
   }
 
-  list(): JobRecord[] {
+  async list(): Promise<JobRecord[]> {
     return [...this.records.values()];
   }
 }
