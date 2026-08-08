@@ -14,3 +14,4 @@ export function createDatabase(databaseUrl = loadConfig().databaseUrl) {
 export * from "./schema";
 export * from "./ports";
 export * from "./auth-store";
+export * from "./secret-store";
