@@ -1,0 +1,11 @@
+.:53 {
+    errors
+    health
+    ready
+    loop
+    reload
+    cache 30
+    forward . 1.1.1.1:53 9.9.9.9:53 {
+        policy sequential
+    }
+}

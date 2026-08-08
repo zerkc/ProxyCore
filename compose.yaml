@@ -1,0 +1,117 @@
+name: proxycore
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-proxycore}
+      POSTGRES_USER: ${POSTGRES_USER:-proxycore}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    networks: [control]
+
+  web:
+    build:
+      context: .
+      dockerfile: infra/compose/Dockerfile.web
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgres://${POSTGRES_USER:-proxycore}:${POSTGRES_PASSWORD:-change-me}@postgres:5432/${POSTGRES_DB:-proxycore}
+      PROXYCORE_MASTER_KEY_BASE64: ${PROXYCORE_MASTER_KEY_BASE64:?set a 32-byte base64 master key}
+      WORKER_SOCKET_PATH: /run/proxycore/control.sock
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "${WEB_PORT:-3000}:3000"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+    networks: [control]
+
+  worker:
+    build:
+      context: .
+      dockerfile: infra/compose/Dockerfile.worker
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgres://${POSTGRES_USER:-proxycore}:${POSTGRES_PASSWORD:-change-me}@postgres:5432/${POSTGRES_DB:-proxycore}
+      PROXYCORE_MASTER_KEY_BASE64: ${PROXYCORE_MASTER_KEY_BASE64:?set a 32-byte base64 master key}
+      WORKER_SOCKET_PATH: /run/proxycore/control.sock
+    volumes:
+      - candidates:/var/lib/proxycore
+      - control-socket:/run/proxycore
+    depends_on:
+      postgres:
+        condition: service_healthy
+      control:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /run/proxycore/worker.heartbeat && test $$(($(date +%s)-$$(stat -c %Y /run/proxycore/worker.heartbeat))) -lt 180"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    networks: [control]
+
+  control:
+    build:
+      context: .
+      dockerfile: infra/compose/Dockerfile.control
+    environment:
+      NODE_ENV: production
+      WORKER_SOCKET_PATH: /run/proxycore/control.sock
+    volumes:
+      - candidates:/var/lib/proxycore
+      - control-socket:/run/proxycore
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    healthcheck:
+      test: ["CMD-SHELL", "test -S /run/proxycore/control.sock"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+    networks: [control]
+
+  coredns:
+    image: coredns/coredns:1.12.2
+    command: ["-conf", "/etc/coredns/Corefile"]
+    volumes:
+      - ./infra/coredns:/etc/coredns:ro
+    ports:
+      - "${DNS_PORT:-53}:53/tcp"
+      - "${DNS_PORT:-53}:53/udp"
+    networks: [data]
+
+  nginx:
+    image: ${NGINX_IMAGE:-nginx:1.30.4-alpine-slim}
+    volumes:
+      - ./infra/nginx:/etc/nginx:ro
+      - certificates:/etc/nginx/certs:ro
+      - candidates:/var/lib/proxycore:ro
+    ports:
+      - "${HTTP_PORT:-80}:80/tcp"
+      - "${HTTPS_PORT:-443}:443/tcp"
+      - "${HTTPS_PORT:-443}:443/udp"
+    healthcheck:
+      test: ["CMD", "nginx", "-t"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+    networks: [data]
+
+volumes:
+  postgres-data:
+  candidates:
+  control-socket:
+  certificates:
+
+networks:
+  control:
+  data:

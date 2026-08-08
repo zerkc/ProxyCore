@@ -1,0 +1,19 @@
+FROM node:24.19.0-alpine
+
+WORKDIR /app
+RUN corepack enable && corepack prepare pnpm@11.16.0 --activate
+
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.json ./
+COPY apps/web ./apps/web
+COPY apps/control ./apps/control
+COPY apps/worker ./apps/worker
+COPY packages ./packages
+COPY drizzle.config.ts vitest.config.ts eslint.config.mjs ./
+
+RUN pnpm install --frozen-lockfile && pnpm build
+
+ENV HOSTNAME=0.0.0.0
+ENV PORT=3000
+EXPOSE 3000
+
+CMD ["pnpm", "start"]
