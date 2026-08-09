@@ -13,9 +13,16 @@ export type NginxRenderInput = {
   streams: StreamRoute[];
   capabilities: Http3Capabilities;
   candidatePath?: string;
+  /**
+   * Upstream used by the ACME HTTP-01 challenge location.
+   * Defaults to the host-published web port (nginx runs with network_mode: host).
+   */
+  acmeUpstream?: string;
   /** Additional candidate files such as Basic Auth htpasswd and TLS cert/key material. */
   extraFiles?: Record<string, string>;
 };
+
+const DEFAULT_ACME_UPSTREAM = "http://127.0.0.1:3000";
 
 export type NginxCandidate = {
   config: string;
@@ -29,10 +36,11 @@ export function renderNginxCandidate(input: NginxRenderInput): NginxCandidate {
     .filter((record) => record.enabled && record.proxied)
     .sort((left, right) => left.name.localeCompare(right.name));
   const candidatePath = input.candidatePath?.replace(/\/+$/, "");
+  const acmeUpstream = normalizeAcmeUpstream(input.acmeUpstream);
   const servers = [
-    renderAcmeDefaultServer(),
+    renderAcmeDefaultServer(acmeUpstream),
     ...records.map((record) =>
-      renderServer(record, input.capabilities, candidatePath),
+      renderServer(record, input.capabilities, candidatePath, acmeUpstream),
     ),
   ].join("\n\n");
   const streamConfig = streams.length > 0 ? renderStreams(streams) : "";
@@ -78,6 +86,7 @@ function renderServer(
   record: DnsRecord,
   capabilities: Http3Capabilities,
   candidatePath: string | undefined,
+  acmeUpstream: string,
 ): string {
   if (!record.proxy) {
     throw new Error(`Proxied record ${record.name} has no proxy settings`);
@@ -104,7 +113,7 @@ function renderServer(
         ]
       : []),
     `    server_name ${record.name};`,
-    ...renderAcmeChallengeLocation(),
+    ...renderAcmeChallengeLocation(acmeUpstream),
     ...(settings.tlsEnabled
       ? [
           `    ssl_certificate ${certificateFilePath(settings.certificateId!, candidatePath, "crt")};`,
@@ -132,7 +141,7 @@ function renderServer(
       "    listen 80;",
       "    listen [::]:80;",
       `    server_name ${record.name};`,
-      ...renderAcmeChallengeLocation(),
+      ...renderAcmeChallengeLocation(acmeUpstream),
       "    return 308 https://$host$request_uri;",
       "}",
       "",
@@ -142,13 +151,13 @@ function renderServer(
   return serverLines.join("\n");
 }
 
-function renderAcmeDefaultServer(): string {
+function renderAcmeDefaultServer(acmeUpstream: string): string {
   return [
     "server {",
     "    listen 80 default_server;",
     "    listen [::]:80 default_server;",
     "    server_name _;",
-    ...renderAcmeChallengeLocation(),
+    ...renderAcmeChallengeLocation(acmeUpstream),
     "    location ^~ / {",
     "        return 404;",
     "    }",
@@ -156,15 +165,23 @@ function renderAcmeDefaultServer(): string {
   ].join("\n");
 }
 
-function renderAcmeChallengeLocation(): string[] {
+function renderAcmeChallengeLocation(acmeUpstream: string): string[] {
   return [
     "    location ^~ /.well-known/acme-challenge/ {",
-    "        proxy_pass http://web:3000/api/acme-challenge/;",
+    `        proxy_pass ${acmeUpstream}/api/acme-challenge/;`,
     "        proxy_set_header Host $host;",
     "        proxy_set_header X-Forwarded-Proto $scheme;",
     "        proxy_set_header X-Real-IP $remote_addr;",
     "    }",
   ];
+}
+
+function normalizeAcmeUpstream(value: string | undefined): string {
+  const upstream = (value ?? DEFAULT_ACME_UPSTREAM).trim().replace(/\/+$/, "");
+  if (!/^https?:\/\/[^/\s]+$/i.test(upstream)) {
+    throw new Error(`Invalid NGINX ACME upstream: ${value ?? ""}`);
+  }
+  return upstream;
 }
 
 function renderCommonProxyDirectives(

@@ -82,7 +82,20 @@ async function main(): Promise<void> {
       reconciliationIntervalMs,
       wakeup,
       signal: controller.signal,
-      renderOptions: { candidateRoot, secretStore },
+      renderOptions: {
+        candidateRoot,
+        secretStore,
+        acmeUpstream: process.env.NGINX_ACME_UPSTREAM,
+        capabilities: {
+          http3Module: process.env.NGINX_HTTP3_MODULE === "1",
+          tcp443Published:
+            process.env.NGINX_NETWORK_MODE === "host" ||
+            process.env.NGINX_TCP_443_PUBLISHED === "1",
+          udp443Published:
+            process.env.NGINX_NETWORK_MODE === "host" ||
+            process.env.NGINX_UDP_443_PUBLISHED === "1",
+        },
+      },
       heartbeat,
       onError: (error) => {
         process.stderr.write(

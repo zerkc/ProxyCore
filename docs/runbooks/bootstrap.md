@@ -1,9 +1,35 @@
 # ProxyCore Bootstrap Runbook
 
-## Preconditions
+## One-line install / update
+
+On a Linux host with Docker Engine + Compose v2 and Git:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/zerkc/ProxyCore/main/scripts/install.sh | sh
+```
+
+The script clones or updates the checkout (default `/opt/proxycore` as root,
+otherwise `~/proxycore`), creates `.env` with generated secrets on first run,
+starts PostgreSQL, applies migrations, and brings the stack up with **Nginx in
+`network_mode: host`** so HTTP/HTTPS and stream ports bind directly on the host.
+
+Optional environment variables before `| sh`:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `PROXYCORE_HOME` | `/opt/proxycore` or `~/proxycore` | Install directory |
+| `PROXYCORE_BRANCH` | `main` | Git branch |
+| `WEB_PORT` | `3000` | Control-plane port |
+| `DNS_PORT` | `53` | CoreDNS publish port |
+| `SKIP_BUILD` | `0` | Set `1` to recreate without rebuild |
+
+Re-run the same command to update: pull, migrate, rebuild/recreate. `.env` is
+preserved.
+
+## Manual preconditions
 
 1. Install Docker Engine with Compose v2.
-2. Create a private `.env` from `.env.example`.
+2. Create a private `.env` from `.env.example` (skipped when using `install.sh`).
 3. Generate a 32-byte master key outside the repository:
 
    ```sh
@@ -11,16 +37,17 @@
    ```
 
 4. Set `PROXYCORE_MASTER_KEY_BASE64` and change the PostgreSQL password.
-5. If publishing HTTP/HTTPS, confirm ports 80 and 443 are available. HTTP/3
-   additionally requires both TCP and UDP 443.
+5. Confirm host ports 80 and 443 are free for Nginx host networking. HTTP/3
+   additionally requires both TCP and UDP 443. CoreDNS publishes `DNS_PORT`
+   (default 53).
 
-## Start
+## Manual start
 
 ```sh
 docker compose config
 docker compose up -d postgres
 docker compose run --rm web pnpm db:migrate
-docker compose up -d
+docker compose up -d --build
 ```
 
 Open `/bootstrap` once and create the first Owner. The bootstrap endpoint must
@@ -45,9 +72,13 @@ Invalid desired state must never replace the last applied revision.
 
 ## Compose smoke test
 
+Nginx listens on the host network namespace. On Linux, the demo upstream at
+`172.30.0.10:80` is usually reachable from host-mode Nginx via the Compose
+`data` bridge.
+
 ```sh
 # After bootstrap + network settings + zone
-# 1) Issue cert for app.home.arpa in the Streams view
+# 1) Issue cert for app.home.arpa in the Certificates view
 # 2) Add proxied A record app → any DNS value, origin 172.30.0.10:80
 # 3) Wait for apply, then:
 curl -vk --resolve app.home.arpa:443:127.0.0.1 https://app.home.arpa/

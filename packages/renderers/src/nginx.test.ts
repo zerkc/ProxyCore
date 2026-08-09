@@ -55,7 +55,7 @@ describe("Nginx renderer", () => {
     expect(candidate.config).toContain("location = /health");
     expect(candidate.config).toContain("return 307 /ready;");
     expect(candidate.config).toContain(
-      "proxy_pass http://web:3000/api/acme-challenge/;",
+      "proxy_pass http://127.0.0.1:3000/api/acme-challenge/;",
     );
     expect(candidate.config).toContain("proxy_set_header x-homelab proxycore;");
     expect(candidate.config).toContain("client_max_body_size 100m;");

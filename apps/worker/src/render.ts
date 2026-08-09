@@ -25,6 +25,7 @@ export type WorkerRenderOptions = {
   candidateRoot?: string;
   capabilities?: Http3Capabilities;
   secretStore?: SecretStore;
+  acmeUpstream?: string;
 };
 
 export async function renderJobCandidates(
@@ -85,6 +86,7 @@ export async function renderJobCandidates(
         streams: desired.streams ?? [],
         capabilities,
         candidatePath,
+        acmeUpstream: options.acmeUpstream,
         extraFiles: secretFiles,
       });
       return nginxCandidate(candidate, candidatePath);
