@@ -8,7 +8,7 @@ This log records product decisions. It is intentionally separate from implementa
 | --- | --- | --- |
 | DEC-001 | ProxyCore is a single-homelab control plane for internal DNS and ingress. | Production-like safety without starting as a multi-tenant platform. |
 | DEC-002 | The first deployment target is Docker Compose on one Linux host. | Matches the homelab operating model. |
-| DEC-003 | The application stack is Next.js, TypeScript, App Router, and Tailwind. | One modern web runtime for UI and control-plane API. |
+| DEC-003 | **Superseded by DEC-050 for the control plane:** Originally Next.js, TypeScript, App Router, and Tailwind. | Superseded to fit small-host build/runtime budgets. |
 | DEC-004 | PostgreSQL with Drizzle ORM is the durable application store. | Desired state, identity, jobs, and audit need transactional persistence. |
 | DEC-005 | CoreDNS is authoritative for managed zones and forwards unmanaged queries to configured resolvers. | ProxyCore is the sole homelab DNS server; non-managed names must still resolve. |
 | DEC-006 | Public zones remain with external DNS providers; ProxyCore is not a public authoritative nameserver in the first release. | Public authority is outside the first control-plane scope. |
@@ -55,6 +55,7 @@ This log records product decisions. It is intentionally separate from implementa
 | DEC-047 | A single service-control helper receives fixed operations over a private Unix socket. The worker writes and validates candidates but has no raw Docker socket; the helper controls only the named CoreDNS/Nginx services and cannot execute arbitrary commands. | Balances least privilege and MVP simplicity without adding two per-service control sidecars. |
 | DEC-048 | Proxied DNS answers use the installation's advertised LAN/public address. ProxyCore detects a non-loopback LAN address on native startup or initializes it from a literal LAN host used for the first authenticated Compose request; the persisted value remains editable in installation settings and Docker container addresses are never used. | Removes unnecessary per-record ingress setup while preserving correct routing for LAN, NAT, and public deployments. |
 | DEC-049 | The Record dialog is organized into tabs and includes an optional server-level Nginx directives textarea. The input is normalized and bounded, rejects braces and top-level context directives, and matching generated directive names are omitted so operators can override values such as `client_max_body_size`. | Provides direct control for advanced Nginx settings without allowing configuration blocks or requiring a new UI field for every directive. |
+| DEC-050 | Control-plane HTTP and admin UI move from Next.js to a Go API serving a static Vite + React SPA. PostgreSQL remains for this attempt (SQLite deferred). Node worker and service-control helper remain until a later change. | Next.js build/runtime is too heavy for ~1 GB homelab builders/hosts; Go+Vite preserves the operator UX with a much smaller build footprint. |
 
 ## Superseded earlier emphasis
 

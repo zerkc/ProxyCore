@@ -1,0 +1,24 @@
+change: control-plane-go-spa
+status: verified-partial
+mode: hybrid
+delivery_strategy: exception-ok
+current_phase: verify
+docker_verification: compose-config-only
+completed_phases:
+  - explore
+  - propose
+  - spec
+  - design
+  - tasks
+  - apply
+  - verify
+pending_phases:
+  - archive
+
+artifacts:
+  proposal: openspec/changes/control-plane-go-spa/proposal.md
+  exploration: openspec/changes/control-plane-go-spa/exploration.md
+  specs: openspec/changes/control-plane-go-spa/specs
+  design: openspec/changes/control-plane-go-spa/design.md
+  tasks: openspec/changes/control-plane-go-spa/tasks.md
+engram_prefix: sdd/control-plane-go-spa

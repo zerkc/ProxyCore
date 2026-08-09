@@ -3,10 +3,12 @@ schema: spec-driven
 context: |
   Product: ProxyCore, a single-installation homelab control plane for local DNS,
   Cloudflare-style DNS records, Nginx ingress, certificates, and local users.
-  Stack: Next.js App Router, TypeScript, PostgreSQL, Drizzle ORM, a worker,
-  a private service-control helper, CoreDNS, Nginx, and Docker Compose.
-  Testing: TDD with Vitest for domain/application code and Docker-backed
-  service verification only in the final verification phase.
+  Stack (active migration): Go HTTP API + Vite/React SPA for the control plane,
+  PostgreSQL (Drizzle migrations via Node one-shot until Go owns them), Node
+  worker, Node service-control helper, CoreDNS, Nginx, Docker Compose.
+  Legacy: Next.js App Router under apps/web is not on the default Compose path.
+  Testing: TDD with Go tests for the API, Vitest for remaining Node packages,
+  Docker-backed verification only in the final phase.
   Style: Spanish collaboration, English technical artifacts, typed validation,
   deterministic renderers, least privilege, and explicit redaction.
 
@@ -32,10 +34,10 @@ rules:
       - Write or extend a failing test before implementation.
       - Keep tests with the behavior they verify.
       - Do not add deferred product scope.
-    test_command: pnpm test
+    test_command: cd apps/api && go test ./...
   verify:
-    test_command: pnpm test
-    build_command: pnpm typecheck && pnpm build
+    test_command: cd apps/api && go test ./...
+    build_command: cd apps/api && go test ./... && pnpm --dir apps/ui build
     coverage_threshold: 0
   archive:
     - Never delete archived change artifacts.
