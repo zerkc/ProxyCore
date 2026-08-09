@@ -154,13 +154,13 @@ main() {
   wait_postgres
 
   log "Applying database migrations"
-  docker compose run --rm --no-deps web pnpm db:migrate
+  docker compose --profile tools run --rm migrate
 
   if [ "$SKIP_BUILD" = "1" ]; then
     log "Recreating services (no rebuild)"
     docker compose up -d --remove-orphans
   else
-    log "Building and starting services (nginx network_mode=host)"
+    log "Building and starting services (Go API + Vite SPA; nginx host network)"
     docker compose up -d --build --remove-orphans
   fi
 

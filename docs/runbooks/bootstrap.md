@@ -10,8 +10,10 @@ curl -fsSL https://raw.githubusercontent.com/zerkc/ProxyCore/main/scripts/instal
 
 The script clones or updates the checkout (default `/opt/proxycore` as root,
 otherwise `~/proxycore`), creates `.env` with generated secrets on first run,
-starts PostgreSQL, applies migrations, and brings the stack up with **Nginx in
-`network_mode: host`** so HTTP/HTTPS and stream ports bind directly on the host.
+starts PostgreSQL, applies migrations, and brings the stack up with the **Go
+API + Vite SPA** control plane (no Next.js) and **Nginx in `network_mode: host`**
+so HTTP/HTTPS and stream ports bind directly on the host. Configuration routes
+may still be served by the transitional `node-api` (tsx) behind the Go edge.
 
 Optional environment variables before `| sh`:
 

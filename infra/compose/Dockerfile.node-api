@@ -1,0 +1,17 @@
+# Configuration API without Next.js build (tsx entrypoint).
+# Prefer building off-box on 1GB hosts; still lighter than `next build`.
+FROM node:24.19.0-alpine
+WORKDIR /app
+RUN corepack enable && corepack prepare pnpm@11.16.0 --activate
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.json ./
+COPY packages ./packages
+COPY apps/web ./apps/web
+COPY apps/control ./apps/control
+COPY apps/worker ./apps/worker
+COPY drizzle.config.ts ./
+RUN pnpm install --frozen-lockfile
+ENV NODE_ENV=production
+ENV PROXYCORE_RUNTIME=container
+ENV PROXYCORE_NODE_API_PORT=3001
+EXPOSE 3001
+CMD ["pnpm", "exec", "tsx", "apps/web/src/standalone.ts"]
