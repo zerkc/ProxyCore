@@ -11,9 +11,8 @@
     "moduleResolution": "bundler",
     "resolveJsonModule": true,
     "isolatedModules": true,
-    "jsx": "preserve",
+    "jsx": "react-jsx",
     "incremental": true,
-    "plugins": [{ "name": "next" }],
     "paths": {
       "@proxycore/domain": ["./packages/domain/src/index.ts"],
       "@proxycore/domain/*": ["./packages/domain/src/*"],
@@ -32,12 +31,12 @@
     }
   },
   "include": [
-    "next-env.d.ts",
-    "apps/**/*.ts",
-    "apps/**/*.tsx",
+    "apps/web/**/*.ts",
+    "apps/web/**/*.tsx",
+    "apps/worker/**/*.ts",
+    "apps/control/**/*.ts",
     "packages/**/*.ts",
-    "packages/**/*.tsx",
-    ".next/types/**/*.ts"
+    "packages/**/*.tsx"
   ],
-  "exclude": ["node_modules"]
+  "exclude": ["node_modules", "apps/ui", "apps/api"]
 }

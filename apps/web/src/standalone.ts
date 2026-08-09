@@ -33,10 +33,21 @@ import { POST as postBootstrap } from "./app/api/auth/bootstrap/route";
 import { POST as postLogin } from "./app/api/auth/login/route";
 import { POST as postLogout } from "./app/api/auth/logout/route";
 
+type RouteContext = { params: Promise<Record<string, string>> };
 type Handler = (
   request: Request,
-  context?: { params: Promise<Record<string, string>> },
-) => Promise<Response>;
+  context: RouteContext,
+) => Response | Promise<Response>;
+
+function asHandler(
+  handler: (request: Request, context: RouteContext) => Response | Promise<Response>,
+): Handler {
+  return (request, context) => handler(request, context);
+}
+
+function asSimpleHandler(handler: () => Response | Promise<Response>): Handler {
+  return () => handler();
+}
 
 const port = Number(process.env.PROXYCORE_NODE_API_PORT ?? 3001);
 
@@ -74,7 +85,7 @@ async function dispatch(
   const request = new Request(url, {
     method: req.method,
     headers,
-    body,
+    body: body && body.length > 0 ? new Uint8Array(body) : undefined,
   });
 
   const matched = matchRoute(req.method ?? "GET", url.pathname);
@@ -106,114 +117,149 @@ function matchRoute(
     keys: string[];
     handler: Handler;
   }> = [
-    { method: "GET", pattern: /^\/api\/health$/, keys: [], handler: getHealth },
-    { method: "GET", pattern: /^\/api\/status$/, keys: [], handler: getStatus },
-    { method: "POST", pattern: /^\/api\/apply$/, keys: [], handler: postApply },
+    {
+      method: "GET",
+      pattern: /^\/api\/health$/,
+      keys: [],
+      handler: asSimpleHandler(getHealth),
+    },
+    {
+      method: "GET",
+      pattern: /^\/api\/status$/,
+      keys: [],
+      handler: asHandler(getStatus),
+    },
+    {
+      method: "POST",
+      pattern: /^\/api\/apply$/,
+      keys: [],
+      handler: asHandler(postApply),
+    },
     {
       method: "GET",
       pattern: /^\/api\/settings$/,
       keys: [],
-      handler: getSettings,
+      handler: asHandler(getSettings),
     },
     {
       method: "PUT",
       pattern: /^\/api\/settings$/,
       keys: [],
-      handler: putSettings,
+      handler: asHandler(putSettings),
     },
-    { method: "GET", pattern: /^\/api\/users$/, keys: [], handler: getUsers },
-    { method: "POST", pattern: /^\/api\/users$/, keys: [], handler: postUsers },
+    {
+      method: "GET",
+      pattern: /^\/api\/users$/,
+      keys: [],
+      handler: asHandler(getUsers),
+    },
+    {
+      method: "POST",
+      pattern: /^\/api\/users$/,
+      keys: [],
+      handler: asHandler(postUsers),
+    },
     {
       method: "PATCH",
       pattern: /^\/api\/users\/([^/]+)$/,
       keys: ["userId"],
-      handler: patchUser,
+      handler: asHandler(patchUser as Handler),
     },
     {
       method: "DELETE",
       pattern: /^\/api\/users\/([^/]+)$/,
       keys: ["userId"],
-      handler: deleteUser,
+      handler: asHandler(deleteUser as Handler),
     },
-    { method: "GET", pattern: /^\/api\/zones$/, keys: [], handler: getZones },
-    { method: "POST", pattern: /^\/api\/zones$/, keys: [], handler: postZones },
+    {
+      method: "GET",
+      pattern: /^\/api\/zones$/,
+      keys: [],
+      handler: asHandler(getZones),
+    },
+    {
+      method: "POST",
+      pattern: /^\/api\/zones$/,
+      keys: [],
+      handler: asHandler(postZones),
+    },
     {
       method: "GET",
       pattern: /^\/api\/zones\/([^/]+)\/records$/,
       keys: ["zoneId"],
-      handler: getRecords,
+      handler: asHandler(getRecords as Handler),
     },
     {
       method: "POST",
       pattern: /^\/api\/zones\/([^/]+)\/records$/,
       keys: ["zoneId"],
-      handler: postRecords,
+      handler: asHandler(postRecords as Handler),
     },
     {
       method: "PATCH",
       pattern: /^\/api\/zones\/([^/]+)\/records\/([^/]+)$/,
       keys: ["zoneId", "recordId"],
-      handler: patchRecord,
+      handler: asHandler(patchRecord as Handler),
     },
     {
       method: "GET",
       pattern: /^\/api\/streams$/,
       keys: [],
-      handler: getStreams,
+      handler: asHandler(getStreams),
     },
     {
       method: "POST",
       pattern: /^\/api\/streams$/,
       keys: [],
-      handler: postStreams,
+      handler: asHandler(postStreams),
     },
     {
       method: "PATCH",
       pattern: /^\/api\/streams\/([^/]+)$/,
       keys: ["streamId"],
-      handler: patchStream,
+      handler: asHandler(patchStream as Handler),
     },
     {
       method: "DELETE",
       pattern: /^\/api\/streams\/([^/]+)$/,
       keys: ["streamId"],
-      handler: deleteStream,
+      handler: asHandler(deleteStream as Handler),
     },
     {
       method: "GET",
       pattern: /^\/api\/certificates$/,
       keys: [],
-      handler: getCertificates,
+      handler: asHandler(getCertificates),
     },
     {
       method: "POST",
       pattern: /^\/api\/certificates$/,
       keys: [],
-      handler: postCertificates,
+      handler: asHandler(postCertificates),
     },
     {
       method: "GET",
       pattern: /^\/api\/acme-challenge\/([^/]+)$/,
       keys: ["token"],
-      handler: getAcmeChallenge,
+      handler: asHandler(getAcmeChallenge as Handler),
     },
     {
       method: "POST",
       pattern: /^\/api\/auth\/bootstrap$/,
       keys: [],
-      handler: postBootstrap,
+      handler: asHandler(postBootstrap),
     },
     {
       method: "POST",
       pattern: /^\/api\/auth\/login$/,
       keys: [],
-      handler: postLogin,
+      handler: asHandler(postLogin),
     },
     {
       method: "POST",
       pattern: /^\/api\/auth\/logout$/,
       keys: [],
-      handler: postLogout,
+      handler: asHandler(postLogout),
     },
   ];
 
