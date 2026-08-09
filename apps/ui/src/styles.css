@@ -1,0 +1,154 @@
+:root {
+  color-scheme: dark;
+  --bay: #12100e;
+  --panel: #1a1714;
+  --raised: #221e1a;
+  --line: #3a322b;
+  --mist: #c9bfb3;
+  --ink: #f3ebe1;
+  --signal: #e6893d;
+  --link: #8eb4c8;
+  font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+  background: radial-gradient(1200px 600px at 10% -10%, #2a221c, var(--bay));
+  color: var(--ink);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+}
+
+a {
+  color: var(--link);
+  text-decoration: none;
+}
+
+.shell {
+  min-height: 100vh;
+  display: grid;
+  grid-template-rows: auto 1fr;
+}
+
+.top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1rem 1.5rem;
+  border-bottom: 1px solid var(--line);
+  background: color-mix(in srgb, var(--panel) 88%, transparent);
+}
+
+.brand {
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--ink);
+  font-size: 1.15rem;
+}
+
+nav {
+  display: flex;
+  gap: 1rem;
+  font-size: 0.95rem;
+}
+
+main {
+  padding: 2rem 1.5rem 3rem;
+}
+
+.panel {
+  max-width: 42rem;
+  padding: 1.5rem;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 0.75rem;
+  box-shadow: 0 18px 40px rgb(0 0 0 / 25%);
+}
+
+.eyebrow {
+  margin: 0 0 0.5rem;
+  text-transform: uppercase;
+  letter-spacing: 0.16em;
+  font-size: 0.72rem;
+  color: var(--mist);
+}
+
+h1 {
+  margin: 0 0 0.75rem;
+  font-size: clamp(1.8rem, 4vw, 2.4rem);
+  line-height: 1.1;
+}
+
+.lede {
+  margin: 0 0 1.5rem;
+  color: var(--mist);
+  line-height: 1.55;
+}
+
+.status {
+  display: grid;
+  gap: 0.75rem;
+  margin: 0;
+}
+
+.status div {
+  display: grid;
+  grid-template-columns: 6rem 1fr;
+  gap: 0.75rem;
+  padding: 0.65rem 0.75rem;
+  background: var(--raised);
+  border-radius: 0.5rem;
+}
+
+dt {
+  margin: 0;
+  color: var(--mist);
+  font-size: 0.85rem;
+}
+
+dd {
+  margin: 0;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  color: var(--signal);
+}
+
+.stack {
+  display: grid;
+  gap: 0.9rem;
+}
+
+label {
+  display: grid;
+  gap: 0.35rem;
+  color: var(--mist);
+  font-size: 0.9rem;
+}
+
+.pc-input {
+  border: 1px solid var(--line);
+  background: var(--raised);
+  color: var(--ink);
+  border-radius: 0.45rem;
+  padding: 0.65rem 0.75rem;
+  font: inherit;
+}
+
+button {
+  border: 0;
+  border-radius: 0.45rem;
+  padding: 0.7rem 1rem;
+  background: var(--signal);
+  color: #1a120c;
+  font-weight: 650;
+  cursor: pointer;
+  width: fit-content;
+}
+
+.error {
+  color: #f0a090;
+  margin: 0;
+}
