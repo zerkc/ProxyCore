@@ -132,7 +132,7 @@ export type ZoneState = {
 export type CertificateStatus = {
   id: string;
   hostnames: string[];
-  issuer: "self-signed" | "letsencrypt";
+  issuer: "self-signed" | "uploaded" | "letsencrypt";
   challenge: "none" | "http-01" | "dns-01";
   environment: string;
   status: "pending" | "issued" | "active" | "expired" | "failed";
@@ -141,6 +141,7 @@ export type CertificateStatus = {
   secretId?: string;
   /** Public certificate PEM retained for data-plane materialization. */
   certificatePem?: string;
+  failureReason?: string;
 };
 
 export type Http3Capabilities = {

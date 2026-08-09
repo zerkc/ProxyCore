@@ -19,8 +19,15 @@ export const recordTypeEnum = pgEnum("proxycore_record_type", [
   "MX",
   "SRV",
 ]);
-export const streamProtocolEnum = pgEnum("proxycore_stream_protocol", ["tcp", "udp"]);
-export const issuerEnum = pgEnum("proxycore_certificate_issuer", ["self-signed", "letsencrypt"]);
+export const streamProtocolEnum = pgEnum("proxycore_stream_protocol", [
+  "tcp",
+  "udp",
+]);
+export const issuerEnum = pgEnum("proxycore_certificate_issuer", [
+  "self-signed",
+  "uploaded",
+  "letsencrypt",
+]);
 export const challengeEnum = pgEnum("proxycore_certificate_challenge", [
   "none",
   "http-01",
@@ -41,7 +48,12 @@ export const jobStatusEnum = pgEnum("proxycore_job_status", [
   "failed",
   "rolled-back",
 ]);
-export const jobTargetEnum = pgEnum("proxycore_job_target", ["coredns", "nginx", "combined", "certificate"]);
+export const jobTargetEnum = pgEnum("proxycore_job_target", [
+  "coredns",
+  "nginx",
+  "combined",
+  "certificate",
+]);
 
 const createdAt = () =>
   timestamp("created_at", { withTimezone: true }).notNull().defaultNow();
@@ -208,6 +220,7 @@ export const certificates = pgTable("certificates", {
   renewAfter: timestamp("renew_after", { withTimezone: true }),
   keySecretId: uuid("key_secret_id").references(() => secrets.id),
   certificatePem: text("certificate_pem"),
+  failureReason: text("failure_reason"),
   createdAt: createdAt(),
   updatedAt: updatedAt(),
 });
@@ -237,8 +250,12 @@ export const configRevisions = pgTable(
     appliedAt: timestamp("applied_at", { withTimezone: true }),
   },
   (table) => ({
-    numberIndex: uniqueIndex("config_revisions_number_idx").on(table.revisionNumber),
-    checksumIndex: uniqueIndex("config_revisions_checksum_idx").on(table.checksum),
+    numberIndex: uniqueIndex("config_revisions_number_idx").on(
+      table.revisionNumber,
+    ),
+    checksumIndex: uniqueIndex("config_revisions_checksum_idx").on(
+      table.checksum,
+    ),
   }),
 );
 

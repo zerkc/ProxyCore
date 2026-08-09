@@ -1,4 +1,10 @@
-import { createHash, randomUUID, X509Certificate } from "node:crypto";
+import {
+  createPrivateKey,
+  createPublicKey,
+  randomUUID,
+  X509Certificate,
+} from "node:crypto";
+import { isIP } from "node:net";
 import * as acme from "acme-client";
 import * as selfsigned from "selfsigned";
 import { decryptSecret, encryptSecret } from "@proxycore/crypto";
@@ -9,6 +15,25 @@ export type CertificateResult = {
   privateKeyPem: string;
   secretId: string;
   expiresAt: Date;
+};
+
+export type CertificateIssueInput = {
+  hostnames: string[];
+  issuer: "self-signed" | "uploaded" | "letsencrypt";
+  challenge: "none" | "http-01" | "dns-01";
+  environment?: string;
+  email?: string;
+  keyType?: "rsa" | "ecdsa";
+  propagationSeconds?: number;
+  directoryUrl?: string;
+  certificatePem?: string;
+  privateKeyPem?: string;
+  cloudflare?: {
+    apiToken?: string;
+    zoneId?: string;
+    zoneName?: string;
+  };
+  http01?: Http01ChallengeStore;
 };
 
 export interface SecretStore {
@@ -71,7 +96,7 @@ export async function issueSelfSigned(
         {
           name: "subjectAltName",
           altNames: names.map((name) =>
-            /^[0-9a-f:.]+$/i.test(name)
+            isIP(name) > 0
               ? { type: 7 as const, ip: name }
               : { type: 2 as const, value: name },
           ),
@@ -87,6 +112,70 @@ export async function issueSelfSigned(
     certificatePem: pems.cert,
     privateKeyPem: pems.private,
     secretId,
+    expiresAt,
+  };
+}
+
+export function validateUploadedCertificate(
+  hostnames: string[],
+  certificatePem: string,
+  privateKeyPem: string,
+  now = new Date(),
+): { certificatePem: string; privateKeyPem: string; expiresAt: Date } {
+  const names = normalizeHostnames(hostnames);
+  if (!certificatePem.includes("BEGIN CERTIFICATE")) {
+    throw new Error("Certificate PEM is required");
+  }
+  if (!privateKeyPem.match(/BEGIN [A-Z ]*PRIVATE KEY/)) {
+    throw new Error("Private key PEM is required");
+  }
+
+  const leafPem = firstCertificatePem(certificatePem);
+  const certificate = new X509Certificate(leafPem);
+  const expiresAt = new Date(certificate.validTo);
+  if (!Number.isFinite(expiresAt.getTime())) {
+    throw new Error("Certificate expiry could not be read");
+  }
+  if (expiresAt <= now) {
+    throw new Error("Certificate is already expired");
+  }
+
+  const certificateNames = (certificate.subjectAltName ?? "")
+    .split(/,\s*/)
+    .map((entry) => entry.trim())
+    .flatMap((entry) => {
+      if (entry.startsWith("DNS:")) return [entry.slice("DNS:".length)];
+      if (entry.startsWith("IP Address:")) {
+        return [entry.slice("IP Address:".length)];
+      }
+      return [];
+    });
+  if (
+    certificateNames.length === 0 ||
+    !certificateCoversHostnames(certificateNames, names)
+  ) {
+    throw new Error("Certificate SANs do not cover every requested hostname");
+  }
+
+  const certificatePublicKey = Buffer.from(
+    certificate.publicKey.export({
+      type: "spki",
+      format: "der",
+    }),
+  );
+  const privateKeyPublicKey = Buffer.from(
+    createPublicKey(createPrivateKey(privateKeyPem)).export({
+      type: "spki",
+      format: "der",
+    }),
+  );
+  if (!certificatePublicKey.equals(privateKeyPublicKey)) {
+    throw new Error("Certificate and private key do not match");
+  }
+
+  return {
+    certificatePem: normalizePem(certificatePem),
+    privateKeyPem: normalizePem(privateKeyPem),
     expiresAt,
   };
 }
@@ -141,12 +230,13 @@ export class FakeDns01Adapter implements Dns01Adapter {
 
 export class CloudflareDns01Adapter implements Dns01Adapter {
   private readonly fetchImpl: typeof fetch;
+  private readonly zones = new Map<string, CloudflareZone>();
 
   constructor(
     private readonly options: {
       apiToken: string;
-      zoneId: string;
-      zoneName: string;
+      zoneId?: string;
+      zoneName?: string;
       fetchImpl?: typeof fetch;
     },
   ) {
@@ -154,20 +244,27 @@ export class CloudflareDns01Adapter implements Dns01Adapter {
   }
 
   async present(hostname: string, value: string): Promise<void> {
-    const name = challengeRecordName(hostname, this.options.zoneName);
-    const response = await this.request(`/dns_records`, {
-      method: "POST",
-      body: JSON.stringify({ type: "TXT", name, content: value, ttl: 120 }),
-    });
+    const zone = await this.resolveZone(hostname);
+    const name = challengeRecordName(hostname, zone.name);
+    const response = await this.request(
+      `/dns_records`,
+      {
+        method: "POST",
+        body: JSON.stringify({ type: "TXT", name, content: value, ttl: 120 }),
+      },
+      zone.id,
+    );
     if (!response.success)
       throw new Error("Cloudflare DNS-01 record creation failed");
   }
 
   async observe(hostname: string): Promise<string[]> {
-    const name = challengeRecordName(hostname, this.options.zoneName);
+    const zone = await this.resolveZone(hostname);
+    const name = challengeRecordName(hostname, zone.name);
     const response = await this.request(
       `/dns_records?type=TXT&name=${encodeURIComponent(name)}`,
       { method: "GET" },
+      zone.id,
     );
     return response.result
       .filter((record) => record.type === "TXT")
@@ -175,41 +272,116 @@ export class CloudflareDns01Adapter implements Dns01Adapter {
   }
 
   async cleanup(hostname: string, value: string): Promise<void> {
-    const name = challengeRecordName(hostname, this.options.zoneName);
+    const zone = await this.resolveZone(hostname);
+    const name = challengeRecordName(hostname, zone.name);
     const response = await this.request(
       `/dns_records?type=TXT&name=${encodeURIComponent(name)}`,
       { method: "GET" },
+      zone.id,
     );
     for (const record of response.result) {
       if (record.type === "TXT" && record.content === value) {
-        await this.request(`/dns_records/${record.id}`, { method: "DELETE" });
+        await this.request(
+          `/dns_records/${record.id}`,
+          { method: "DELETE" },
+          zone.id,
+        );
       }
     }
   }
 
-  private async request(
+  private async resolveZone(hostname: string): Promise<CloudflareZone> {
+    const normalizedHostname = normalizeDnsName(
+      hostname.replace(/^\*\./, ""),
+      false,
+    );
+    const configuredZoneId = this.options.zoneId?.trim() || undefined;
+    const configuredZoneName = this.options.zoneName?.trim() || undefined;
+    const cached = this.zones.get(normalizedHostname);
+    if (cached) return cached;
+
+    if (configuredZoneId && configuredZoneName) {
+      const zone = {
+        id: configuredZoneId,
+        name: normalizeDnsName(configuredZoneName, false),
+      };
+      this.zones.set(normalizedHostname, zone);
+      return zone;
+    }
+
+    const labels = normalizedHostname.split(".");
+    for (let index = 0; index < labels.length - 1; index += 1) {
+      const candidate = labels.slice(index).join(".");
+      if (
+        configuredZoneName &&
+        candidate.toLowerCase() !== configuredZoneName.toLowerCase()
+      ) {
+        continue;
+      }
+      const response = await this.request<CloudflareZone>(
+        `/zones?name=${encodeURIComponent(candidate)}&status=active&per_page=50`,
+        { method: "GET" },
+      );
+      const zone = response.result.find(
+        (item) => item.name.toLowerCase() === candidate.toLowerCase(),
+      );
+      if (!zone) continue;
+      const resolved = {
+        id: configuredZoneId ?? zone.id,
+        name: zone.name,
+      };
+      this.zones.set(normalizedHostname, resolved);
+      return resolved;
+    }
+    throw new Error(`Cloudflare zone could not be found for ${hostname}`);
+  }
+
+  private async request<T = CloudflareRecord>(
     path: string,
     init: RequestInit,
-  ): Promise<CloudflareResponse> {
-    const response = await this.fetchImpl(
-      `https://api.cloudflare.com/client/v4/zones/${this.options.zoneId}${path}`,
-      {
-        ...init,
-        headers: {
-          Authorization: `Bearer ${this.options.apiToken}`,
-          "Content-Type": "application/json",
-          ...(init.headers ?? {}),
-        },
+    zoneId?: string,
+  ): Promise<CloudflareResponse<T>> {
+    const base = zoneId
+      ? `https://api.cloudflare.com/client/v4/zones/${zoneId}`
+      : "https://api.cloudflare.com/client/v4";
+    const response = await this.fetchImpl(`${base}${path}`, {
+      ...init,
+      headers: {
+        Authorization: `Bearer ${this.options.apiToken}`,
+        "Content-Type": "application/json",
+        ...(init.headers ?? {}),
       },
-    );
+    });
+    const body = (await response.json().catch(() => undefined)) as
+      CloudflareResponse<T> | undefined;
     if (!response.ok) {
-      throw new Error(`Cloudflare DNS-01 request failed (${response.status})`);
+      throw new Error(
+        `Cloudflare DNS-01 request failed (${response.status})${formatCloudflareErrors(
+          body?.errors,
+        )}`,
+      );
     }
-    const body = (await response.json()) as CloudflareResponse;
-    if (!body.success)
-      throw new Error("Cloudflare DNS-01 provider rejected the request");
+    if (!body?.success) {
+      throw new Error(
+        `Cloudflare DNS-01 provider rejected the request${formatCloudflareErrors(
+          body?.errors,
+        )}`,
+      );
+    }
     return body;
   }
+}
+
+function formatCloudflareErrors(errors?: CloudflareApiError[]): string {
+  if (!errors?.length) return "";
+  const details = errors
+    .map((error) =>
+      error.code
+        ? `[${error.code}] ${error.message ?? "Unknown provider error"}`
+        : (error.message ?? "Unknown provider error"),
+    )
+    .join("; ");
+  return `: ${details}`;
 }
 
 export type Http01ChallengeStore = {
@@ -248,6 +420,8 @@ export async function issueWithAcme(options: {
   accountKeyPem: string;
   email?: string;
   challenge: "http-01" | "dns-01";
+  keyType?: "rsa" | "ecdsa";
+  propagationSeconds?: number;
   http01?: Http01ChallengeStore;
   dns01?: Dns01Adapter;
 }): Promise<{
@@ -256,16 +430,29 @@ export async function issueWithAcme(options: {
   expiresAt: Date;
 }> {
   const names = normalizeHostnames(options.hostnames);
+  if (
+    options.challenge === "http-01" &&
+    names.some((hostname) => hostname.startsWith("*."))
+  ) {
+    throw new Error("Let's Encrypt HTTP-01 cannot issue wildcard certificates");
+  }
   if (options.challenge === "http-01" && !options.http01) {
     throw new Error("HTTP-01 challenge store is required");
   }
   if (options.challenge === "dns-01" && !options.dns01) {
     throw new Error("DNS-01 adapter is required");
   }
-  const [privateKey, csr] = await acme.crypto.createCsr({
-    commonName: names[0],
-    altNames: names,
-  });
+  const certificateKey =
+    options.keyType === "ecdsa"
+      ? await acme.crypto.createPrivateEcdsaKey("P-256")
+      : await acme.crypto.createPrivateKey();
+  const [privateKey, csr] = await acme.crypto.createCsr(
+    {
+      commonName: names[0],
+      altNames: names,
+    },
+    certificateKey,
+  );
   const client = new acme.Client({
     directoryUrl: options.directoryUrl,
     accountKey: options.accountKeyPem,
@@ -280,20 +467,15 @@ export async function issueWithAcme(options: {
         options.http01?.put(challenge.token, keyAuthorization);
         return;
       }
-      const dnsValue = createHash("sha256")
-        .update(keyAuthorization)
-        .digest("base64url");
-      await options.dns01?.present(authz.identifier.value, dnsValue);
+      await options.dns01?.present(authz.identifier.value, keyAuthorization);
+      await waitSeconds(options.propagationSeconds);
     },
     challengeRemoveFn: async (authz, challenge, keyAuthorization) => {
       if (challenge.type === "http-01") {
         options.http01?.remove(challenge.token);
         return;
       }
-      const dnsValue = createHash("sha256")
-        .update(keyAuthorization)
-        .digest("base64url");
-      await options.dns01?.cleanup(authz.identifier.value, dnsValue);
+      await options.dns01?.cleanup(authz.identifier.value, keyAuthorization);
     },
   });
   const expiresAt = new X509Certificate(certificatePem).validTo
@@ -306,16 +488,82 @@ export async function issueWithAcme(options: {
   };
 }
 
+export async function issueLetsEncrypt(options: {
+  hostnames: string[];
+  directoryUrl: string;
+  email?: string;
+  challenge: "http-01" | "dns-01";
+  keyType?: "rsa" | "ecdsa";
+  propagationSeconds?: number;
+  http01?: Http01ChallengeStore;
+  dns01?: Dns01Adapter;
+}): Promise<{
+  certificatePem: string;
+  privateKeyPem: string;
+  expiresAt: Date;
+}> {
+  const accountKeyPem = (await acme.crypto.createPrivateKey()).toString();
+  return issueWithAcme({
+    ...options,
+    accountKeyPem,
+  });
+}
+
+async function waitSeconds(seconds = 0): Promise<void> {
+  const milliseconds = Math.max(0, Math.min(seconds, 600)) * 1_000;
+  if (milliseconds === 0) return;
+  await new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
 function normalizeHostnames(hostnames: string[]): string[] {
   if (hostnames.length === 0) {
     throw new Error("At least one certificate hostname is required");
   }
-  return [...new Set(hostnames.map((hostname) => normalizeDnsName(hostname)))];
+  return [
+    ...new Set(
+      hostnames.map((hostname) => {
+        const normalized = hostname.trim().replace(/^\[|\]$/g, "");
+        return isIP(normalized) > 0
+          ? normalized.toLowerCase()
+          : normalizeDnsName(normalized);
+      }),
+    ),
+  ];
 }
 
-type CloudflareResponse = {
+function firstCertificatePem(certificatePem: string): string {
+  const match = certificatePem.match(
+    /-----BEGIN CERTIFICATE-----[\s\S]+?-----END CERTIFICATE-----/,
+  );
+  if (!match) throw new Error("Certificate PEM is invalid");
+  return `${match[0]}\n`;
+}
+
+function normalizePem(value: string): string {
+  return `${value.trim()}\n`;
+}
+
+type CloudflareZone = {
+  id: string;
+  name: string;
+};
+
+type CloudflareRecord = {
+  id: string;
+  type: string;
+  content: string;
+};
+
+type CloudflareResponse<T = CloudflareRecord> = {
   success: boolean;
-  result: Array<{ id: string; type: string; content: string }>;
+  result: T[];
+  errors?: CloudflareApiError[];
+  messages?: CloudflareApiError[];
+};
+
+type CloudflareApiError = {
+  code?: number;
+  message?: string;
 };
 
 function challengeRecordName(hostname: string, zoneName: string): string {

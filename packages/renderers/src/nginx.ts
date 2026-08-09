@@ -29,9 +29,12 @@ export function renderNginxCandidate(input: NginxRenderInput): NginxCandidate {
     .filter((record) => record.enabled && record.proxied)
     .sort((left, right) => left.name.localeCompare(right.name));
   const candidatePath = input.candidatePath?.replace(/\/+$/, "");
-  const servers = records
-    .map((record) => renderServer(record, input.capabilities, candidatePath))
-    .join("\n\n");
+  const servers = [
+    renderAcmeDefaultServer(),
+    ...records.map((record) =>
+      renderServer(record, input.capabilities, candidatePath),
+    ),
+  ].join("\n\n");
   const streamConfig = streams.length > 0 ? renderStreams(streams) : "";
   const config =
     [
@@ -101,6 +104,7 @@ function renderServer(
         ]
       : []),
     `    server_name ${record.name};`,
+    ...renderAcmeChallengeLocation(),
     ...(settings.tlsEnabled
       ? [
           `    ssl_certificate ${certificateFilePath(settings.certificateId!, candidatePath, "crt")};`,
@@ -128,6 +132,7 @@ function renderServer(
       "    listen 80;",
       "    listen [::]:80;",
       `    server_name ${record.name};`,
+      ...renderAcmeChallengeLocation(),
       "    return 308 https://$host$request_uri;",
       "}",
       "",
@@ -135,6 +140,31 @@ function renderServer(
     ].join("\n");
   }
   return serverLines.join("\n");
+}
+
+function renderAcmeDefaultServer(): string {
+  return [
+    "server {",
+    "    listen 80 default_server;",
+    "    listen [::]:80 default_server;",
+    "    server_name _;",
+    ...renderAcmeChallengeLocation(),
+    "    location ^~ / {",
+    "        return 404;",
+    "    }",
+    "}",
+  ].join("\n");
+}
+
+function renderAcmeChallengeLocation(): string[] {
+  return [
+    "    location ^~ /.well-known/acme-challenge/ {",
+    "        proxy_pass http://web:3000/api/acme-challenge/;",
+    "        proxy_set_header Host $host;",
+    "        proxy_set_header X-Forwarded-Proto $scheme;",
+    "        proxy_set_header X-Real-IP $remote_addr;",
+    "    }",
+  ];
 }
 
 function renderCommonProxyDirectives(

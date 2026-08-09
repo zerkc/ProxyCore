@@ -1,8 +1,13 @@
 import { randomUUID } from "node:crypto";
 import {
+  CloudflareDns01Adapter,
   InMemorySecretStore,
+  InMemoryHttp01ChallengeStore,
+  issueLetsEncrypt,
   issueSelfSigned,
   resolveProxySettingsInput,
+  validateUploadedCertificate,
+  type CertificateIssueInput,
   type CertificateResult,
   type ProxySettingsInput,
 } from "@proxycore/certificates";
@@ -61,13 +66,12 @@ export interface ConfigurationStore {
   addStream(
     input: Omit<StreamRoute, "id"> & { id?: string },
   ): Promise<StreamRoute>;
+  deleteStream(id: string): Promise<void>;
   listCertificates(): Promise<CertificateStatus[]>;
-  issueCertificate(input: {
-    hostnames: string[];
-    issuer: "self-signed" | "letsencrypt";
-    challenge: "none" | "http-01" | "dns-01";
-    environment?: string;
-  }): Promise<CertificateStatus>;
+  issueCertificate(
+    input: CertificateIssueInput,
+    actorUserId?: string,
+  ): Promise<CertificateStatus>;
   createApplyJob(
     actorUserId: string,
   ): Promise<{ revisionId: string; job: JobRecord }>;
@@ -216,26 +220,37 @@ export class InMemoryConfigurationStore {
     input: Omit<StreamRoute, "id"> & { id?: string },
   ): Promise<StreamRoute> {
     const route = { ...input, id: input.id ?? randomUUID() };
-    this.streams = validateStreamRoutes([...this.streams, route]);
+    this.streams = validateStreamRoutes([
+      ...this.streams.filter((item) => item.id !== route.id),
+      route,
+    ]);
     return clone(this.streams.find((item) => item.id === route.id)!);
+  }
+
+  async deleteStream(id: string): Promise<void> {
+    const before = this.streams.length;
+    this.streams = this.streams.filter((item) => item.id !== id);
+    if (this.streams.length === before) {
+      throw new Error(`Stream not found: ${id}`);
+    }
   }
 
   async listCertificates(): Promise<CertificateStatus[]> {
     return clone(this.certificates);
   }
 
-  async issueCertificate(input: {
-    hostnames: string[];
-    issuer: "self-signed" | "letsencrypt";
-    challenge: "none" | "http-01" | "dns-01";
-    environment?: string;
-  }): Promise<CertificateStatus> {
+  async issueCertificate(
+    input: CertificateIssueInput,
+    _actorUserId?: string,
+  ): Promise<CertificateStatus> {
     const certificate: CertificateStatus = {
       id: randomUUID(),
       hostnames: input.hostnames,
       issuer: input.issuer,
       challenge: input.challenge,
-      environment: input.environment ?? "staging",
+      environment:
+        input.environment ??
+        (input.issuer === "letsencrypt" ? "staging" : "local"),
       status: "pending",
     };
     if (input.issuer === "self-signed") {
@@ -252,6 +267,64 @@ export class InMemoryConfigurationStore {
       certificate.expiresAt = result.expiresAt;
       certificate.secretId = result.secretId;
       certificate.certificatePem = result.certificatePem;
+    } else if (input.issuer === "uploaded") {
+      if (input.challenge !== "none" || !this.secretStore) {
+        throw new Error(
+          "Uploaded certificates require challenge none and a master key",
+        );
+      }
+      if (!input.certificatePem || !input.privateKeyPem) {
+        throw new Error("Uploaded certificate and private key are required");
+      }
+      const result = validateUploadedCertificate(
+        input.hostnames,
+        input.certificatePem,
+        input.privateKeyPem,
+      );
+      certificate.status = "active";
+      certificate.expiresAt = result.expiresAt;
+      certificate.secretId = await this.secretStore.put(
+        "certificate-private-key",
+        result.privateKeyPem,
+      );
+      certificate.certificatePem = result.certificatePem;
+    } else {
+      if (input.challenge === "none") {
+        throw new Error("Let's Encrypt requires HTTP-01 or DNS-01");
+      }
+      if (!this.secretStore) {
+        throw new Error("Let's Encrypt issuance requires a master key");
+      }
+      try {
+        const result = await issueLetsEncrypt({
+          hostnames: input.hostnames,
+          directoryUrl: input.directoryUrl ?? "",
+          email: input.email,
+          challenge: input.challenge,
+          keyType: input.keyType,
+          propagationSeconds: input.propagationSeconds,
+          http01:
+            input.http01 ??
+            (input.challenge === "http-01"
+              ? new InMemoryHttp01ChallengeStore()
+              : undefined),
+          dns01:
+            input.challenge === "dns-01"
+              ? createCloudflareAdapter(input.cloudflare)
+              : undefined,
+        });
+        certificate.status = "active";
+        certificate.expiresAt = result.expiresAt;
+        certificate.renewAfter = renewalDate(result.expiresAt);
+        certificate.secretId = await this.secretStore.put(
+          "certificate-private-key",
+          result.privateKeyPem,
+        );
+        certificate.certificatePem = result.certificatePem;
+      } catch (error) {
+        certificate.status = "failed";
+        certificate.failureReason = errorMessage(error);
+      }
     }
     this.certificates.push(certificate);
     return clone(certificate);
@@ -299,6 +372,27 @@ export class InMemoryConfigurationStore {
       certificates: await this.listCertificates(),
     };
   }
+}
+
+function createCloudflareAdapter(
+  input: CertificateIssueInput["cloudflare"],
+): CloudflareDns01Adapter {
+  if (!input?.apiToken) {
+    throw new Error("Cloudflare DNS-01 requires an API token");
+  }
+  return new CloudflareDns01Adapter({
+    apiToken: input.apiToken,
+    zoneId: input.zoneId,
+    zoneName: input.zoneName,
+  });
+}
+
+function renewalDate(expiresAt: Date): Date {
+  return new Date(expiresAt.getTime() - 30 * 24 * 60 * 60 * 1_000);
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : "Certificate issuance failed";
 }
 
 function clone<T>(value: T): T {

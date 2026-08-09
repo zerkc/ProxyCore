@@ -1,8 +1,13 @@
 import { z } from "zod";
 
 const environmentSchema = z.object({
-  NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
-  DATABASE_URL: z.string().url().default("postgres://proxycore:proxycore@localhost:5432/proxycore"),
+  NODE_ENV: z
+    .enum(["development", "test", "production"])
+    .default("development"),
+  DATABASE_URL: z
+    .string()
+    .url()
+    .default("postgres://proxycore:proxycore@localhost:5432/proxycore"),
   PROXYCORE_PERSISTENCE_MODE: z.enum(["postgres", "memory"]).optional(),
   PROXYCORE_MASTER_KEY_BASE64: z.string().optional(),
   SESSION_COOKIE_NAME: z.string().min(1).default("proxycore_session"),
@@ -16,6 +21,10 @@ const environmentSchema = z.object({
     .string()
     .url()
     .default("https://acme-staging-v02.api.letsencrypt.org/directory"),
+  ACME_PRODUCTION_DIRECTORY_URL: z
+    .string()
+    .url()
+    .default("https://acme-v02.api.letsencrypt.org/directory"),
   CLOUDFLARE_API_TOKEN: z.string().optional(),
   CLOUDFLARE_ZONE_ID: z.string().optional(),
 });
@@ -35,6 +44,7 @@ export type AppConfig = {
   coreDnsConfigDir: string;
   nginxConfigDir: string;
   acmeDirectoryUrl: string;
+  acmeProductionDirectoryUrl: string;
   cloudflare: {
     apiToken?: string;
     zoneId?: string;
@@ -62,6 +72,7 @@ export function loadConfig(
     coreDnsConfigDir: parsed.CORE_DNS_CONFIG_DIR,
     nginxConfigDir: parsed.NGINX_CONFIG_DIR,
     acmeDirectoryUrl: parsed.ACME_DIRECTORY_URL,
+    acmeProductionDirectoryUrl: parsed.ACME_PRODUCTION_DIRECTORY_URL,
     cloudflare: {
       apiToken: parsed.CLOUDFLARE_API_TOKEN,
       zoneId: parsed.CLOUDFLARE_ZONE_ID,

@@ -8,6 +8,13 @@
       "when": 1786167445419,
       "tag": "0000_gigantic_annihilus",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1786225614602,
+      "tag": "0001_fancy_warbound",
+      "breakpoints": true
     }
   ]
 }

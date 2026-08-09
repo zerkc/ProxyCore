@@ -1,8 +1,13 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { and, asc, desc, eq, lt, or, sql } from "drizzle-orm";
 import {
+  CloudflareDns01Adapter,
+  InMemoryHttp01ChallengeStore,
+  issueLetsEncrypt,
   issueSelfSigned,
   resolveProxySettingsInput,
+  validateUploadedCertificate,
+  type CertificateIssueInput,
   type ProxySettingsInput,
   type SecretStore,
 } from "@proxycore/certificates";
@@ -38,6 +43,7 @@ import {
   configRevisions,
   dnsRecords,
   installationSettings,
+  providerConnections,
   streamRoutes,
   zones,
 } from "./schema";
@@ -494,7 +500,8 @@ export class PgConfigurationStore {
   ): Promise<StreamRoute> {
     const current = await this.listStreams();
     const route = { ...input, id: input.id ?? randomUUID() };
-    const validated = validateStreamRoutes([...current, route]);
+    const next = [...current.filter((item) => item.id !== route.id), route];
+    const validated = validateStreamRoutes(next);
     const saved = validated.find((item) => item.id === route.id)!;
     await this.db
       .insert(streamRoutes)
@@ -520,6 +527,16 @@ export class PgConfigurationStore {
     return saved;
   }
 
+  async deleteStream(id: string): Promise<void> {
+    const deleted = await this.db
+      .delete(streamRoutes)
+      .where(eq(streamRoutes.id, id))
+      .returning({ id: streamRoutes.id });
+    if (deleted.length === 0) {
+      throw new Error(`Stream not found: ${id}`);
+    }
+  }
+
   async listCertificates(): Promise<CertificateStatus[]> {
     const rows = await this.db
       .select()
@@ -528,55 +545,206 @@ export class PgConfigurationStore {
     return rows.map(toCertificateStatus);
   }
 
-  async issueCertificate(input: {
-    hostnames: string[];
-    issuer: "self-signed" | "letsencrypt";
-    challenge: "none" | "http-01" | "dns-01";
-    environment?: string;
-  }): Promise<CertificateStatus> {
+  async issueCertificate(
+    input: CertificateIssueInput,
+    actorUserId?: string,
+  ): Promise<CertificateStatus> {
     const id = randomUUID();
-    if (input.issuer === "self-signed") {
-      if (input.challenge !== "none" || !this.secretStore) {
-        throw new Error(
-          "Self-signed issuance requires challenge none and a master key",
-        );
+    const environment =
+      input.environment ??
+      (input.issuer === "letsencrypt" ? "staging" : "local");
+    const base = {
+      id,
+      hostnames: input.hostnames,
+      issuer: input.issuer,
+      challenge: input.challenge,
+      environment,
+    } as const;
+
+    try {
+      if (input.issuer === "self-signed") {
+        if (input.challenge !== "none" || !this.secretStore) {
+          throw new Error(
+            "Self-signed issuance requires challenge none and a master key",
+          );
+        }
+        const result = await issueSelfSigned(input.hostnames, {
+          secretStore: this.secretStore,
+          masterKeyBase64: this.masterKeyBase64 ?? "",
+        });
+        const [row] = await this.db
+          .insert(certificates)
+          .values({
+            ...base,
+            status: "active",
+            expiresAt: result.expiresAt,
+            renewAfter: renewalDate(result.expiresAt),
+            keySecretId: result.secretId,
+            certificatePem: result.certificatePem,
+          })
+          .returning();
+        return toCertificateStatus(row);
       }
-      const result = await issueSelfSigned(input.hostnames, {
-        secretStore: this.secretStore,
-        masterKeyBase64: this.masterKeyBase64 ?? "",
+
+      if (input.issuer === "uploaded") {
+        if (input.challenge !== "none" || !this.secretStore) {
+          throw new Error(
+            "Uploaded certificates require challenge none and a master key",
+          );
+        }
+        if (!input.certificatePem || !input.privateKeyPem) {
+          throw new Error("Uploaded certificate and private key are required");
+        }
+        const material = validateUploadedCertificate(
+          input.hostnames,
+          input.certificatePem,
+          input.privateKeyPem,
+        );
+        const secretId = await this.secretStore.put(
+          "certificate-private-key",
+          material.privateKeyPem,
+        );
+        const [row] = await this.db
+          .insert(certificates)
+          .values({
+            ...base,
+            status: "active",
+            expiresAt: material.expiresAt,
+            keySecretId: secretId,
+            certificatePem: material.certificatePem,
+          })
+          .returning();
+        return toCertificateStatus(row);
+      }
+
+      if (input.challenge === "none") {
+        throw new Error("Let's Encrypt requires HTTP-01 or DNS-01");
+      }
+      if (!this.secretStore) {
+        throw new Error("Let's Encrypt issuance requires a master key");
+      }
+      if (input.challenge === "http-01" && actorUserId) {
+        const apply = await this.createApplyJob(actorUserId);
+        await waitForJob(this.jobs, apply.job.id);
+      }
+      const cloudflare =
+        input.challenge === "dns-01"
+          ? await this.resolveCloudflareCredentials(input.cloudflare)
+          : undefined;
+      const result = await issueLetsEncrypt({
+        hostnames: input.hostnames,
+        directoryUrl: input.directoryUrl ?? "",
+        email: input.email,
+        challenge: input.challenge,
+        keyType: input.keyType,
+        propagationSeconds: input.propagationSeconds,
+        http01:
+          input.http01 ??
+          (input.challenge === "http-01"
+            ? new InMemoryHttp01ChallengeStore()
+            : undefined),
+        dns01: cloudflare ? new CloudflareDns01Adapter(cloudflare) : undefined,
       });
+      const secretId = await this.secretStore.put(
+        "certificate-private-key",
+        result.privateKeyPem,
+      );
       const [row] = await this.db
         .insert(certificates)
         .values({
-          id,
-          hostnames: input.hostnames,
-          issuer: input.issuer,
-          challenge: input.challenge,
-          environment: input.environment ?? "staging",
+          ...base,
           status: "active",
           expiresAt: result.expiresAt,
-          renewAfter: new Date(
-            result.expiresAt.getTime() - 30 * 24 * 60 * 60 * 1_000,
-          ),
-          keySecretId: result.secretId,
+          renewAfter: renewalDate(result.expiresAt),
+          keySecretId: secretId,
           certificatePem: result.certificatePem,
         })
         .returning();
       return toCertificateStatus(row);
+    } catch (error) {
+      if (input.issuer !== "letsencrypt") throw error;
+      const [row] = await this.db
+        .insert(certificates)
+        .values({
+          ...base,
+          status: "failed",
+          failureReason: errorMessage(error),
+        })
+        .returning();
+      return toCertificateStatus(row);
+    }
+  }
+
+  private async resolveCloudflareCredentials(
+    input: CertificateIssueInput["cloudflare"],
+  ): Promise<{ apiToken: string; zoneId?: string; zoneName?: string }> {
+    if (!this.secretStore) {
+      throw new Error("Cloudflare DNS-01 requires a master key");
+    }
+    const apiTokenInput = input?.apiToken;
+    const zoneIdInput = input?.zoneId?.trim() || undefined;
+    const zoneNameInput = input?.zoneName?.trim().toLowerCase() || undefined;
+    if (apiTokenInput) {
+      const tokenName = `cloudflare-${createHash("sha256")
+        .update(apiTokenInput)
+        .digest("hex")}`;
+      const existing = await this.db
+        .select()
+        .from(providerConnections)
+        .where(
+          and(
+            eq(providerConnections.provider, "cloudflare"),
+            eq(providerConnections.name, tokenName),
+            eq(providerConnections.scope, "dns-01"),
+            eq(providerConnections.enabled, true),
+          ),
+        )
+        .orderBy(desc(providerConnections.createdAt))
+        .limit(1);
+      if (!existing[0]) {
+        const secretId = await this.secretStore.put(
+          "cloudflare-api-token",
+          apiTokenInput,
+        );
+        await this.db.insert(providerConnections).values({
+          provider: "cloudflare",
+          name: tokenName,
+          secretId,
+          scope: "dns-01",
+        });
+      }
+      return {
+        apiToken: apiTokenInput,
+        zoneId: zoneIdInput,
+        zoneName: zoneNameInput,
+      };
     }
 
-    const [row] = await this.db
-      .insert(certificates)
-      .values({
-        id,
-        hostnames: input.hostnames,
-        issuer: input.issuer,
-        challenge: input.challenge,
-        environment: input.environment ?? "staging",
-        status: "pending",
-      })
-      .returning();
-    return toCertificateStatus(row);
+    const [connection] = await this.db
+      .select()
+      .from(providerConnections)
+      .where(
+        and(
+          eq(providerConnections.provider, "cloudflare"),
+          eq(providerConnections.enabled, true),
+        ),
+      )
+      .orderBy(desc(providerConnections.createdAt))
+      .limit(1);
+    if (!connection) {
+      throw new Error(
+        "Cloudflare credentials not configured for this DNS zone",
+      );
+    }
+    const apiToken = await this.secretStore.get(connection.secretId);
+    if (!apiToken) {
+      throw new Error("Cloudflare credential secret is unavailable");
+    }
+    return {
+      apiToken,
+      zoneId: connection.scope === "dns-01" ? undefined : connection.name,
+      zoneName: connection.scope === "dns-01" ? undefined : connection.scope,
+    };
   }
 
   async createApplyJob(
@@ -806,7 +974,38 @@ function toCertificateStatus(
     renewAfter: row.renewAfter ?? undefined,
     secretId: row.keySecretId ?? undefined,
     certificatePem: row.certificatePem ?? undefined,
+    failureReason: row.failureReason ?? undefined,
   };
+}
+
+function renewalDate(expiresAt: Date): Date {
+  return new Date(expiresAt.getTime() - 30 * 24 * 60 * 60 * 1_000);
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : "Certificate issuance failed";
+}
+
+async function waitForJob(
+  jobs: JobStore,
+  jobId: string,
+  timeoutMs = 60_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const job = await jobs.get(jobId);
+    if (!job) throw new Error(`Certificate apply job disappeared: ${jobId}`);
+    if (job.status === "applied") return;
+    if (job.status === "failed" || job.status === "rolled-back") {
+      throw new Error(
+        `HTTP-01 challenge route apply failed: ${
+          job.errorMessage ?? job.status
+        }`,
+      );
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  throw new Error("Timed out waiting for the HTTP-01 challenge route");
 }
 
 function parseDefaultPool(value: unknown): ResolverPool | undefined {

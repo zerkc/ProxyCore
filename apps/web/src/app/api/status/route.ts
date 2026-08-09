@@ -7,6 +7,13 @@ export async function GET(request: Request) {
     const status = await getWebContext().configuration.status();
     return Response.json({
       ...status,
+      certificates: status.certificates.map(
+        ({
+          secretId: _secretId,
+          certificatePem: _certificatePem,
+          ...certificate
+        }) => certificate,
+      ),
       desiredRevision: status.desiredRevision
         ? {
             id: status.desiredRevision.id,
