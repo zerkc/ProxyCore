@@ -69,10 +69,9 @@ const proxyTabs: Array<{ id: ProxyTab; label: string; hint: string }> = [
   { id: "access", label: "Access", hint: "Basic Auth" },
 ];
 
-const inputClass =
-  "mt-2 w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 text-sm outline-none focus:border-emerald-300";
-const labelClass = "block text-sm text-slate-300";
-const sectionClass = "rounded-xl border border-slate-800 bg-slate-950/50 p-4";
+const inputClass = "pc-input";
+const labelClass = "pc-label";
+const sectionClass = "pc-panel-quiet p-4";
 
 export function RecordDialog(props: {
   open: boolean;
@@ -117,9 +116,14 @@ export function RecordDialog(props: {
     () =>
       props.certificates.filter(
         (certificate) =>
-          certificate.status === "active" || certificate.status === "issued",
+          (certificate.status === "active" ||
+            certificate.status === "issued") &&
+          certificateCoversHostname(
+            certificate.hostnames,
+            canonicalRecordName(recordName, props.zoneName),
+          ),
       ),
-    [props.certificates],
+    [props.certificates, props.zoneName, recordName],
   );
 
   useEffect(() => {
@@ -289,34 +293,32 @@ export function RecordDialog(props: {
 
   return (
     <div
-      className="fixed inset-0 z-50 grid place-items-center bg-slate-950/80 p-4"
+      className="fixed inset-0 z-50 grid place-items-center bg-bay/85 p-4 backdrop-blur-sm"
       role="dialog"
       aria-modal="true"
       aria-labelledby="record-dialog-title"
     >
       <form
-        className="max-h-[90vh] w-full max-w-3xl overflow-y-auto rounded-2xl border border-slate-700 bg-slate-900 p-6 shadow-2xl"
+        className="pc-panel max-h-[90vh] w-full max-w-3xl overflow-y-auto p-6 shadow-2xl shadow-black/40"
         onSubmit={handleSubmit}
       >
         <div className="flex items-start justify-between gap-4">
           <div>
-            <p className="text-xs uppercase tracking-[0.22em] text-emerald-300">
-              DNS record
-            </p>
+            <p className="pc-eyebrow pc-eyebrow-signal">DNS record</p>
             <h2
               id="record-dialog-title"
-              className="mt-2 text-2xl font-medium text-slate-100"
+              className="pc-title mt-2 text-2xl text-mist"
             >
               {editing ? "Configure record" : "Configure new record"}
             </h2>
-            <p className="mt-2 text-sm text-slate-400">
+            <p className="mt-2 text-sm text-mute">
               Choose whether ProxyCore serves this record directly or proxies it
               through Nginx.
             </p>
           </div>
           <button
             type="button"
-            className="text-sm text-slate-400 hover:text-slate-100"
+            className="text-sm text-mute transition hover:text-mist"
             onClick={props.onClose}
           >
             Close
@@ -325,7 +327,7 @@ export function RecordDialog(props: {
 
         {proxied ? (
           <div
-            className="mt-6 overflow-x-auto border-b border-slate-800"
+            className="mt-6 overflow-x-auto border-b border-line"
             role="tablist"
             aria-label="Record configuration"
           >
@@ -339,12 +341,12 @@ export function RecordDialog(props: {
                   onClick={() => setActiveTab(tab.id)}
                   className={`rounded-t-xl border-b-2 px-4 py-3 text-left transition ${
                     activeTab === tab.id
-                      ? "border-emerald-300 bg-emerald-300/10 text-emerald-200"
-                      : "border-transparent text-slate-500 hover:bg-slate-800/60 hover:text-slate-200"
+                      ? "border-signal bg-signal/10 text-signal"
+                      : "border-transparent text-faint hover:bg-raised/80 hover:text-mist"
                   }`}
                 >
                   <span className="block text-sm font-medium">{tab.label}</span>
-                  <span className="mt-1 block text-[11px] text-slate-500">
+                  <span className="mt-1 block text-[11px] text-faint">
                     {tab.hint}
                   </span>
                 </button>
@@ -392,12 +394,12 @@ export function RecordDialog(props: {
                 />
               </label>
             ) : (
-              <div className="rounded-xl border border-emerald-300/20 bg-emerald-300/5 p-4 text-sm leading-6 text-slate-300 md:col-span-2">
+              <div className="rounded-xl border border-signal/25 bg-signal/10 p-4 text-sm leading-6 text-mist/90 md:col-span-2">
                 The DNS answer comes from the configured proxy ingress. Set the
                 upstream target in the Origin tab.
               </div>
             )}
-            <label className="flex items-center gap-3 text-sm text-slate-300 md:col-span-2">
+            <label className="flex items-center gap-3 text-sm text-mist/90 md:col-span-2">
               <input
                 type="checkbox"
                 checked={proxied}
@@ -406,7 +408,7 @@ export function RecordDialog(props: {
                   setProxied(enabled);
                   setActiveTab(enabled ? "origin" : "record");
                 }}
-                className="size-4 accent-emerald-300"
+                className="size-4 accent-signal"
                 disabled={!["A", "AAAA", "CNAME"].includes(recordType)}
               />
               Proxy through ProxyCore
@@ -418,7 +420,7 @@ export function RecordDialog(props: {
           <div className="mt-6 space-y-4">
             {activeTab === "origin" ? (
               <section className={sectionClass}>
-                <p className="text-xs uppercase tracking-[0.2em] text-slate-500">
+                <p className="pc-eyebrow">
                   Origin
                 </p>
                 <div className="mt-4 grid gap-4 md:grid-cols-3">
@@ -462,7 +464,7 @@ export function RecordDialog(props: {
                   </label>
                 </div>
                 {recordType === "CNAME" ? (
-                  <p className="mt-3 text-xs leading-5 text-slate-500">
+                  <p className="mt-3 text-xs leading-5 text-faint">
                     Proxied CNAME records require an explicit literal origin IP.
                   </p>
                 ) : null}
@@ -471,7 +473,7 @@ export function RecordDialog(props: {
 
             {activeTab === "tls" ? (
               <section className={sectionClass}>
-                <p className="text-xs uppercase tracking-[0.2em] text-slate-500">
+                <p className="pc-eyebrow">
                   Client TLS
                 </p>
                 <div className="mt-4 grid gap-4 md:grid-cols-2">
@@ -519,14 +521,14 @@ export function RecordDialog(props: {
                     </label>
                   ) : null}
                   {proxyTlsEnabled ? (
-                    <label className="flex items-center gap-3 text-sm text-slate-300 md:col-span-2">
+                    <label className="flex items-center gap-3 text-sm text-mist/90 md:col-span-2">
                       <input
                         type="checkbox"
                         checked={redirectHttpToHttps}
                         onChange={(event) =>
                           setRedirectHttpToHttps(event.target.checked)
                         }
-                        className="size-4 accent-emerald-300"
+                        className="size-4 accent-signal"
                       />
                       Redirect HTTP to HTTPS
                     </label>
@@ -543,7 +545,7 @@ export function RecordDialog(props: {
 
             {activeTab === "nginx" ? (
               <section className={sectionClass}>
-                <p className="text-xs uppercase tracking-[0.2em] text-slate-500">
+                <p className="pc-eyebrow">
                   Nginx
                 </p>
                 <div className="mt-4 grid gap-3 md:grid-cols-2">
@@ -616,7 +618,7 @@ proxy_set_header X-Environment "homelab";`}
                       rows={10}
                     />
                   </label>
-                  <p className="mt-2 text-xs leading-5 text-slate-500">
+                  <p className="mt-2 text-xs leading-5 text-faint">
                     Add server-level Nginx directives, one per line. Generated
                     defaults with the same directive name are omitted so you can
                     override values such as client body size or proxy timeouts.
@@ -629,12 +631,12 @@ proxy_set_header X-Environment "homelab";`}
             {activeTab === "routes" ? (
               <section className={sectionClass}>
                 <div className="flex items-center justify-between">
-                  <p className="text-xs uppercase tracking-[0.2em] text-slate-500">
+                  <p className="pc-eyebrow">
                     Redirects / paths
                   </p>
                   <button
                     type="button"
-                    className="text-xs text-emerald-200 hover:underline"
+                    className="text-xs text-link hover:underline"
                     onClick={() =>
                       setPathRules((current) => [
                         ...current,
@@ -654,7 +656,7 @@ proxy_set_header X-Environment "homelab";`}
                 </div>
                 <div className="mt-4 space-y-3">
                   {pathRules.length === 0 ? (
-                    <p className="text-sm text-slate-500">
+                    <p className="text-sm text-faint">
                       No path rules yet. Requests fall through to the origin at
                       `/`.
                     </p>
@@ -662,7 +664,7 @@ proxy_set_header X-Environment "homelab";`}
                     pathRules.map((rule, index) => (
                       <div
                         key={index}
-                        className="grid gap-2 rounded-xl border border-slate-800 p-3 md:grid-cols-2"
+                        className="grid gap-2 rounded-xl border border-line p-3 md:grid-cols-2"
                       >
                         <label className={labelClass}>
                           Kind
@@ -802,7 +804,7 @@ proxy_set_header X-Environment "homelab";`}
                         )}
                         <button
                           type="button"
-                          className="justify-self-start rounded-xl border border-slate-700 px-3 py-2 text-sm text-slate-400"
+                          className="pc-btn-ghost justify-self-start !text-sm"
                           onClick={() =>
                             setPathRules((current) =>
                               current.filter(
@@ -822,10 +824,10 @@ proxy_set_header X-Environment "homelab";`}
 
             {activeTab === "access" ? (
               <section className={sectionClass}>
-                <p className="text-xs uppercase tracking-[0.2em] text-slate-500">
+                <p className="pc-eyebrow">
                   Basic Auth
                 </p>
-                <label className="mt-4 flex items-center gap-3 text-sm text-slate-300">
+                <label className="mt-4 flex items-center gap-3 text-sm text-mist/90">
                   <input
                     type="checkbox"
                     checked={basicAuthEnabled}
@@ -838,7 +840,7 @@ proxy_set_header X-Environment "homelab";`}
                         setActiveTab("access");
                       }
                     }}
-                    className="size-4 accent-emerald-300"
+                    className="size-4 accent-signal"
                   />
                   Require HTTP Basic Auth
                 </label>
@@ -880,7 +882,7 @@ proxy_set_header X-Environment "homelab";`}
         ) : null}
 
         {localError ? (
-          <p className="mt-4 rounded-xl border border-red-400/30 bg-red-400/10 p-3 text-sm text-red-200">
+          <p className="pc-toast-err !mt-4" role="alert">
             {localError}
           </p>
         ) : null}
@@ -888,13 +890,13 @@ proxy_set_header X-Environment "homelab";`}
         <div className="mt-6 flex justify-end gap-3">
           <button
             type="button"
-            className="rounded-xl border border-slate-700 px-4 py-2 text-sm text-slate-300 hover:bg-slate-800"
+            className="pc-btn-ghost"
             onClick={props.onClose}
           >
             Cancel
           </button>
           <button
-            className="rounded-xl bg-emerald-300 px-4 py-2 text-sm font-semibold text-slate-950 hover:bg-emerald-200"
+            className="pc-btn"
             type="submit"
           >
             {editing ? "Save changes" : "Save record"}
@@ -914,7 +916,7 @@ function Toggle(props: {
   return (
     <label
       className={`flex items-center gap-3 text-sm ${
-        props.disabled ? "text-slate-600" : "text-slate-300"
+        props.disabled ? "text-faint" : "text-mist/90"
       }`}
     >
       <input
@@ -922,7 +924,7 @@ function Toggle(props: {
         checked={props.checked}
         disabled={props.disabled}
         onChange={(event) => props.onChange(event.target.checked)}
-        className="size-4 accent-emerald-300"
+        className="size-4 accent-signal"
       />
       {props.label}
     </label>
@@ -990,4 +992,32 @@ function formatNginxValue(value: string): string {
   return /^[a-zA-Z0-9_./:$-]+$/.test(value)
     ? value
     : `"${value.replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`;
+}
+
+function canonicalRecordName(name: string, zoneName?: string): string {
+  const value = name.trim().replace(/\.+$/, "").toLowerCase();
+  if (!zoneName || value === "@" || value === "") {
+    return (value === "@" || value === "" ? zoneName : value) ?? value;
+  }
+  const zone = zoneName.trim().replace(/\.+$/, "").toLowerCase();
+  return value === zone || value.endsWith(`.${zone}`)
+    ? value
+    : `${value}.${zone}`;
+}
+
+function certificateCoversHostname(
+  certificateHostnames: string[],
+  hostname: string,
+): boolean {
+  const normalizedHostname = hostname.toLowerCase().replace(/\.+$/, "");
+  return certificateHostnames.some((candidate) => {
+    const normalizedCandidate = candidate.toLowerCase().replace(/\.+$/, "");
+    return (
+      normalizedCandidate === normalizedHostname ||
+      (normalizedCandidate.startsWith("*.") &&
+        normalizedHostname.endsWith(normalizedCandidate.slice(1)) &&
+        normalizedHostname.split(".").length ===
+          normalizedCandidate.split(".").length)
+    );
+  });
 }
