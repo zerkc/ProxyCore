@@ -25,8 +25,6 @@ const environmentSchema = z.object({
     .string()
     .url()
     .default("https://acme-v02.api.letsencrypt.org/directory"),
-  CLOUDFLARE_API_TOKEN: z.string().optional(),
-  CLOUDFLARE_ZONE_ID: z.string().optional(),
 });
 
 export type AppConfig = {
@@ -45,10 +43,6 @@ export type AppConfig = {
   nginxConfigDir: string;
   acmeDirectoryUrl: string;
   acmeProductionDirectoryUrl: string;
-  cloudflare: {
-    apiToken?: string;
-    zoneId?: string;
-  };
 };
 
 export function loadConfig(
@@ -73,9 +67,5 @@ export function loadConfig(
     nginxConfigDir: parsed.NGINX_CONFIG_DIR,
     acmeDirectoryUrl: parsed.ACME_DIRECTORY_URL,
     acmeProductionDirectoryUrl: parsed.ACME_PRODUCTION_DIRECTORY_URL,
-    cloudflare: {
-      apiToken: parsed.CLOUDFLARE_API_TOKEN,
-      zoneId: parsed.CLOUDFLARE_ZONE_ID,
-    },
   };
 }

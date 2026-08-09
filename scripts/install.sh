@@ -71,12 +71,8 @@ wait_postgres() {
 ensure_env() {
   if [ -f .env ]; then
     log "Keeping existing .env"
-    # Ensure host-mode ACME upstream exists for older installs.
     if ! grep -q '^NGINX_ACME_UPSTREAM=' .env; then
       printf '\nNGINX_ACME_UPSTREAM=http://127.0.0.1:%s\n' "$WEB_PORT" >>.env
-    fi
-    if ! grep -q '^NGINX_NETWORK_MODE=' .env; then
-      printf 'NGINX_NETWORK_MODE=host\n' >>.env
     fi
     return 0
   fi
@@ -86,22 +82,20 @@ ensure_env() {
   postgres_password="$(random_password)"
 
   cat >.env <<EOF
-NODE_ENV=production
+PROXYCORE_MASTER_KEY_BASE64=${master_key}
 POSTGRES_DB=proxycore
 POSTGRES_USER=proxycore
 POSTGRES_PASSWORD=${postgres_password}
-PROXYCORE_MASTER_KEY_BASE64=${master_key}
 WEB_PORT=${WEB_PORT}
 DNS_PORT=${DNS_PORT}
-NGINX_ACME_UPSTREAM=http://127.0.0.1:${WEB_PORT}
-NGINX_NETWORK_MODE=host
+PROXY_INGRESS_IPV4=
+PROXY_INGRESS_IPV6=
 ACME_DIRECTORY_URL=https://acme-staging-v02.api.letsencrypt.org/directory
 ACME_PRODUCTION_DIRECTORY_URL=https://acme-v02.api.letsencrypt.org/directory
-CLOUDFLARE_API_TOKEN=
-CLOUDFLARE_ZONE_ID=
+NGINX_ACME_UPSTREAM=http://127.0.0.1:${WEB_PORT}
 EOF
   chmod 600 .env
-  log "Created .env with generated master key and Postgres password"
+  log "Created .env (generated PROXYCORE_MASTER_KEY_BASE64 and POSTGRES_PASSWORD)"
 }
 
 sync_repo() {

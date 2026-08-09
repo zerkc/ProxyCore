@@ -8,7 +8,7 @@ describe("loadConfig", () => {
     expect(config.nodeEnv).toBe("test");
     expect(config.sessionCookieName).toBe("proxycore_session");
     expect(config.sessionTtlSeconds).toBe(28_800);
-    expect(config.cloudflare.apiToken).toBeUndefined();
+    expect(config.acmeDirectoryUrl).toContain("acme-staging");
   });
 
   it("rejects malformed database URLs", () => {

@@ -34,8 +34,6 @@ services:
       ACME_DIRECTORY_URL: ${ACME_DIRECTORY_URL:-https://acme-staging-v02.api.letsencrypt.org/directory}
       ACME_PRODUCTION_DIRECTORY_URL: ${ACME_PRODUCTION_DIRECTORY_URL:-https://acme-v02.api.letsencrypt.org/directory}
       NGINX_ACME_UPSTREAM: ${NGINX_ACME_UPSTREAM:-http://127.0.0.1:3000}
-      CLOUDFLARE_API_TOKEN: ${CLOUDFLARE_API_TOKEN:-}
-      CLOUDFLARE_ZONE_ID: ${CLOUDFLARE_ZONE_ID:-}
     depends_on:
       postgres:
         condition: service_healthy

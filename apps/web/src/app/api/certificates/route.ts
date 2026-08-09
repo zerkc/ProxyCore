@@ -211,21 +211,12 @@ function buildInput(
   const cloudflare =
     issuer === "letsencrypt" && challenge === "dns-01"
       ? {
-          apiToken:
-            stringValue(raw.cloudflare?.apiToken) ??
-            stringValue(config.cloudflare.apiToken),
-          zoneId:
-            stringValue(raw.cloudflare?.zoneId) ??
-            stringValue(config.cloudflare.zoneId),
+          apiToken: stringValue(raw.cloudflare?.apiToken),
+          zoneId: stringValue(raw.cloudflare?.zoneId),
           zoneName: stringValue(raw.cloudflare?.zoneName),
         }
       : undefined;
-  if (
-    cloudflare &&
-    !cloudflare.apiToken &&
-    !config.cloudflare.apiToken &&
-    config.persistenceMode === "memory"
-  ) {
+  if (cloudflare && !cloudflare.apiToken && config.persistenceMode === "memory") {
     throw new HttpError(400, "DNS-01 requires a Cloudflare API token");
   }
 
