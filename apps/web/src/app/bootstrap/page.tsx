@@ -57,7 +57,7 @@ export default function BootstrapPage() {
               className="pc-input"
               type="password"
               autoComplete="new-password"
-              minLength={12}
+              minLength={5}
               required
             />
           </label>

@@ -173,8 +173,8 @@ function deriveKey(
 }
 
 function assertPassword(password: string): void {
-  if (password.length < 12) {
-    throw new Error("Password must contain at least 12 characters");
+  if (password.length < 5) {
+    throw new Error("Password must contain at least 5 characters");
   }
 }
 
