@@ -28,30 +28,32 @@ export default function LoginPage() {
     <main className="grid min-h-screen place-items-center px-6 py-12">
       <form
         onSubmit={submit}
-        className="w-full max-w-md rounded-[2rem] border border-slate-700 bg-slate-950/80 p-8 shadow-2xl shadow-slate-950/40"
+        className="pc-panel pc-enter w-full max-w-md p-8 shadow-2xl shadow-black/30"
       >
-        <p className="text-xs uppercase tracking-[0.32em] text-emerald-300">ProxyCore</p>
-        <h1 className="mt-4 text-3xl font-semibold tracking-tight">Return to the control room</h1>
-        <p className="mt-3 text-sm leading-6 text-slate-400">
+        <p className="pc-title text-3xl text-mist">ProxyCore</p>
+        <h1 className="mt-3 text-xl font-medium tracking-tight text-mist/90">
+          Return to the control room
+        </h1>
+        <p className="mt-3 text-sm leading-6 text-mute">
           Local credentials only. Sessions can be revoked by an Owner.
         </p>
         <div className="mt-8 space-y-5">
-          <label className="block text-sm text-slate-300">
+          <label className="pc-label">
             Username
             <input
               value={username}
               onChange={(event) => setUsername(event.target.value)}
-              className="mt-2 w-full rounded-xl border border-slate-700 bg-slate-900 px-4 py-3 outline-none transition focus:border-emerald-300"
+              className="pc-input"
               autoComplete="username"
               required
             />
           </label>
-          <label className="block text-sm text-slate-300">
+          <label className="pc-label">
             Password
             <input
               value={password}
               onChange={(event) => setPassword(event.target.value)}
-              className="mt-2 w-full rounded-xl border border-slate-700 bg-slate-900 px-4 py-3 outline-none transition focus:border-emerald-300"
+              className="pc-input"
               type="password"
               autoComplete="current-password"
               required
@@ -59,17 +61,17 @@ export default function LoginPage() {
           </label>
         </div>
         {error ? (
-          <p className="mt-5 rounded-xl border border-red-400/30 bg-red-400/10 p-3 text-sm text-red-200" role="alert">
+          <p className="pc-toast-err !mt-5" role="alert">
             {error}
           </p>
         ) : null}
-        <button
-          className="mt-7 w-full rounded-xl bg-emerald-300 px-4 py-3 font-semibold text-slate-950 transition hover:bg-emerald-200 focus:outline-none focus:ring-2 focus:ring-emerald-200 focus:ring-offset-2 focus:ring-offset-slate-950"
-          type="submit"
-        >
+        <button className="pc-btn mt-7 w-full" type="submit">
           Sign in
         </button>
-        <a className="mt-5 block text-center text-sm text-slate-400 underline underline-offset-4" href="/bootstrap">
+        <a
+          className="mt-5 block text-center text-sm text-mute underline underline-offset-4 transition hover:text-mist"
+          href="/bootstrap"
+        >
           New installation? Bootstrap Owner
         </a>
       </form>

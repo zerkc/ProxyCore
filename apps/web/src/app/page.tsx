@@ -1,37 +1,40 @@
 export default function HomePage() {
   return (
-    <main className="mx-auto flex min-h-screen max-w-6xl flex-col gap-10 px-6 py-16">
-      <header className="flex flex-col gap-4">
-        <p className="text-sm uppercase tracking-[0.35em] text-emerald-300">
-          ProxyCore / control plane
-        </p>
-        <h1 className="max-w-3xl text-5xl font-semibold tracking-tight">
+    <main className="relative mx-auto flex min-h-screen max-w-6xl flex-col justify-center gap-10 px-6 py-16">
+      <header className="pc-enter flex flex-col gap-5">
+        <p className="pc-title text-5xl text-mist md:text-6xl">ProxyCore</p>
+        <h1 className="max-w-2xl text-xl font-medium tracking-tight text-mist/90 md:text-2xl">
           DNS that knows where your traffic belongs.
         </h1>
-        <p className="max-w-2xl text-lg text-slate-300">
+        <p className="max-w-xl text-base leading-7 text-mute">
           A single-installation homelab control plane for authoritative local
           DNS, safe forwarding, and record-level ingress.
         </p>
+        <div className="mt-2 flex flex-wrap gap-3">
+          <a href="/login" className="pc-btn">
+            Open control room
+          </a>
+          <a href="/bootstrap" className="pc-btn-ghost">
+            Bootstrap Owner
+          </a>
+        </div>
       </header>
-      <section className="grid gap-4 md:grid-cols-3" aria-label="System status">
+      <section
+        className="pc-enter grid gap-3 md:grid-cols-3"
+        aria-label="System status"
+        style={{ animationDelay: "80ms" }}
+      >
         {[
           ["CoreDNS", "Ready to configure"],
           ["Nginx", "Awaiting first apply"],
           ["Worker", "Baseline online"],
         ].map(([service, status]) => (
-          <article
-            key={service}
-            className="rounded-2xl border border-slate-700 bg-slate-900/70 p-5 shadow-xl shadow-slate-950/20"
-          >
-            <p className="text-sm text-slate-400">{service}</p>
-            <p className="mt-3 text-xl font-medium text-emerald-200">{status}</p>
+          <article key={service} className="pc-panel p-5">
+            <p className="pc-eyebrow">{service}</p>
+            <p className="mt-4 font-mono text-lg text-link">{status}</p>
           </article>
         ))}
       </section>
-      <p className="text-sm text-slate-400">
-        Application baseline is ready. Bootstrap and configuration workflows
-        will appear here as the control-plane modules land.
-      </p>
     </main>
   );
 }
