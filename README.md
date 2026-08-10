@@ -64,3 +64,7 @@ Public authoritative DNS, Cloudflare Tunnel lifecycle, ordinary Cloudflare recor
 | [Operations](docs/runbooks/operations.md) | Apply, secrets, incidents |
 | [Decision log](docs/decision-log.md) | Confirmed product decisions |
 | [Design index](docs/README.md) | Full reading order |
+
+## License
+
+Licensed under the [Apache License, Version 2.0](LICENSE).
