@@ -5,6 +5,32 @@ import (
 	"testing"
 )
 
+func TestChallengeRecordNameStripsWildcard(t *testing.T) {
+	t.Parallel()
+	got, err := challengeRecordName("*.home.ggzdeveloper.com", "ggzdeveloper.com")
+	if err != nil {
+		t.Fatalf("challengeRecordName: %v", err)
+	}
+	want := "_acme-challenge.home.ggzdeveloper.com"
+	if got != want {
+		t.Fatalf("got=%q want=%q", got, want)
+	}
+	apex, err := challengeRecordName("home.ggzdeveloper.com", "ggzdeveloper.com")
+	if err != nil {
+		t.Fatalf("apex: %v", err)
+	}
+	if apex != want {
+		t.Fatalf("apex got=%q want=%q", apex, want)
+	}
+}
+
+func TestNormalizeTXTContent(t *testing.T) {
+	t.Parallel()
+	if got := normalizeTXTContent(`"abc"`); got != "abc" {
+		t.Fatalf("got=%q", got)
+	}
+}
+
 func TestCloudflareResponseAcceptsObjectOrArrayResult(t *testing.T) {
 	t.Parallel()
 

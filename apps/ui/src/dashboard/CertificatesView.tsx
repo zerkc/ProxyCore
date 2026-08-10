@@ -26,7 +26,7 @@ export function CertificatesView(props: {
   const [environment, setEnvironment] = useState("staging");
   const [challenge, setChallenge] = useState<Challenge>("http-01");
   const [keyType, setKeyType] = useState<"rsa" | "ecdsa">("rsa");
-  const [propagationSeconds, setPropagationSeconds] = useState(30);
+  const [propagationSeconds, setPropagationSeconds] = useState(60);
   const [email, setEmail] = useState("");
   const [certificateFile, setCertificateFile] = useState<File>();
   const [privateKeyFile, setPrivateKeyFile] = useState<File>();

@@ -71,7 +71,7 @@ func buildCertificateInput(raw certRawInput, acmeDirectoryURL, acmeProductionURL
 
 	var propagationSeconds *int
 	if challenge == "dns-01" {
-		value := 30
+		value := 60
 		if !isEmptyValue(raw.propagationSeconds) {
 			value = int(jsNumber(raw.propagationSeconds))
 		}
@@ -156,7 +156,7 @@ func isEmptyValue(value any) bool {
 func isIntegerValue(value any) bool {
 	switch v := value.(type) {
 	case nil:
-		return true // unset defaults to 30, which is an integer
+		return true // unset defaults to 60, which is an integer
 	case string:
 		if v == "" {
 			return true

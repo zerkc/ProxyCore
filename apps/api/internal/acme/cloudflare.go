@@ -19,6 +19,8 @@ import (
 type Dns01Adapter interface {
 	Present(ctx context.Context, hostname, value string) error
 	Cleanup(ctx context.Context, hostname, value string) error
+	// CleanupAll removes every TXT record at the challenge name for hostname.
+	CleanupAll(ctx context.Context, hostname string) error
 }
 
 // CloudflareOptions configures the Cloudflare DNS-01 adapter.
@@ -93,7 +95,7 @@ func NewCloudflareDns01Adapter(options CloudflareOptions) *CloudflareDns01Adapte
 	return &CloudflareDns01Adapter{options: options, client: client, zones: map[string]cloudflareZone{}}
 }
 
-// Present creates the challenge TXT record.
+// Present creates the challenge TXT record (keeps other values at the same name).
 func (a *CloudflareDns01Adapter) Present(ctx context.Context, hostname, value string) error {
 	zone, err := a.resolveZone(ctx, hostname)
 	if err != nil {
@@ -102,6 +104,15 @@ func (a *CloudflareDns01Adapter) Present(ctx context.Context, hostname, value st
 	name, err := challengeRecordName(hostname, zone.Name)
 	if err != nil {
 		return err
+	}
+	records, err := a.listChallengeTXT(ctx, zone.ID, name)
+	if err != nil {
+		return err
+	}
+	for _, record := range records {
+		if normalizeTXTContent(record.Content) == value {
+			return nil
+		}
 	}
 	body, _ := json.Marshal(map[string]any{"type": "TXT", "name": name, "content": value, "ttl": 120})
 	_, err = a.request(ctx, http.MethodPost, "/dns_records", body, zone.ID)
@@ -118,18 +129,58 @@ func (a *CloudflareDns01Adapter) Cleanup(ctx context.Context, hostname, value st
 	if err != nil {
 		return err
 	}
-	records, err := a.request(ctx, http.MethodGet, "/dns_records?type=TXT&name="+url.QueryEscape(name), nil, zone.ID)
+	records, err := a.listChallengeTXT(ctx, zone.ID, name)
 	if err != nil {
 		return err
 	}
 	for _, record := range records {
-		if record.Type == "TXT" && record.Content == value {
+		if normalizeTXTContent(record.Content) == value {
 			if _, err := a.request(ctx, http.MethodDelete, "/dns_records/"+record.ID, nil, zone.ID); err != nil {
 				return err
 			}
 		}
 	}
 	return nil
+}
+
+// CleanupAll removes every TXT record at the ACME challenge name.
+func (a *CloudflareDns01Adapter) CleanupAll(ctx context.Context, hostname string) error {
+	zone, err := a.resolveZone(ctx, hostname)
+	if err != nil {
+		return err
+	}
+	name, err := challengeRecordName(hostname, zone.Name)
+	if err != nil {
+		return err
+	}
+	records, err := a.listChallengeTXT(ctx, zone.ID, name)
+	if err != nil {
+		return err
+	}
+	for _, record := range records {
+		if _, err := a.request(ctx, http.MethodDelete, "/dns_records/"+record.ID, nil, zone.ID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (a *CloudflareDns01Adapter) listChallengeTXT(ctx context.Context, zoneID, name string) ([]cloudflareRecord, error) {
+	records, err := a.request(ctx, http.MethodGet, "/dns_records?type=TXT&name="+url.QueryEscape(name), nil, zoneID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]cloudflareRecord, 0, len(records))
+	for _, record := range records {
+		if record.Type == "TXT" {
+			out = append(out, record)
+		}
+	}
+	return out, nil
+}
+
+func normalizeTXTContent(value string) string {
+	return strings.Trim(strings.TrimSpace(value), `"`)
 }
 
 func (a *CloudflareDns01Adapter) resolveZone(ctx context.Context, hostname string) (cloudflareZone, error) {
@@ -260,6 +311,9 @@ func formatCloudflareErrors(errs []cloudflareErr) string {
 func challengeRecordName(hostname, zoneName string) (string, error) {
 	raw := strings.TrimRight(strings.ToLower(strings.TrimSpace(hostname)), ".")
 	hostWithoutPrefix := strings.TrimPrefix(raw, "_acme-challenge.")
+	// Wildcard authz identifiers are *.example.com but the TXT lives at
+	// _acme-challenge.example.com (same name as the apex companion).
+	hostWithoutPrefix = strings.TrimPrefix(hostWithoutPrefix, "*.")
 	normalizedHost, err := domain.NormalizeDNSName(hostWithoutPrefix, false)
 	if err != nil {
 		return "", err

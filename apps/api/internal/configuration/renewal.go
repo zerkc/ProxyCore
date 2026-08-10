@@ -110,7 +110,7 @@ func (s *Store) RenewLetsEncryptCertificate(ctx context.Context, cert domain.Cer
 		options.Http01 = acme.GlobalHttp01Store()
 	}
 	if cert.Challenge == "dns-01" {
-		options.PropagationSeconds = 30
+		options.PropagationSeconds = 60
 		apiToken, zoneID, zoneName, err := s.resolveCloudflareCredentials(ctx, nil)
 		if err != nil {
 			_ = s.markRenewalFailure(ctx, cert.ID, err.Error())

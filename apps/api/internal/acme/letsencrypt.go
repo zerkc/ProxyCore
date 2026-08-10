@@ -72,9 +72,15 @@ func IssueLetsEncrypt(ctx context.Context, options LetsEncryptOptions) (Material
 		return Material{}, err
 	}
 
-	for _, authzURL := range order.AuthzURLs {
-		if err := authorizeChallenge(ctx, client, authzURL, options); err != nil {
+	if options.Challenge == "dns-01" {
+		if err := authorizeDNSChallenges(ctx, client, order.AuthzURLs, options); err != nil {
 			return Material{}, err
+		}
+	} else {
+		for _, authzURL := range order.AuthzURLs {
+			if err := authorizeChallenge(ctx, client, authzURL, options); err != nil {
+				return Material{}, err
+			}
 		}
 	}
 
@@ -124,23 +130,81 @@ func IssueLetsEncrypt(ctx context.Context, options LetsEncryptOptions) (Material
 	}, nil
 }
 
+type pendingDNSChallenge struct {
+	authzURL   string
+	challenge  *xacme.Challenge
+	identifier string
+	record     string
+}
+
+// authorizeDNSChallenges presents every DNS-01 value first (apex + wildcard share
+// one TXT name), waits once for propagation, then accepts all authorizations.
+func authorizeDNSChallenges(ctx context.Context, client *xacme.Client, authzURLs []string, options LetsEncryptOptions) error {
+	pending := make([]pendingDNSChallenge, 0, len(authzURLs))
+	cleared := map[string]bool{}
+
+	for _, authzURL := range authzURLs {
+		authz, challenge, err := loadChallenge(ctx, client, authzURL, "dns-01")
+		if err != nil {
+			return err
+		}
+		if authz == nil {
+			continue
+		}
+		record, err := client.DNS01ChallengeRecord(challenge.Token)
+		if err != nil {
+			return err
+		}
+		identifier := authz.Identifier.Value
+		clearKey := dnsChallengeClearKey(identifier)
+		if !cleared[clearKey] {
+			if err := options.Dns01.CleanupAll(ctx, identifier); err != nil {
+				return err
+			}
+			cleared[clearKey] = true
+		}
+		if err := options.Dns01.Present(ctx, identifier, record); err != nil {
+			return err
+		}
+		pending = append(pending, pendingDNSChallenge{
+			authzURL:   authzURL,
+			challenge:  challenge,
+			identifier: identifier,
+			record:     record,
+		})
+	}
+	defer func() {
+		for _, item := range pending {
+			_ = options.Dns01.Cleanup(ctx, item.identifier, item.record)
+		}
+	}()
+
+	waitSeconds(options.PropagationSeconds)
+
+	for _, item := range pending {
+		if _, err := client.Accept(ctx, item.challenge); err != nil {
+			return err
+		}
+		if _, err := client.WaitAuthorization(ctx, item.authzURL); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func dnsChallengeClearKey(identifier string) string {
+	normalized := strings.ToLower(strings.TrimSpace(identifier))
+	normalized = strings.TrimPrefix(normalized, "*.")
+	return normalized
+}
+
 func authorizeChallenge(ctx context.Context, client *xacme.Client, authzURL string, options LetsEncryptOptions) error {
-	authz, err := client.GetAuthorization(ctx, authzURL)
+	authz, challenge, err := loadChallenge(ctx, client, authzURL, options.Challenge)
 	if err != nil {
 		return err
 	}
-	if authz.Status == xacme.StatusValid {
+	if authz == nil {
 		return nil
-	}
-	var challenge *xacme.Challenge
-	for _, candidate := range authz.Challenges {
-		if candidate.Type == options.Challenge {
-			challenge = candidate
-			break
-		}
-	}
-	if challenge == nil {
-		return errors.New("ACME server did not offer the requested challenge: " + options.Challenge)
 	}
 
 	identifier := authz.Identifier.Value
@@ -157,6 +221,9 @@ func authorizeChallenge(ctx context.Context, client *xacme.Client, authzURL stri
 		if err != nil {
 			return err
 		}
+		if err := options.Dns01.CleanupAll(ctx, identifier); err != nil {
+			return err
+		}
 		if err := options.Dns01.Present(ctx, identifier, record); err != nil {
 			return err
 		}
@@ -171,6 +238,22 @@ func authorizeChallenge(ctx context.Context, client *xacme.Client, authzURL stri
 		return err
 	}
 	return nil
+}
+
+func loadChallenge(ctx context.Context, client *xacme.Client, authzURL, challengeType string) (*xacme.Authorization, *xacme.Challenge, error) {
+	authz, err := client.GetAuthorization(ctx, authzURL)
+	if err != nil {
+		return nil, nil, err
+	}
+	if authz.Status == xacme.StatusValid {
+		return nil, nil, nil
+	}
+	for _, candidate := range authz.Challenges {
+		if candidate.Type == challengeType {
+			return authz, candidate, nil
+		}
+	}
+	return nil, nil, errors.New("ACME server did not offer the requested challenge: " + challengeType)
 }
 
 func waitSeconds(seconds int) {

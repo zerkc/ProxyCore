@@ -76,8 +76,8 @@ func TestBuildCertificateInputDefaultsDNSPropagation(t *testing.T) {
 	if input.Environment != "staging" || input.DirectoryURL != testStagingURL {
 		t.Fatalf("environment=%q directoryURL=%q", input.Environment, input.DirectoryURL)
 	}
-	if input.PropagationSeconds == nil || *input.PropagationSeconds != 30 {
-		t.Fatalf("propagationSeconds default should be 30, got %v", input.PropagationSeconds)
+	if input.PropagationSeconds == nil || *input.PropagationSeconds != 60 {
+		t.Fatalf("propagationSeconds default should be 60, got %v", input.PropagationSeconds)
 	}
 }
 
