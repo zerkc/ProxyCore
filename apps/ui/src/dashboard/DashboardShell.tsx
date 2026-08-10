@@ -46,9 +46,15 @@ export default function DashboardShell({ children }: { children: ReactNode }) {
   return (
     <main className="min-h-screen">
       <PatchBar
+        loaded={status !== undefined}
         desired={status?.desiredRevision}
         applied={status?.appliedRevision}
         inSync={inSync}
+        pendingJob={
+          status?.jobs.some((job) =>
+            ["queued", "validating", "applying"].includes(job.status),
+          ) ?? false
+        }
         onApply={apply}
       />
 
@@ -154,28 +160,41 @@ export default function DashboardShell({ children }: { children: ReactNode }) {
 }
 
 function PatchBar({
+  loaded,
   desired,
   applied,
   inSync,
+  pendingJob,
   onApply,
 }: {
+  loaded: boolean;
   desired?: { revisionNumber: number; checksum: string };
   applied?: { revisionNumber: number; checksum: string };
   inSync: boolean;
+  pendingJob: boolean;
   onApply: () => void;
 }) {
-  const drift = !inSync;
+  const waiting = !loaded || pendingJob || !inSync;
+  const label = !loaded
+    ? "Checking patch state"
+    : pendingJob
+      ? "Apply in progress"
+      : inSync
+        ? "Patch live"
+        : "Patch pending";
   const revisionLabel =
     desired && applied
       ? `r${desired.revisionNumber} → r${applied.revisionNumber}`
       : desired
         ? `r${desired.revisionNumber} → —`
-        : "No revision yet";
+        : loaded
+          ? "No revision yet"
+          : "…";
 
   return (
     <div
       className="pc-sync-bar"
-      data-drift={drift ? "true" : "false"}
+      data-drift={waiting ? "true" : "false"}
       role="status"
       aria-live="polite"
     >
@@ -183,10 +202,10 @@ function PatchBar({
         <span className="pc-sync-dot" aria-hidden />
         <span
           className={`shrink-0 text-xs font-semibold ${
-            drift ? "text-signal" : "text-link"
+            waiting ? "text-signal" : "text-link"
           }`}
         >
-          {drift ? "Patch pending" : "Patch live"}
+          {label}
         </span>
         <span className="hidden font-mono text-[11px] text-faint sm:inline">
           {revisionLabel}
@@ -206,13 +225,14 @@ function PatchBar({
           <button
             type="button"
             onClick={onApply}
+            disabled={!loaded}
             className={`rounded-lg px-2.5 py-1 text-[11px] font-semibold transition ${
-              drift
+              waiting && loaded
                 ? "bg-signal text-[#1a120c] hover:bg-[#e6893d]"
                 : "border border-line text-mute hover:border-signal/40 hover:text-mist"
             }`}
           >
-            {drift ? "Apply now" : "Re-apply"}
+            {!loaded ? "…" : inSync ? "Re-apply" : "Apply now"}
           </button>
         </div>
       </div>

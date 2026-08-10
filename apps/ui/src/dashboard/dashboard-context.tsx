@@ -4,6 +4,7 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from "react";
@@ -97,8 +98,33 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   }
 
   useEffect(() => {
-    void refresh();
-  }, []);
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    async function tick() {
+      try {
+        await refresh();
+      } catch {
+        if (!cancelled) {
+          setError("Status could not be loaded");
+        }
+      }
+      if (cancelled) {
+        return;
+      }
+      timer = setTimeout(() => {
+        void tick();
+      }, 3_000);
+    }
+
+    void tick();
+    return () => {
+      cancelled = true;
+      if (timer) {
+        clearTimeout(timer);
+      }
+    };
+  }, [navigate]);
 
   async function createZone(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
