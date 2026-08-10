@@ -73,13 +73,14 @@ export function apiError(error: unknown): Response {
 
 export function sessionCookie(token: string, expiresAt: Date): string {
   const config = getWebContext().config;
-  const secure = config.nodeEnv === "production" ? "; Secure" : "";
+  const secure = config.secureCookies ? "; Secure" : "";
   return `${config.sessionCookieName}=${token}; Path=/; HttpOnly; SameSite=Lax; Expires=${expiresAt.toUTCString()}${secure}`;
 }
 
 export function clearSessionCookie(): string {
   const config = getWebContext().config;
-  return `${config.sessionCookieName}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`;
+  const secure = config.secureCookies ? "; Secure" : "";
+  return `${config.sessionCookieName}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${secure}`;
 }
 
 function inferRequestIngress(request: Request): IngressAddresses {

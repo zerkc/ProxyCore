@@ -33,8 +33,11 @@ func Load() (Config, error) {
 		MasterKeyBase64:   os.Getenv("PROXYCORE_MASTER_KEY_BASE64"),
 		SessionCookieName: env("SESSION_COOKIE_NAME", "proxycore_session"),
 		SessionTTL:        time.Duration(sessionTTLSeconds) * time.Second,
-		SecureCookies:     os.Getenv("NODE_ENV") == "production" || os.Getenv("PROXYCORE_SECURE_COOKIES") == "1",
-		NodeAPIURL:        strings.TrimRight(env("PROXYCORE_NODE_API_URL", ""), "/"),
+		// Homelab UI is often reached over plain HTTP (LAN IP). Secure cookies
+		// are opt-in so sessions work without TLS; set PROXYCORE_SECURE_COOKIES=1
+		// when terminating HTTPS in front of the API.
+		SecureCookies: envBool("PROXYCORE_SECURE_COOKIES", false),
+		NodeAPIURL:    strings.TrimRight(env("PROXYCORE_NODE_API_URL", ""), "/"),
 	}
 	if !strings.HasPrefix(cfg.Addr, ":") && !strings.Contains(cfg.Addr, ":") {
 		port, err := strconv.Atoi(cfg.Addr)
@@ -66,4 +69,18 @@ func envInt(key string, fallback int) (int, error) {
 		return 0, fmt.Errorf("%s must be positive", key)
 	}
 	return parsed, nil
+}
+
+func envBool(key string, fallback bool) bool {
+	value := strings.TrimSpace(strings.ToLower(os.Getenv(key)))
+	switch value {
+	case "":
+		return fallback
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return fallback
+	}
 }

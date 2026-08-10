@@ -12,6 +12,10 @@ const environmentSchema = z.object({
   PROXYCORE_MASTER_KEY_BASE64: z.string().optional(),
   SESSION_COOKIE_NAME: z.string().min(1).default("proxycore_session"),
   SESSION_TTL_SECONDS: z.coerce.number().int().positive().default(28_800),
+  // Opt-in: homelab dashboard is often HTTP over a LAN IP.
+  PROXYCORE_SECURE_COOKIES: z
+    .enum(["0", "1", "true", "false", "yes", "no", "on", "off"])
+    .optional(),
   PROXY_INGRESS_IPV4: z.string().optional(),
   PROXY_INGRESS_IPV6: z.string().optional(),
   WORKER_SOCKET_PATH: z.string().min(1).default("/run/proxycore/control.sock"),
@@ -34,6 +38,7 @@ export type AppConfig = {
   masterKeyBase64?: string;
   sessionCookieName: string;
   sessionTtlSeconds: number;
+  secureCookies: boolean;
   proxyIngress: {
     ipv4?: string;
     ipv6?: string;
@@ -44,6 +49,20 @@ export type AppConfig = {
   acmeDirectoryUrl: string;
   acmeProductionDirectoryUrl: string;
 };
+
+function parseSecureCookies(
+  value: string | undefined,
+): boolean {
+  switch ((value ?? "").trim().toLowerCase()) {
+    case "1":
+    case "true":
+    case "yes":
+    case "on":
+      return true;
+    default:
+      return false;
+  }
+}
 
 export function loadConfig(
   environment: Record<string, string | undefined> = process.env,
@@ -58,6 +77,7 @@ export function loadConfig(
     masterKeyBase64: parsed.PROXYCORE_MASTER_KEY_BASE64,
     sessionCookieName: parsed.SESSION_COOKIE_NAME,
     sessionTtlSeconds: parsed.SESSION_TTL_SECONDS,
+    secureCookies: parseSecureCookies(parsed.PROXYCORE_SECURE_COOKIES),
     proxyIngress: {
       ipv4: parsed.PROXY_INGRESS_IPV4,
       ipv6: parsed.PROXY_INGRESS_IPV6,
