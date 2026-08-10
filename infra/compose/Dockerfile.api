@@ -10,8 +10,12 @@ RUN bun run build
 # Go API
 FROM golang:1.25-alpine AS api
 WORKDIR /src
+COPY VERSION ./VERSION
 COPY apps/api/ ./
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/proxycore-api ./cmd/server
+RUN VERSION="$(tr -d '[:space:]' < VERSION)" \
+  && CGO_ENABLED=0 GOOS=linux go build -trimpath \
+    -ldflags="-s -w -X github.com/zerkc/ProxyCore/apps/api/internal/version.Version=${VERSION}" \
+    -o /out/proxycore-api ./cmd/server
 
 # Runtime: single static binary + SPA assets
 FROM alpine:3.22

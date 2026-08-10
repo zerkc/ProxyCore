@@ -16,6 +16,7 @@ import (
 	"github.com/zerkc/ProxyCore/apps/api/internal/config"
 	"github.com/zerkc/ProxyCore/apps/api/internal/configuration"
 	"github.com/zerkc/ProxyCore/apps/api/internal/domain"
+	"github.com/zerkc/ProxyCore/apps/api/internal/version"
 )
 
 type Server struct {
@@ -110,6 +111,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":        true,
 		"service":   "proxycore-api",
+		"version":   version.Version,
 		"timestamp": time.Now().UTC().Format(time.RFC3339),
 	})
 }
@@ -120,6 +122,7 @@ func (s *Server) handleReady(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":      true,
 		"service": "proxycore-api",
+		"version": version.Version,
 	})
 }
 
