@@ -104,6 +104,10 @@ jobs:
             -o /tmp/proxycore-api ./cmd/server
 
       - name: Validate Compose file
+        env:
+          # Dummy values only for `compose config` interpolation (not used at runtime).
+          PROXYCORE_MASTER_KEY_BASE64: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+          POSTGRES_PASSWORD: ci-compose-check
         run: docker compose -f compose.yaml config --quiet
 
   ci:
