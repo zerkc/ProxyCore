@@ -26,6 +26,7 @@ func main() {
 	}
 
 	var pool *pgxpool.Pool
+	var configStore *configuration.Store
 	var options []httpserver.Option
 	if cfg.DatabaseURL != "" {
 		connectCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -47,7 +48,7 @@ func main() {
 		})))
 
 		defaultIngress := domain.Ingress{IPv4: cfg.ProxyIngressIPv4, IPv6: cfg.ProxyIngressIPv6}
-		configStore := configuration.New(pool, cfg.MasterKeyBase64, defaultIngress)
+		configStore = configuration.New(pool, cfg.MasterKeyBase64, defaultIngress)
 		options = append(options,
 			httpserver.WithConfigurationStore(configStore),
 			httpserver.WithDefaultIngress(defaultIngress),
@@ -60,6 +61,18 @@ func main() {
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	if configStore != nil {
+		go configuration.RunRenewalLoop(ctx, configStore, configuration.RenewalOptions{
+			StagingDirectoryURL:    cfg.ACMEDirectoryURL,
+			ProductionDirectoryURL: cfg.ACMEProductionDirectoryURL,
+			Email:                  cfg.AcmeEmail,
+			Log:                    logger,
+		}, cfg.CertRenewalInterval)
+	}
+
 	go func() {
 		logger.Printf("proxycore-api listening on %s (ui=%s)", cfg.Addr, cfg.UIDist)
 		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -67,8 +80,6 @@ func main() {
 		}
 	}()
 
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
 	<-ctx.Done()
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

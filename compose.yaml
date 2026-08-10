@@ -30,6 +30,8 @@ services:
       PROXY_INGRESS_IPV6: ${PROXY_INGRESS_IPV6:-}
       ACME_DIRECTORY_URL: ${ACME_DIRECTORY_URL:-https://acme-staging-v02.api.letsencrypt.org/directory}
       ACME_PRODUCTION_DIRECTORY_URL: ${ACME_PRODUCTION_DIRECTORY_URL:-https://acme-v02.api.letsencrypt.org/directory}
+      PROXYCORE_ACME_EMAIL: ${PROXYCORE_ACME_EMAIL:-}
+      PROXYCORE_CERT_RENEWAL_INTERVAL: ${PROXYCORE_CERT_RENEWAL_INTERVAL:-1h}
     depends_on:
       postgres:
         condition: service_healthy

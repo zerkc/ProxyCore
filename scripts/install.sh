@@ -103,6 +103,8 @@ PROXY_INGRESS_IPV4=
 PROXY_INGRESS_IPV6=
 ACME_DIRECTORY_URL=https://acme-staging-v02.api.letsencrypt.org/directory
 ACME_PRODUCTION_DIRECTORY_URL=https://acme-v02.api.letsencrypt.org/directory
+PROXYCORE_ACME_EMAIL=
+PROXYCORE_CERT_RENEWAL_INTERVAL=1h
 NGINX_ACME_UPSTREAM=http://127.0.0.1:${WEB_PORT}
 EOF
   chmod 600 .env

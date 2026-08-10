@@ -22,6 +22,10 @@ type Config struct {
 	// ACME directory URLs for Let's Encrypt issuance (staging vs production).
 	ACMEDirectoryURL           string
 	ACMEProductionDirectoryURL string
+	// Optional ACME contact email for issuance and automatic renewal.
+	AcmeEmail string
+	// How often the API scans for Let's Encrypt certificates due for renewal.
+	CertRenewalInterval time.Duration
 }
 
 func Load() (Config, error) {
@@ -44,6 +48,8 @@ func Load() (Config, error) {
 		ProxyIngressIPv6:           strings.TrimSpace(os.Getenv("PROXY_INGRESS_IPV6")),
 		ACMEDirectoryURL:           env("ACME_DIRECTORY_URL", "https://acme-staging-v02.api.letsencrypt.org/directory"),
 		ACMEProductionDirectoryURL: env("ACME_PRODUCTION_DIRECTORY_URL", "https://acme-v02.api.letsencrypt.org/directory"),
+		AcmeEmail:                  strings.TrimSpace(os.Getenv("PROXYCORE_ACME_EMAIL")),
+		CertRenewalInterval:        envDuration("PROXYCORE_CERT_RENEWAL_INTERVAL", time.Hour),
 	}
 	if !strings.HasPrefix(cfg.Addr, ":") && !strings.Contains(cfg.Addr, ":") {
 		port, err := strconv.Atoi(cfg.Addr)
@@ -89,4 +95,16 @@ func envBool(key string, fallback bool) bool {
 	default:
 		return fallback
 	}
+}
+
+func envDuration(key string, fallback time.Duration) time.Duration {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := time.ParseDuration(value)
+	if err != nil || parsed <= 0 {
+		return fallback
+	}
+	return parsed
 }
