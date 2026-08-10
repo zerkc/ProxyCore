@@ -1,13 +1,14 @@
-FROM node:24.19.0-alpine
+FROM oven/bun:1.3.14-alpine
 
 WORKDIR /app
-RUN corepack enable && corepack prepare pnpm@11.16.0 --activate
 
-COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.json ./
-COPY apps ./apps
+COPY package.json bun.lock bunfig.toml tsconfig.json ./
+COPY apps/ui/package.json ./apps/ui/package.json
+COPY apps/worker ./apps/worker
+COPY apps/control ./apps/control
 COPY packages ./packages
-COPY drizzle.config.ts vitest.config.ts eslint.config.mjs ./
+COPY drizzle.config.ts ./
 
-RUN pnpm install --frozen-lockfile
+RUN bun install --frozen-lockfile --production --filter '!@proxycore/ui'
 
-CMD ["pnpm", "worker"]
+CMD ["bun", "run", "worker"]

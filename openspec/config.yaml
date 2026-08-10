@@ -37,7 +37,7 @@ rules:
     test_command: cd apps/api && go test ./...
   verify:
     test_command: cd apps/api && go test ./...
-    build_command: cd apps/api && go test ./... && pnpm --dir apps/ui build
+    build_command: cd apps/api && go test ./... && bun run build:ui
     coverage_threshold: 0
   archive:
     - Never delete archived change artifacts.

@@ -1,6 +1,7 @@
 .atl/
 node_modules/
 .pnpm-store/
+.bun/
 .next/
 coverage/
 dist/

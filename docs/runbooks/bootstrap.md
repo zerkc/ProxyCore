@@ -48,7 +48,7 @@ preserved.
 ```sh
 docker compose config
 docker compose up -d postgres
-docker compose run --rm web pnpm db:migrate
+docker compose --profile tools run --rm migrate
 docker compose up -d --build
 ```
 

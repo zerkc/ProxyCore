@@ -1,0 +1,3 @@
+[install]
+# Prefer exact lockfile installs in CI/Docker (`bun install --frozen-lockfile`).
+exact = true
