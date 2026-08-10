@@ -32,14 +32,14 @@ Focused verification: `go test ./...` (DB handler test skips without DATABASE_UR
 
 ## Phase 3 — Configuration API (Go)
 
-- [ ] 3.1 `GET /api/status` native in Go (currently proxied to node-api).
-- [ ] 3.2 `GET|PUT /api/settings` + ingress initialization side effect.
-- [ ] 3.3 Zones and records CRUD + apply job enqueue.
-- [ ] 3.4 Streams CRUD + apply job enqueue.
-- [ ] 3.5 Users CRUD (Owner guards).
-- [ ] 3.6 `POST /api/apply` re-apply.
-- [ ] 3.7 Certificates list/issue + `GET /api/acme-challenge/{token}`.
-- [x] 3.8 Transitional `node-api` (tsx standalone) + Go reverse proxy for unmet routes.
+- [x] 3.1 `GET /api/status` native in Go.
+- [x] 3.2 `GET|PUT /api/settings` + ingress initialization side effect.
+- [x] 3.3 Zones and records CRUD + apply job enqueue.
+- [x] 3.4 Streams CRUD (no auto-apply on mutate, matching Node).
+- [x] 3.5 Users CRUD (Owner guards).
+- [x] 3.6 `POST /api/apply` re-apply.
+- [x] 3.7 Certificates list/issue + `GET /api/acme-challenge/{token}`.
+- [x] 3.8 Retired: transitional `node-api` and the Go reverse proxy are removed now that all routes are native Go.
 
 Focused verification: handler tests + SQL against schema. Rollback: `internal/*` / node-api.
 

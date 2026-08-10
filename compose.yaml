@@ -16,7 +16,7 @@ services:
       retries: 12
     networks: [control]
 
-  # Go edge: SPA + auth + reverse-proxy to node-api for configuration routes.
+  # Go control plane: SPA + auth + all configuration routes + ACME challenge.
   api:
     build:
       context: .
@@ -24,10 +24,8 @@ services:
     environment:
       PROXYCORE_API_ADDR: ":3000"
       PROXYCORE_UI_DIST: /app/ui
-      PROXYCORE_NODE_API_URL: http://node-api:3001
       DATABASE_URL: postgres://${POSTGRES_USER:-proxycore}:${POSTGRES_PASSWORD:-change-me}@postgres:5432/${POSTGRES_DB:-proxycore}
       PROXYCORE_MASTER_KEY_BASE64: ${PROXYCORE_MASTER_KEY_BASE64:?set a 32-byte base64 master key}
-      NODE_ENV: production
       PROXY_INGRESS_IPV4: ${PROXY_INGRESS_IPV4:-}
       PROXY_INGRESS_IPV6: ${PROXY_INGRESS_IPV6:-}
       ACME_DIRECTORY_URL: ${ACME_DIRECTORY_URL:-https://acme-staging-v02.api.letsencrypt.org/directory}
@@ -35,8 +33,6 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      node-api:
-        condition: service_started
     ports:
       - "${WEB_PORT:-3000}:3000"
     healthcheck:
@@ -50,29 +46,6 @@ services:
       interval: 10s
       timeout: 5s
       retries: 6
-    networks: [control, data]
-
-  # Transitional Node configuration API (tsx, no Next.js). Retire as Go ports routes.
-  node-api:
-    build:
-      context: .
-      dockerfile: infra/compose/Dockerfile.node-api
-    environment:
-      NODE_ENV: production
-      PROXYCORE_RUNTIME: container
-      PROXYCORE_NODE_API_PORT: 3001
-      DATABASE_URL: postgres://${POSTGRES_USER:-proxycore}:${POSTGRES_PASSWORD:-change-me}@postgres:5432/${POSTGRES_DB:-proxycore}
-      PROXYCORE_MASTER_KEY_BASE64: ${PROXYCORE_MASTER_KEY_BASE64:?set a 32-byte base64 master key}
-      PROXY_INGRESS_IPV4: ${PROXY_INGRESS_IPV4:-}
-      PROXY_INGRESS_IPV6: ${PROXY_INGRESS_IPV6:-}
-      WORKER_SOCKET_PATH: /run/proxycore/control.sock
-      WORKER_CANDIDATE_ROOT: /var/lib/proxycore/candidates
-      ACME_DIRECTORY_URL: ${ACME_DIRECTORY_URL:-https://acme-staging-v02.api.letsencrypt.org/directory}
-      ACME_PRODUCTION_DIRECTORY_URL: ${ACME_PRODUCTION_DIRECTORY_URL:-https://acme-v02.api.letsencrypt.org/directory}
-      NGINX_ACME_UPSTREAM: ${NGINX_ACME_UPSTREAM:-http://127.0.0.1:3000}
-    depends_on:
-      postgres:
-        condition: service_healthy
     networks: [control, data]
 
   # Drizzle migrator (Node one-shot). Not started with `up`; used by install.sh.

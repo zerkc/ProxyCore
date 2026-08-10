@@ -11,7 +11,6 @@
   "workspaces": ["apps/ui"],
   "scripts": {
     "dev:ui": "bun --filter @proxycore/ui dev",
-    "dev:node-api": "bun run apps/web/src/standalone.ts",
     "build:ui": "bun --filter @proxycore/ui build",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",

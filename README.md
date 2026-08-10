@@ -15,7 +15,7 @@ Manage zones and records in a Cloudflare-style UI, toggle proxy on A/AAAA/CNAME,
 | Safe apply | Desired state in PostgreSQL → worker renders → validates → reloads → rolls back on failure. |
 | Local operators | One-time Owner bootstrap; Owner/Operator roles; no OIDC/MFA in the MVP. |
 
-Control plane edge is **Go API + Vite SPA**. Next.js is removed from the dependency tree. A transitional Node `node-api` (tsx) still serves configuration routes until they are ported to Go. The worker never gets a raw Docker socket; a small helper applies fixed Nginx/CoreDNS operations over a private Unix socket.
+Control plane edge is **Go API + Vite SPA**. Next.js is removed from the dependency tree, and the Go API now serves every configuration route (auth, settings, zones, records, streams, certificates, and the ACME HTTP-01 challenge) directly — the transitional Node `node-api` has been retired. The worker never gets a raw Docker socket; a small helper applies fixed Nginx/CoreDNS operations over a private Unix socket.
 
 ## Quick install / update
 
@@ -43,8 +43,7 @@ Details: [docs/runbooks/bootstrap.md](docs/runbooks/bootstrap.md).
 
 Docker Compose on one Linux host:
 
-- **api** — Go edge (SPA + auth + proxy to node-api)  
-- **node-api** — transitional tsx configuration API (no Next.js)  
+- **api** — Go control plane (SPA + auth + all configuration routes + ACME challenge)  
 - **postgres** — desired state, users, jobs, audit  
 - **worker** — render, validate, apply, health checks (Node)  
 - **control** — fixed service-control helper (Docker socket only here)  
