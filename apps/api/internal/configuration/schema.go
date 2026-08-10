@@ -89,6 +89,13 @@ func EnsureSchema(ctx context.Context, pool *pgxpool.Pool) error {
 			created_at timestamptz not null default now(),
 			updated_at timestamptz not null default now()
 		);`,
+		`create table if not exists internal_ca (
+			id text primary key,
+			certificate_pem text not null,
+			key_secret_id uuid not null references secrets(id),
+			created_at timestamptz not null default now(),
+			updated_at timestamptz not null default now()
+		);`,
 		`create table if not exists provider_connections (
 			id uuid primary key default gen_random_uuid(),
 			provider text not null,

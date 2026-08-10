@@ -15,6 +15,13 @@
       "when": 1786225614602,
       "tag": "0001_fancy_warbound",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1786300000000,
+      "tag": "0002_internal_ca",
+      "breakpoints": true
     }
   ]
 }

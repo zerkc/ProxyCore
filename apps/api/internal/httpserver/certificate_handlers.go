@@ -8,6 +8,26 @@ import (
 	"github.com/zerkc/ProxyCore/apps/api/internal/configuration"
 )
 
+func (s *Server) handleDownloadInternalCA(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireUser(w, r); !ok {
+		return
+	}
+	store, ok := s.configStore(w)
+	if !ok {
+		return
+	}
+	certPEM, err := store.EnsureInternalCACertificatePEM(r.Context())
+	if err != nil {
+		writeConfigError(w, err)
+		return
+	}
+	w.Header().Set("Content-Type", "application/x-x509-ca-cert")
+	w.Header().Set("Content-Disposition", `attachment; filename="proxycore-ca.crt"`)
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusOK)
+	_, _ = io.WriteString(w, certPEM)
+}
+
 func (s *Server) handleListCertificates(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.requireUser(w, r); !ok {
 		return

@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-// RunRenewalLoop periodically renews due Let's Encrypt certificates until ctx is done.
+// RunRenewalLoop periodically renews due Let's Encrypt and internal certificates until ctx is done.
 func RunRenewalLoop(ctx context.Context, store *Store, opts RenewalOptions, interval time.Duration) {
 	if store == nil {
 		return
@@ -20,13 +20,13 @@ func RunRenewalLoop(ctx context.Context, store *Store, opts RenewalOptions, inte
 	}
 
 	run := func() {
-		renewed, failed, err := store.RenewDueLetsEncryptCertificates(ctx, opts)
+		renewed, failed, err := store.RenewDueCertificates(ctx, opts)
 		if err != nil {
-			logger.Printf("letsencrypt renewal sweep failed: %v", err)
+			logger.Printf("certificate renewal sweep failed: %v", err)
 			return
 		}
 		if renewed > 0 || failed > 0 {
-			logger.Printf("letsencrypt renewal sweep: renewed=%d failed=%d", renewed, failed)
+			logger.Printf("certificate renewal sweep: renewed=%d failed=%d", renewed, failed)
 		}
 	}
 

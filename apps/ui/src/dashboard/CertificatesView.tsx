@@ -32,6 +32,7 @@ export function CertificatesView(props: {
   const [privateKeyFile, setPrivateKeyFile] = useState<File>();
   const [cloudflareApiToken, setCloudflareApiToken] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const [downloadingCA, setDownloadingCA] = useState(false);
 
   const names = useMemo(
     () =>
@@ -138,6 +139,40 @@ export function CertificatesView(props: {
     return body;
   }
 
+  async function downloadTrustCA() {
+    props.onMessage("");
+    props.onError("");
+    setDownloadingCA(true);
+    try {
+      const response = await fetch("/api/certificates/ca", {
+        credentials: "include",
+      });
+      if (!response.ok) {
+        const payload = (await response.json().catch(() => ({}))) as {
+          error?: string;
+        };
+        props.onError(payload.error ?? "Could not download trust certificate");
+        return;
+      }
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = "proxycore-ca.crt";
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(url);
+      props.onMessage(
+        "Downloaded proxycore-ca.crt — install it once in your OS trust store",
+      );
+    } catch {
+      props.onError("Could not download trust certificate");
+    } finally {
+      setDownloadingCA(false);
+    }
+  }
+
   return (
     <div className="mt-8 space-y-6">
       <section className="pc-panel overflow-hidden">
@@ -219,9 +254,22 @@ export function CertificatesView(props: {
             </label>
 
             {mode === "self-signed" ? (
-              <div className="mt-5 rounded-xl border border-signal/25 bg-signal/10 p-4 text-sm leading-6 text-mist/90">
-                Generates a 2048-bit certificate locally for internal HTTPS.
-                Browsers will require you to trust its CA warning.
+              <div className="mt-5 space-y-3 rounded-xl border border-signal/25 bg-signal/10 p-4 text-sm leading-6 text-mist/90">
+                <p>
+                  Issues a 1-year leaf certificate signed by this installation&apos;s
+                  private CA. Download the CA once and trust it on your PC —
+                  renewals keep working without reinstalling.
+                </p>
+                <button
+                  type="button"
+                  className="pc-btn-ghost !text-xs"
+                  disabled={downloadingCA}
+                  onClick={() => void downloadTrustCA()}
+                >
+                  {downloadingCA
+                    ? "Preparing download…"
+                    : "Download trust certificate (.crt)"}
+                </button>
               </div>
             ) : null}
 
@@ -384,13 +432,23 @@ export function CertificatesView(props: {
               What Nginx can use
             </h2>
           </div>
-          <button
-            type="button"
-            className="pc-btn-ghost !text-xs"
-            onClick={() => void props.onRefresh()}
-          >
-            Refresh inventory
-          </button>
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              className="pc-btn-ghost !text-xs"
+              disabled={downloadingCA}
+              onClick={() => void downloadTrustCA()}
+            >
+              {downloadingCA ? "Preparing…" : "Download trust CA"}
+            </button>
+            <button
+              type="button"
+              className="pc-btn-ghost !text-xs"
+              onClick={() => void props.onRefresh()}
+            >
+              Refresh inventory
+            </button>
+          </div>
         </div>
         <div className="mt-6 grid gap-3">
           {props.certificates.length ? (

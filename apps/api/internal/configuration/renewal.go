@@ -17,7 +17,7 @@ import (
 // issueLetsEncryptFn is overridable in tests.
 var issueLetsEncryptFn = acme.IssueLetsEncrypt
 
-// RenewalOptions configures Let's Encrypt automatic renewal.
+// RenewalOptions configures automatic certificate renewal.
 type RenewalOptions struct {
 	StagingDirectoryURL    string
 	ProductionDirectoryURL string
@@ -33,17 +33,19 @@ type RenewResult struct {
 	JobID       string
 }
 
-// ListLetsEncryptDueForRenewal returns active LE certs past renew_after.
-func (s *Store) ListLetsEncryptDueForRenewal(ctx context.Context, now time.Time) ([]domain.CertificateStatus, error) {
+// ListCertificatesDueForRenewal returns active LE/self-signed certs past renew_after.
+func (s *Store) ListCertificatesDueForRenewal(ctx context.Context, now time.Time) ([]domain.CertificateStatus, error) {
 	rows, err := s.pool.Query(ctx, `
 		select id::text, hostnames, issuer::text, challenge::text, environment, status::text,
 			expires_at, renew_after, key_secret_id::text, certificate_pem, failure_reason
 		from certificates
-		where issuer = 'letsencrypt'
-			and status = 'active'
-			and challenge in ('http-01', 'dns-01')
+		where status = 'active'
 			and renew_after is not null
 			and renew_after <= $1
+			and (
+				(issuer = 'letsencrypt' and challenge in ('http-01', 'dns-01'))
+				or (issuer = 'self-signed' and challenge = 'none')
+			)
 		order by renew_after asc
 	`, now.UTC())
 	if err != nil {
@@ -59,6 +61,21 @@ func (s *Store) ListLetsEncryptDueForRenewal(ctx context.Context, now time.Time)
 		out = append(out, cert)
 	}
 	return out, rows.Err()
+}
+
+// ListLetsEncryptDueForRenewal returns active LE certs past renew_after.
+func (s *Store) ListLetsEncryptDueForRenewal(ctx context.Context, now time.Time) ([]domain.CertificateStatus, error) {
+	all, err := s.ListCertificatesDueForRenewal(ctx, now)
+	if err != nil {
+		return nil, err
+	}
+	out := []domain.CertificateStatus{}
+	for _, cert := range all {
+		if cert.Issuer == "letsencrypt" {
+			out = append(out, cert)
+		}
+	}
+	return out, nil
 }
 
 // RenewLetsEncryptCertificate re-issues one active LE certificate in place.
@@ -111,7 +128,33 @@ func (s *Store) RenewLetsEncryptCertificate(ctx context.Context, cert domain.Cer
 		_ = s.markRenewalFailure(ctx, cert.ID, err.Error())
 		return RenewResult{}, err
 	}
+	return s.persistRenewedCertificate(ctx, cert, material)
+}
 
+// RenewSelfSignedCertificate re-issues one active internal (CA-signed) certificate in place.
+func (s *Store) RenewSelfSignedCertificate(ctx context.Context, cert domain.CertificateStatus) (RenewResult, error) {
+	if cert.Issuer != "self-signed" {
+		return RenewResult{}, errors.New("self-signed renewal requires issuer self-signed")
+	}
+	if cert.Status != "active" {
+		return RenewResult{}, fmt.Errorf("certificate %s is not active", cert.ID)
+	}
+	if cert.Challenge != "none" {
+		return RenewResult{}, fmt.Errorf("certificate %s has unsupported challenge %q", cert.ID, cert.Challenge)
+	}
+	if s.secrets == nil {
+		return RenewResult{}, errors.New("self-signed renewal requires a master key")
+	}
+
+	material, err := s.issueInternalLeaf(ctx, cert.Hostnames, 365)
+	if err != nil {
+		_ = s.markRenewalFailure(ctx, cert.ID, err.Error())
+		return RenewResult{}, err
+	}
+	return s.persistRenewedCertificate(ctx, cert, material)
+}
+
+func (s *Store) persistRenewedCertificate(ctx context.Context, cert domain.CertificateStatus, material acme.Material) (RenewResult, error) {
 	secretID, err := s.secrets.Put(ctx, "certificate-private-key", material.PrivateKeyPEM)
 	if err != nil {
 		_ = s.markRenewalFailure(ctx, cert.ID, err.Error())
@@ -120,7 +163,7 @@ func (s *Store) RenewLetsEncryptCertificate(ctx context.Context, cert domain.Cer
 
 	expires := material.ExpiresAt
 	renew := renewalDate(material.ExpiresAt)
-	updated, err := s.updateActiveLetsEncryptCertificate(ctx, cert.ID, secretID, material.CertificatePEM, expires, renew)
+	updated, err := s.updateActiveCertificateMaterial(ctx, cert.ID, cert.Issuer, secretID, material.CertificatePEM, expires, renew)
 	if err != nil {
 		return RenewResult{}, err
 	}
@@ -142,8 +185,8 @@ func (s *Store) RenewLetsEncryptCertificate(ctx context.Context, cert domain.Cer
 	return result, nil
 }
 
-// RenewDueLetsEncryptCertificates renews every LE certificate that is due.
-func (s *Store) RenewDueLetsEncryptCertificates(ctx context.Context, opts RenewalOptions) (renewed int, failed int, err error) {
+// RenewDueCertificates renews every LE/self-signed certificate that is due.
+func (s *Store) RenewDueCertificates(ctx context.Context, opts RenewalOptions) (renewed int, failed int, err error) {
 	now := time.Now().UTC()
 	if opts.Now != nil {
 		now = opts.Now().UTC()
@@ -153,25 +196,40 @@ func (s *Store) RenewDueLetsEncryptCertificates(ctx context.Context, opts Renewa
 		logger = log.Default()
 	}
 
-	due, err := s.ListLetsEncryptDueForRenewal(ctx, now)
+	due, err := s.ListCertificatesDueForRenewal(ctx, now)
 	if err != nil {
 		return 0, 0, err
 	}
 	for _, cert := range due {
-		result, renewErr := s.RenewLetsEncryptCertificate(ctx, cert, opts)
+		var result RenewResult
+		var renewErr error
+		switch cert.Issuer {
+		case "letsencrypt":
+			result, renewErr = s.RenewLetsEncryptCertificate(ctx, cert, opts)
+		case "self-signed":
+			result, renewErr = s.RenewSelfSignedCertificate(ctx, cert)
+		default:
+			continue
+		}
 		if renewErr != nil {
 			failed++
-			logger.Printf("letsencrypt renew %s (%v): %v", cert.ID, cert.Hostnames, renewErr)
+			logger.Printf("certificate renew %s (%s %v): %v", cert.ID, cert.Issuer, cert.Hostnames, renewErr)
 			continue
 		}
 		renewed++
 		if result.Applied {
-			logger.Printf("letsencrypt renew %s (%v): renewed and apply queued (%s)", cert.ID, cert.Hostnames, result.JobID)
+			logger.Printf("certificate renew %s (%s %v): renewed and apply queued (%s)", cert.ID, cert.Issuer, cert.Hostnames, result.JobID)
 		} else {
-			logger.Printf("letsencrypt renew %s (%v): renewed (apply not queued)", cert.ID, cert.Hostnames)
+			logger.Printf("certificate renew %s (%s %v): renewed (apply not queued)", cert.ID, cert.Issuer, cert.Hostnames)
 		}
 	}
 	return renewed, failed, nil
+}
+
+// RenewDueLetsEncryptCertificates renews due Let's Encrypt certificates (and self-signed).
+// Kept for compatibility with earlier wiring; prefer RenewDueCertificates.
+func (s *Store) RenewDueLetsEncryptCertificates(ctx context.Context, opts RenewalOptions) (renewed int, failed int, err error) {
+	return s.RenewDueCertificates(ctx, opts)
 }
 
 func directoryURLForEnvironment(environment, stagingURL, productionURL string) string {
@@ -183,9 +241,9 @@ func directoryURLForEnvironment(environment, stagingURL, productionURL string) s
 	}
 }
 
-func (s *Store) updateActiveLetsEncryptCertificate(
+func (s *Store) updateActiveCertificateMaterial(
 	ctx context.Context,
-	id, secretID, certificatePEM string,
+	id, issuer, secretID, certificatePEM string,
 	expiresAt, renewAfter time.Time,
 ) (domain.CertificateStatus, error) {
 	row := s.pool.QueryRow(ctx, `
@@ -198,11 +256,11 @@ func (s *Store) updateActiveLetsEncryptCertificate(
 			failure_reason = null,
 			updated_at = now()
 		where id = $1
-			and issuer = 'letsencrypt'
+			and issuer = $6::proxycore_certificate_issuer
 			and status = 'active'
 		returning id::text, hostnames, issuer::text, challenge::text, environment, status::text,
 			expires_at, renew_after, key_secret_id::text, certificate_pem, failure_reason
-	`, id, expiresAt, renewAfter, secretID, certificatePEM)
+	`, id, expiresAt, renewAfter, secretID, certificatePEM, issuer)
 	cert, err := scanCertificate(row)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return domain.CertificateStatus{}, fmt.Errorf("certificate %s is no longer active", id)
@@ -216,7 +274,6 @@ func (s *Store) markRenewalFailure(ctx context.Context, id, reason string) error
 		set failure_reason = $2,
 			updated_at = now()
 		where id = $1
-			and issuer = 'letsencrypt'
 			and status = 'active'
 	`, id, reason)
 	return err

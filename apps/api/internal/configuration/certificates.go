@@ -108,7 +108,9 @@ func (s *Store) issue(ctx context.Context, input CertificateIssueInput, base dom
 		if input.Challenge != "none" || s.secrets == nil {
 			return domain.CertificateStatus{}, errors.New("Self-signed issuance requires challenge none and a master key")
 		}
-		material, err := acme.IssueSelfSigned(input.Hostnames, 365)
+		// Leaf certificates are signed by the installation's long-lived internal CA
+		// so clients that trust the CA once keep trusting renewed leaves.
+		material, err := s.issueInternalLeaf(ctx, input.Hostnames, 365)
 		if err != nil {
 			return domain.CertificateStatus{}, err
 		}

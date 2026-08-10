@@ -209,6 +209,17 @@ export const secrets = pgTable("secrets", {
   updatedAt: updatedAt(),
 });
 
+/** Long-lived installation CA used to sign auto-generated internal leaf certificates. */
+export const internalCa = pgTable("internal_ca", {
+  id: text("id").primaryKey(),
+  certificatePem: text("certificate_pem").notNull(),
+  keySecretId: uuid("key_secret_id")
+    .notNull()
+    .references(() => secrets.id),
+  createdAt: createdAt(),
+  updatedAt: updatedAt(),
+});
+
 export const certificates = pgTable("certificates", {
   id: uuid("id").defaultRandom().primaryKey(),
   hostnames: jsonb("hostnames").notNull().$type<string[]>(),
@@ -318,6 +329,7 @@ export const schema = {
   forwardingRules,
   streamRoutes,
   secrets,
+  internalCa,
   certificates,
   providerConnections,
   configRevisions,

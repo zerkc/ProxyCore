@@ -36,6 +36,32 @@ func TestRenewLetsEncryptCertificateRejectsNonLE(t *testing.T) {
 	}
 }
 
+func TestRenewSelfSignedCertificateRejectsNonSelfSigned(t *testing.T) {
+	store := &Store{}
+	_, err := store.RenewSelfSignedCertificate(context.Background(), domain.CertificateStatus{
+		ID:     "cert-1",
+		Issuer: "letsencrypt",
+		Status: "active",
+	})
+	if err == nil || err.Error() == "" {
+		t.Fatalf("expected rejection for non-self-signed issuer, got %v", err)
+	}
+}
+
+func TestRenewSelfSignedCertificateRequiresSecrets(t *testing.T) {
+	store := &Store{}
+	_, err := store.RenewSelfSignedCertificate(context.Background(), domain.CertificateStatus{
+		ID:        "cert-1",
+		Hostnames: []string{"app.home.arpa"},
+		Issuer:    "self-signed",
+		Challenge: "none",
+		Status:    "active",
+	})
+	if err == nil {
+		t.Fatal("expected error without secrets")
+	}
+}
+
 func TestRenewLetsEncryptCertificateUsesOverrideIssuer(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires DATABASE_URL for full renew path")
