@@ -39,6 +39,35 @@ func (s *Store) GetCertificate(ctx context.Context, id string) (domain.Certifica
 	return cert, err
 }
 
+// ErrCertificateInUse is returned when a certificate is still referenced by DNS proxy settings.
+var ErrCertificateInUse = errors.New("Certificate is still assigned to one or more proxied DNS records")
+
+// DeleteCertificate removes a certificate that is not referenced by any record.
+func (s *Store) DeleteCertificate(ctx context.Context, id string) error {
+	if _, err := s.GetCertificate(ctx, id); err != nil {
+		return err
+	}
+	var refs int
+	if err := s.pool.QueryRow(ctx, `
+		select count(*)::int
+		from dns_records
+		where proxy_settings->>'certificateId' = $1
+	`, id).Scan(&refs); err != nil {
+		return err
+	}
+	if refs > 0 {
+		return ErrCertificateInUse
+	}
+	command, err := s.pool.Exec(ctx, `delete from certificates where id = $1`, id)
+	if err != nil {
+		return err
+	}
+	if command.RowsAffected() == 0 {
+		return ErrCertificateNotFound
+	}
+	return nil
+}
+
 func listCertificatesOrdered(ctx context.Context, q querier, orderBy string) ([]domain.CertificateStatus, error) {
 	query := `
 		select id::text, hostnames, issuer::text, challenge::text, environment, status::text,

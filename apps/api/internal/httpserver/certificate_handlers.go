@@ -29,6 +29,34 @@ func (s *Server) handleDownloadInternalCA(w http.ResponseWriter, r *http.Request
 	_, _ = io.WriteString(w, certPEM)
 }
 
+func (s *Server) handleDeleteCertificate(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireUser(w, r); !ok {
+		return
+	}
+	store, ok := s.configStore(w)
+	if !ok {
+		return
+	}
+	id := strings.TrimSpace(r.PathValue("certificateId"))
+	if id == "" {
+		writeConfigError(w, &httpError{status: http.StatusBadRequest, message: "certificate id is required"})
+		return
+	}
+	if err := store.DeleteCertificate(r.Context(), id); err != nil {
+		if errors.Is(err, configuration.ErrCertificateNotFound) {
+			writeConfigError(w, &httpError{status: http.StatusNotFound, message: err.Error()})
+			return
+		}
+		if errors.Is(err, configuration.ErrCertificateInUse) {
+			writeConfigError(w, &httpError{status: http.StatusConflict, message: err.Error()})
+			return
+		}
+		writeConfigError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
 func (s *Server) handleRenewSelfSignedCertificate(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.requireUser(w, r); !ok {
 		return

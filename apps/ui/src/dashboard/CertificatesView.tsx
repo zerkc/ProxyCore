@@ -34,6 +34,7 @@ export function CertificatesView(props: {
   const [submitting, setSubmitting] = useState(false);
   const [downloadingCA, setDownloadingCA] = useState(false);
   const [regeneratingId, setRegeneratingId] = useState<string>();
+  const [deletingId, setDeletingId] = useState<string>();
 
   const names = useMemo(
     () =>
@@ -199,6 +200,39 @@ export function CertificatesView(props: {
       props.onError("Could not regenerate certificate");
     } finally {
       setRegeneratingId(undefined);
+    }
+  }
+
+  async function deleteCertificate(certificate: DashboardCertificate) {
+    const label = certificate.hostnames.join(", ") || certificate.id;
+    if (
+      !window.confirm(
+        `Delete certificate for ${label}? This cannot be undone.`,
+      )
+    ) {
+      return;
+    }
+    props.onMessage("");
+    props.onError("");
+    setDeletingId(certificate.id);
+    try {
+      const response = await fetch(
+        `/api/certificates/${encodeURIComponent(certificate.id)}`,
+        { method: "DELETE", credentials: "include" },
+      );
+      const payload = (await response.json().catch(() => ({}))) as {
+        error?: string;
+      };
+      if (!response.ok) {
+        props.onError(payload.error ?? "Could not delete certificate");
+        return;
+      }
+      props.onMessage("Certificate deleted");
+      await props.onRefresh();
+    } catch {
+      props.onError("Could not delete certificate");
+    } finally {
+      setDeletingId(undefined);
     }
   }
 
@@ -486,12 +520,14 @@ export function CertificatesView(props: {
                 key={certificate.id}
                 certificate={certificate}
                 regenerating={regeneratingId === certificate.id}
+                deleting={deletingId === certificate.id}
                 onRegenerate={
                   certificate.issuer === "self-signed" &&
                   certificate.status === "active"
                     ? () => void regenerateSelfSigned(certificate.id)
                     : undefined
                 }
+                onDelete={() => void deleteCertificate(certificate)}
               />
             ))
           ) : (
@@ -557,7 +593,9 @@ function FileField(props: {
 function CertificateCard(props: {
   certificate: DashboardCertificate;
   regenerating?: boolean;
+  deleting?: boolean;
   onRegenerate?: () => void;
+  onDelete?: () => void;
 }) {
   const { certificate } = props;
   const expires = certificate.expiresAt
@@ -572,6 +610,7 @@ function CertificateCard(props: {
       : certificate.status === "failed"
         ? "text-danger"
         : "text-signal";
+  const busy = Boolean(props.regenerating || props.deleting);
   return (
     <article className="grid gap-4 rounded-xl border border-line/80 bg-bay/50 p-4 md:grid-cols-[1fr_auto] md:items-center">
       <div className="min-w-0">
@@ -599,16 +638,28 @@ function CertificateCard(props: {
               : `Expired · ${expires.toLocaleDateString()}`
             : "Expiry pending"}
         </p>
-        {props.onRegenerate ? (
-          <button
-            type="button"
-            className="pc-btn-ghost !text-xs"
-            disabled={props.regenerating}
-            onClick={props.onRegenerate}
-          >
-            {props.regenerating ? "Regenerating…" : "Regenerate"}
-          </button>
-        ) : null}
+        <div className="flex flex-wrap gap-2">
+          {props.onRegenerate ? (
+            <button
+              type="button"
+              className="pc-btn-ghost !text-xs"
+              disabled={busy}
+              onClick={props.onRegenerate}
+            >
+              {props.regenerating ? "Regenerating…" : "Regenerate"}
+            </button>
+          ) : null}
+          {props.onDelete ? (
+            <button
+              type="button"
+              className="pc-btn-ghost !text-xs !text-danger"
+              disabled={busy}
+              onClick={props.onDelete}
+            >
+              {props.deleting ? "Deleting…" : "Delete"}
+            </button>
+          ) : null}
+        </div>
       </div>
     </article>
   );
