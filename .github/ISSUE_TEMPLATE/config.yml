@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Documentation
+    url: https://github.com/zerkc/ProxyCore/tree/main/docs
+    about: Product, architecture, bootstrap, and operations docs
+  - name: Security report
+    url: https://github.com/zerkc/ProxyCore/security/advisories/new
+    about: Privately report a vulnerability (do not open a public issue)

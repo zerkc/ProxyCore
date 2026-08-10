@@ -1,5 +1,8 @@
 # ProxyCore
 
+[![CI](https://github.com/zerkc/ProxyCore/actions/workflows/ci.yml/badge.svg)](https://github.com/zerkc/ProxyCore/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
+
 Single-host homelab control plane for **local DNS** and **secure ingress**.
 
 **Version:** `0.1.0`
@@ -66,6 +69,11 @@ Public authoritative DNS, Cloudflare Tunnel lifecycle, ordinary Cloudflare recor
 | [Operations](docs/runbooks/operations.md) | Apply, secrets, incidents |
 | [Decision log](docs/decision-log.md) | Confirmed product decisions |
 | [Design index](docs/README.md) | Full reading order |
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, PR expectations, and release flow.
+Please follow the [Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## License
 
