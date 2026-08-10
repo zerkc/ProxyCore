@@ -48,9 +48,35 @@ type cloudflareRecord struct {
 }
 
 type cloudflareResponse[T any] struct {
-	Success bool             `json:"success"`
-	Result  []T              `json:"result"`
-	Errors  []cloudflareErr  `json:"errors"`
+	Success bool               `json:"success"`
+	Result  cloudflareResult[T] `json:"result"`
+	Errors  []cloudflareErr    `json:"errors"`
+}
+
+// cloudflareResult accepts Cloudflare's result as either a single object (POST/DELETE)
+// or an array (list endpoints).
+type cloudflareResult[T any] []T
+
+func (r *cloudflareResult[T]) UnmarshalJSON(data []byte) error {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) == 0 || string(trimmed) == "null" {
+		*r = nil
+		return nil
+	}
+	if trimmed[0] == '[' {
+		var items []T
+		if err := json.Unmarshal(trimmed, &items); err != nil {
+			return err
+		}
+		*r = items
+		return nil
+	}
+	var item T
+	if err := json.Unmarshal(trimmed, &item); err != nil {
+		return err
+	}
+	*r = []T{item}
+	return nil
 }
 
 type cloudflareErr struct {
