@@ -1,3 +1,6 @@
 FROM coredns/coredns:1.12.2
 
+# Default Corefile for first boot. Applied config is persisted on the
+# coredns-config volume at /etc/coredns-config/Corefile (see compose.yaml).
 COPY infra/coredns/Corefile /etc/coredns/Corefile
+COPY infra/coredns/Corefile /etc/coredns-config/Corefile

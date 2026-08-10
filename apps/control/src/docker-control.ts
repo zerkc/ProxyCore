@@ -18,6 +18,8 @@ export type DockerControlOptions = {
   socketPath?: string;
   candidateRoot?: string;
   corednsZonesRoot?: string;
+  /** Persisted Corefile directory (mounted into CoreDNS as /etc/coredns-config). */
+  corednsConfigRoot?: string;
   containers?: Partial<Record<ControlService, string>>;
 };
 
@@ -27,6 +29,8 @@ export function createDockerServiceControl(
   const docker = new Docker({ socketPath: options.socketPath ?? "/var/run/docker.sock" });
   const candidateRoot = options.candidateRoot ?? "/var/lib/proxycore/candidates";
   const corednsZonesRoot = options.corednsZonesRoot ?? "/var/lib/proxycore/coredns-zones";
+  const corednsConfigRoot =
+    options.corednsConfigRoot ?? "/var/lib/proxycore/coredns-config";
   const containers = {
     coredns: options.containers?.coredns ?? "proxycore-coredns",
     nginx: options.containers?.nginx ?? "proxycore-nginx",
@@ -37,6 +41,7 @@ export function createDockerServiceControl(
       request,
       candidateRoot,
       corednsZonesRoot,
+      corednsConfigRoot,
       containers[request.service],
     );
   const handlers: FixedHandlers = {
@@ -64,6 +69,7 @@ async function executeDockerOperation(
   request: ControlRequest,
   candidateRoot: string,
   corednsZonesRoot: string,
+  corednsConfigRoot: string,
   containerName: string,
 ): Promise<unknown> {
   assertCandidatePath(request.candidatePath, candidateRoot);
@@ -89,7 +95,13 @@ async function executeDockerOperation(
         await exec(container, ["cp", "/etc/nginx/nginx.conf", "/etc/nginx/.proxycore.previous.conf"]);
         await exec(container, ["cp", `${request.candidatePath}/nginx.conf`, "/etc/nginx/nginx.conf"]);
       } else {
-        await promoteCoreDns(container, request.candidatePath, candidateRoot, corednsZonesRoot);
+        await promoteCoreDns(
+          container,
+          request.candidatePath,
+          candidateRoot,
+          corednsZonesRoot,
+          corednsConfigRoot,
+        );
       }
       return { status: "promoted", revisionId: request.revisionId };
     case "reload":
@@ -108,10 +120,80 @@ async function executeDockerOperation(
       if (request.service === "nginx") {
         await exec(container, ["cp", "/etc/nginx/.proxycore.previous.conf", "/etc/nginx/nginx.conf"]);
       } else {
-        await rollbackCoreDns(container, candidateRoot, corednsZonesRoot);
+        await rollbackCoreDns(container, candidateRoot, corednsZonesRoot, corednsConfigRoot);
       }
       return { status: "rolled-back" };
   }
+}
+
+export function corednsLiveCorefilePath(configRoot: string): string {
+  return join(configRoot, "Corefile");
+}
+
+function corefileLooksApplied(contents: string): boolean {
+  return contents.includes("file /etc/coredns/zones/");
+}
+
+/**
+ * When the persisted Corefile volume is still the image default (forward-only)
+ * but a previous apply left candidates on disk, restore the latest applied
+ * Corefile so recreating CoreDNS does not drop managed zones.
+ */
+export async function seedLiveCorefileFromCandidates(
+  candidateRoot: string,
+  configRoot: string,
+): Promise<string | undefined> {
+  await mkdir(configRoot, { recursive: true, mode: 0o755 });
+  const livePath = corednsLiveCorefilePath(configRoot);
+  try {
+    const current = await readFile(livePath, "utf8");
+    if (corefileLooksApplied(current)) {
+      return undefined;
+    }
+  } catch {
+    // missing live Corefile
+  }
+
+  const latest = await findLatestAppliedCorefile(candidateRoot);
+  if (!latest) return undefined;
+  const contents = await readFile(latest, "utf8");
+  if (!corefileLooksApplied(contents)) return undefined;
+  await writeFile(livePath, contents, { mode: 0o644 });
+  return latest;
+}
+
+async function findLatestAppliedCorefile(
+  candidateRoot: string,
+): Promise<string | undefined> {
+  let bestPath: string | undefined;
+  let bestMtime = 0;
+  const visit = async (directory: string): Promise<void> => {
+    let entries;
+    try {
+      entries = await readdir(directory, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const path = join(directory, entry.name);
+      if (entry.isDirectory()) {
+        await visit(path);
+        continue;
+      }
+      if (!entry.isFile() || entry.name !== "Corefile") continue;
+      // Worker layout: <candidateRoot>/<rev>/coredns/Corefile
+      if (!path.includes("/coredns/Corefile") && !path.endsWith(`${join("coredns", "Corefile")}`)) {
+        continue;
+      }
+      const info = await stat(path);
+      if (info.mtimeMs >= bestMtime) {
+        bestMtime = info.mtimeMs;
+        bestPath = path;
+      }
+    }
+  };
+  await visit(candidateRoot);
+  return bestPath;
 }
 
 async function promoteCoreDns(
@@ -119,21 +201,35 @@ async function promoteCoreDns(
   candidatePath: string,
   candidateRoot: string,
   zonesRoot: string,
+  configRoot: string,
 ): Promise<void> {
-  const previousCorefileArchive = await readArchive(container, "/etc/coredns/Corefile");
-  const previousCorefilePath = join(candidateRoot, ".proxycore-previous-coredns-corefile.tar");
+  const liveCorefilePath = corednsLiveCorefilePath(configRoot);
+  const previousCorefilePath = join(candidateRoot, ".proxycore-previous-coredns-corefile");
   const previousZonesPath = join(candidateRoot, ".proxycore-previous-coredns-zones");
-  await writeFile(previousCorefilePath, previousCorefileArchive, { mode: 0o600 });
+
+  await mkdir(configRoot, { recursive: true, mode: 0o755 });
+  let previousCorefile: Buffer;
+  try {
+    previousCorefile = await readFile(liveCorefilePath);
+  } catch {
+    previousCorefile = await readArchiveFile(container, "/etc/coredns-config/Corefile").catch(() =>
+      readArchiveFile(container, "/etc/coredns/Corefile"),
+    );
+  }
+  await writeFile(previousCorefilePath, previousCorefile, { mode: 0o600 });
   await rm(previousZonesPath, { recursive: true, force: true });
   await copyDirectory(zonesRoot, previousZonesPath);
 
   try {
     await replaceDirectory(zonesRoot, join(candidatePath, "zones"));
     const corefile = await readFile(join(candidatePath, "Corefile"));
+    // Persist on the shared volume so container recreate keeps applied config.
+    await writeFile(liveCorefilePath, corefile, { mode: 0o644 });
     await container.putArchive(createTar([{ name: "Corefile", contents: corefile }]), {
-      path: "/etc/coredns",
+      path: "/etc/coredns-config",
     });
   } catch (error) {
+    await writeFile(liveCorefilePath, previousCorefile, { mode: 0o644 }).catch(() => undefined);
     await replaceDirectory(zonesRoot, previousZonesPath).catch(() => undefined);
     throw error;
   }
@@ -143,10 +239,17 @@ async function rollbackCoreDns(
   container: Docker.Container,
   candidateRoot: string,
   zonesRoot: string,
+  configRoot: string,
 ): Promise<void> {
-  const previousCorefilePath = join(candidateRoot, ".proxycore-previous-coredns-corefile.tar");
+  const liveCorefilePath = corednsLiveCorefilePath(configRoot);
+  const previousCorefilePath = join(candidateRoot, ".proxycore-previous-coredns-corefile");
   const previousZonesPath = join(candidateRoot, ".proxycore-previous-coredns-zones");
-  await container.putArchive(await readFile(previousCorefilePath), { path: "/etc/coredns" });
+  const previousCorefile = await readFile(previousCorefilePath);
+  await mkdir(configRoot, { recursive: true, mode: 0o755 });
+  await writeFile(liveCorefilePath, previousCorefile, { mode: 0o644 });
+  await container.putArchive(createTar([{ name: "Corefile", contents: previousCorefile }]), {
+    path: "/etc/coredns-config",
+  });
   await replaceDirectory(zonesRoot, previousZonesPath);
 }
 
@@ -180,6 +283,10 @@ async function copyDirectory(source: string, target: string): Promise<void> {
   }
 }
 
+async function readArchiveFile(container: Docker.Container, path: string): Promise<Buffer> {
+  return extractFirstFileFromTar(await readArchive(container, path));
+}
+
 async function readArchive(container: Docker.Container, path: string): Promise<Buffer> {
   const stream = await container.getArchive({ path });
   return new Promise<Buffer>((resolve, reject) => {
@@ -191,6 +298,27 @@ async function readArchive(container: Docker.Container, path: string): Promise<B
     stream.on("error", reject);
     stream.resume();
   });
+}
+
+/** Extract the first regular file payload from a ustar archive. */
+export function extractFirstFileFromTar(archive: Buffer): Buffer {
+  let offset = 0;
+  while (offset + 512 <= archive.length) {
+    const header = archive.subarray(offset, offset + 512);
+    offset += 512;
+    if (header.every((byte) => byte === 0)) {
+      break;
+    }
+    const sizeText = header.subarray(124, 136).toString("ascii").replace(/\0.*$/, "").trim();
+    const size = Number.parseInt(sizeText, 8) || 0;
+    const typeFlag = header[156];
+    const payload = archive.subarray(offset, offset + size);
+    offset += size + ((512 - (size % 512)) % 512);
+    if (typeFlag === 0 || typeFlag === 0x30) {
+      return Buffer.from(payload);
+    }
+  }
+  throw new Error("CoreDNS Corefile archive did not contain a file");
 }
 
 function createTar(entries: Array<{ name: string; contents: Buffer }>): Buffer {

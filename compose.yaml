@@ -104,11 +104,14 @@ services:
       WORKER_SOCKET_PATH: /run/proxycore/control.sock
       CONTROL_BACKEND: docker
       CANDIDATE_ROOT: /var/lib/proxycore/candidates
+      COREDNS_ZONES_ROOT: /var/lib/proxycore/coredns-zones
+      COREDNS_CONFIG_ROOT: /var/lib/proxycore/coredns-config
       NGINX_CONTAINER_NAME: proxycore-nginx
       COREDNS_CONTAINER_NAME: proxycore-coredns
     volumes:
       - candidates:/var/lib/proxycore
       - coredns-zones:/var/lib/proxycore/coredns-zones
+      - coredns-config:/var/lib/proxycore/coredns-config
       - control-socket:/run/proxycore
       - /var/run/docker.sock:/var/run/docker.sock:ro
     healthcheck:
@@ -124,10 +127,12 @@ services:
       context: .
       dockerfile: infra/compose/Dockerfile.coredns
     image: proxycore-coredns:local
-    command: ["-conf", "/etc/coredns/Corefile"]
+    # Corefile lives on coredns-config volume so recreate keeps applied zones.
+    command: ["-conf", "/etc/coredns-config/Corefile"]
     volumes:
       - candidates:/var/lib/proxycore:ro
       - coredns-zones:/etc/coredns/zones
+      - coredns-config:/etc/coredns-config
     ports:
       - "${DNS_PORT:-53}:53/tcp"
       - "${DNS_PORT:-53}:53/udp"
@@ -169,6 +174,7 @@ volumes:
   control-socket:
   certificates:
   coredns-zones:
+  coredns-config:
 
 networks:
   control:

@@ -42,17 +42,51 @@ async function main() {
       rollback: fixedOperation,
     },
   });
+  const candidateRoot =
+    process.env.CANDIDATE_ROOT ?? "/var/lib/proxycore/candidates";
+  const corednsConfigRoot =
+    process.env.COREDNS_CONFIG_ROOT ?? "/var/lib/proxycore/coredns-config";
   const control =
     process.env.CONTROL_BACKEND === "docker"
       ? (await import("./docker-control")).createDockerServiceControl({
-          candidateRoot: process.env.CANDIDATE_ROOT,
+          candidateRoot,
           corednsZonesRoot: process.env.COREDNS_ZONES_ROOT,
+          corednsConfigRoot,
           containers: {
             nginx: process.env.NGINX_CONTAINER_NAME,
             coredns: process.env.COREDNS_CONTAINER_NAME,
           },
         })
       : fallbackControl;
+
+  if (process.env.CONTROL_BACKEND === "docker") {
+    const { seedLiveCorefileFromCandidates } = await import("./docker-control");
+    const seeded = await seedLiveCorefileFromCandidates(
+      candidateRoot,
+      corednsConfigRoot,
+    );
+    if (seeded) {
+      process.stdout.write(
+        `proxycore-control restored persisted CoreDNS Corefile from ${seeded}\n`,
+      );
+      try {
+        const Docker = (await import("dockerode")).default;
+        const docker = new Docker({
+          socketPath: process.env.DOCKER_SOCKET_PATH ?? "/var/run/docker.sock",
+        });
+        const name = process.env.COREDNS_CONTAINER_NAME ?? "proxycore-coredns";
+        await docker.getContainer(name).restart({ t: 5 });
+        process.stdout.write(`proxycore-control restarted ${name} to load Corefile\n`);
+      } catch (error) {
+        process.stderr.write(
+          `proxycore-control could not restart CoreDNS after Corefile seed: ${
+            error instanceof Error ? error.message : String(error)
+          }\n`,
+        );
+      }
+    }
+  }
+
   await startControlServer(socketPath, control);
   process.stdout.write(`proxycore-control listening on ${socketPath}\n`);
 }
