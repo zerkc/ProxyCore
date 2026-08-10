@@ -98,6 +98,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("DELETE /api/streams/{streamId}", s.handleDeleteStream)
 	s.mux.HandleFunc("GET /api/certificates", s.handleListCertificates)
 	s.mux.HandleFunc("GET /api/certificates/ca", s.handleDownloadInternalCA)
+	s.mux.HandleFunc("POST /api/certificates/{certificateId}/renew", s.handleRenewSelfSignedCertificate)
 	s.mux.HandleFunc("POST /api/certificates", s.handleIssueCertificate)
 	s.mux.HandleFunc("GET /api/acme-challenge/{token}", s.handleAcmeChallenge)
 

@@ -41,7 +41,11 @@ func main() {
 		if err := pool.Ping(context.Background()); err != nil {
 			logger.Fatalf("database ping: %v", err)
 		}
-		// Schema comes from Drizzle migrations (compose migrate one-shot).
+		// Drizzle migrate remains the primary path; EnsureSchema is idempotent and
+		// covers additive tables (e.g. internal_ca) if migrate was not re-run yet.
+		if err := configuration.EnsureSchema(context.Background(), pool); err != nil {
+			logger.Fatalf("configuration schema: %v", err)
+		}
 		store := auth.NewPostgresStore(pool)
 		options = append(options, httpserver.WithAuthService(auth.NewService(store, auth.ServiceOptions{
 			SessionTTL: cfg.SessionTTL,

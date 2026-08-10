@@ -197,6 +197,9 @@ main() {
   wait_postgres
 
   log "Applying database migrations"
+  # Always rebuild migrate so new SQL under packages/db/migrations is in the image.
+  # Without --build, compose reuses a stale migrate image and skips additive migrations.
+  docker compose --profile tools build migrate
   docker compose --profile tools run --rm migrate
 
   if [ "$SKIP_BUILD" = "1" ]; then

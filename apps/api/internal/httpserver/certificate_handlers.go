@@ -1,6 +1,7 @@
 package httpserver
 
 import (
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -26,6 +27,35 @@ func (s *Server) handleDownloadInternalCA(w http.ResponseWriter, r *http.Request
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusOK)
 	_, _ = io.WriteString(w, certPEM)
+}
+
+func (s *Server) handleRenewSelfSignedCertificate(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireUser(w, r); !ok {
+		return
+	}
+	store, ok := s.configStore(w)
+	if !ok {
+		return
+	}
+	id := strings.TrimSpace(r.PathValue("certificateId"))
+	if id == "" {
+		writeConfigError(w, &httpError{status: http.StatusBadRequest, message: "certificate id is required"})
+		return
+	}
+	result, err := store.RenewSelfSignedCertificateByID(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, configuration.ErrCertificateNotFound) {
+			writeConfigError(w, &httpError{status: http.StatusNotFound, message: err.Error()})
+			return
+		}
+		writeConfigError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"certificate": result.Certificate.PublicCertificate(),
+		"applied":     result.Applied,
+		"jobId":       result.JobID,
+	})
 }
 
 func (s *Server) handleListCertificates(w http.ResponseWriter, r *http.Request) {

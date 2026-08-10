@@ -16,9 +16,27 @@ import (
 	"github.com/zerkc/ProxyCore/apps/api/internal/domain"
 )
 
+// ErrCertificateNotFound is returned when a certificate id does not exist.
+var ErrCertificateNotFound = errors.New("Certificate not found")
+
 // ListCertificates returns certificates newest first.
 func (s *Store) ListCertificates(ctx context.Context) ([]domain.CertificateStatus, error) {
 	return listCertificatesOrdered(ctx, s.pool, "created_at desc")
+}
+
+// GetCertificate returns one certificate by id.
+func (s *Store) GetCertificate(ctx context.Context, id string) (domain.CertificateStatus, error) {
+	row := s.pool.QueryRow(ctx, `
+		select id::text, hostnames, issuer::text, challenge::text, environment, status::text,
+			expires_at, renew_after, key_secret_id::text, certificate_pem, failure_reason
+		from certificates
+		where id = $1
+	`, id)
+	cert, err := scanCertificate(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return domain.CertificateStatus{}, ErrCertificateNotFound
+	}
+	return cert, err
 }
 
 func listCertificatesOrdered(ctx context.Context, q querier, orderBy string) ([]domain.CertificateStatus, error) {

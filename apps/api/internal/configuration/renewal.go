@@ -131,6 +131,15 @@ func (s *Store) RenewLetsEncryptCertificate(ctx context.Context, cert domain.Cer
 	return s.persistRenewedCertificate(ctx, cert, material)
 }
 
+// RenewSelfSignedCertificateByID loads and regenerates an active self-signed certificate.
+func (s *Store) RenewSelfSignedCertificateByID(ctx context.Context, id string) (RenewResult, error) {
+	cert, err := s.GetCertificate(ctx, id)
+	if err != nil {
+		return RenewResult{}, err
+	}
+	return s.RenewSelfSignedCertificate(ctx, cert)
+}
+
 // RenewSelfSignedCertificate re-issues one active internal (CA-signed) certificate in place.
 func (s *Store) RenewSelfSignedCertificate(ctx context.Context, cert domain.CertificateStatus) (RenewResult, error) {
 	if cert.Issuer != "self-signed" {

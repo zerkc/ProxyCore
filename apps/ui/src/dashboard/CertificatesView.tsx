@@ -33,6 +33,7 @@ export function CertificatesView(props: {
   const [cloudflareApiToken, setCloudflareApiToken] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [downloadingCA, setDownloadingCA] = useState(false);
+  const [regeneratingId, setRegeneratingId] = useState<string>();
 
   const names = useMemo(
     () =>
@@ -170,6 +171,34 @@ export function CertificatesView(props: {
       props.onError("Could not download trust certificate");
     } finally {
       setDownloadingCA(false);
+    }
+  }
+
+  async function regenerateSelfSigned(certificateId: string) {
+    props.onMessage("");
+    props.onError("");
+    setRegeneratingId(certificateId);
+    try {
+      const response = await fetch(
+        `/api/certificates/${encodeURIComponent(certificateId)}/renew`,
+        { method: "POST", credentials: "include" },
+      );
+      const payload = (await response.json().catch(() => ({}))) as {
+        error?: string;
+      };
+      if (!response.ok) {
+        props.onError(payload.error ?? "Could not regenerate certificate");
+        await props.onRefresh();
+        return;
+      }
+      props.onMessage(
+        "Internal certificate regenerated — apply is queued if an owner exists",
+      );
+      await props.onRefresh();
+    } catch {
+      props.onError("Could not regenerate certificate");
+    } finally {
+      setRegeneratingId(undefined);
     }
   }
 
@@ -453,7 +482,17 @@ export function CertificatesView(props: {
         <div className="mt-6 grid gap-3">
           {props.certificates.length ? (
             props.certificates.map((certificate) => (
-              <CertificateCard key={certificate.id} certificate={certificate} />
+              <CertificateCard
+                key={certificate.id}
+                certificate={certificate}
+                regenerating={regeneratingId === certificate.id}
+                onRegenerate={
+                  certificate.issuer === "self-signed" &&
+                  certificate.status === "active"
+                    ? () => void regenerateSelfSigned(certificate.id)
+                    : undefined
+                }
+              />
             ))
           ) : (
             <p className="rounded-xl border border-dashed border-line p-5 text-sm text-faint">
@@ -515,7 +554,11 @@ function FileField(props: {
   );
 }
 
-function CertificateCard(props: { certificate: DashboardCertificate }) {
+function CertificateCard(props: {
+  certificate: DashboardCertificate;
+  regenerating?: boolean;
+  onRegenerate?: () => void;
+}) {
   const { certificate } = props;
   const expires = certificate.expiresAt
     ? new Date(certificate.expiresAt)
@@ -545,17 +588,27 @@ function CertificateCard(props: { certificate: DashboardCertificate }) {
           </p>
         ) : null}
       </div>
-      <div className="text-left md:text-right">
+      <div className="flex flex-col items-start gap-2 md:items-end">
         <p className={`text-sm font-medium ${statusTone}`}>
           {certificate.status}
         </p>
-        <p className="mt-1 text-xs text-faint">
+        <p className="text-xs text-faint">
           {expires
             ? daysRemaining !== undefined && daysRemaining >= 0
               ? `${daysRemaining} days left · ${expires.toLocaleDateString()}`
               : `Expired · ${expires.toLocaleDateString()}`
             : "Expiry pending"}
         </p>
+        {props.onRegenerate ? (
+          <button
+            type="button"
+            className="pc-btn-ghost !text-xs"
+            disabled={props.regenerating}
+            onClick={props.onRegenerate}
+          >
+            {props.regenerating ? "Regenerating…" : "Regenerate"}
+          </button>
+        ) : null}
       </div>
     </article>
   );
