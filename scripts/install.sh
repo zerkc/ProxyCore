@@ -68,12 +68,23 @@ wait_postgres() {
   die "postgres did not become ready"
 }
 
+# Append KEY=VALUE to .env when the key is missing (preserves existing values).
+ensure_env_key() {
+  key="$1"
+  value="$2"
+  if ! grep -q "^${key}=" .env 2>/dev/null; then
+    printf '%s=%s\n' "$key" "$value" >>.env
+    log "Added ${key} to .env"
+  fi
+}
+
 ensure_env() {
   if [ -f .env ]; then
     log "Keeping existing .env"
-    if ! grep -q '^NGINX_ACME_UPSTREAM=' .env; then
-      printf '\nNGINX_ACME_UPSTREAM=http://127.0.0.1:%s\n' "$WEB_PORT" >>.env
-    fi
+    ensure_env_key NGINX_ACME_UPSTREAM "http://127.0.0.1:${WEB_PORT}"
+    # Older installs omitted publish ports; Compose needs these for CoreDNS/API.
+    ensure_env_key WEB_PORT "${WEB_PORT}"
+    ensure_env_key DNS_PORT "${DNS_PORT}"
     return 0
   fi
 
@@ -119,14 +130,39 @@ sync_repo() {
 }
 
 check_host_ports() {
-  # Best-effort conflict detection for nginx host networking.
-  for port in 80 443; do
+  # Best-effort conflict detection for nginx host networking + CoreDNS publish.
+  for port in 80 443 "$DNS_PORT"; do
     if command -v ss >/dev/null 2>&1; then
-      if ss -lntu 2>/dev/null | grep -Eq ":${port}\\s"; then
-        warn "port ${port} appears in use; nginx host mode may fail to bind"
+      if ss -lntu 2>/dev/null | grep -Eq ":${port}([[:space:]]|$)"; then
+        if [ "$port" = "$DNS_PORT" ]; then
+          warn "port ${port} appears in use; CoreDNS may fail to publish (disable systemd-resolved DNSStubListener or set DNS_PORT)"
+        else
+          warn "port ${port} appears in use; nginx host mode may fail to bind"
+        fi
       fi
     fi
   done
+}
+
+verify_coredns_published() {
+  # Confirm the CoreDNS service is up and the host publish mapping exists.
+  if ! docker compose ps --status running --services 2>/dev/null | grep -qx coredns; then
+    die "CoreDNS is not running; check: docker compose logs coredns"
+  fi
+  ports="$(docker compose ps coredns --format '{{.Ports}}' 2>/dev/null || true)"
+  case "$ports" in
+  *":${DNS_PORT}->53/"* | *"0.0.0.0:${DNS_PORT}->53/"* | *"[::]:${DNS_PORT}->53/"*)
+    return 0
+    ;;
+  esac
+  # Fallback: inspect published bindings (format varies by Compose version).
+  if docker compose exec -T coredns true >/dev/null 2>&1; then
+    if docker port proxycore-coredns 53/udp 2>/dev/null | grep -Eq ":${DNS_PORT}\$" \
+      || docker port proxycore-coredns 53/tcp 2>/dev/null | grep -Eq ":${DNS_PORT}\$"; then
+      return 0
+    fi
+  fi
+  die "CoreDNS is running but host port ${DNS_PORT} is not published (ports=${ports:-none})"
 }
 
 main() {
@@ -138,16 +174,21 @@ main() {
   sync_repo
   cd "$PROXYCORE_HOME"
   ensure_env
-  check_host_ports
 
   # Export compose project name for stable container names across updates.
   export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-proxycore}"
 
   # shellcheck disable=SC1091
   set -a
-  # Load .env so wait_postgres sees POSTGRES_* defaults when overridden.
+  # Load .env so wait_postgres / publish ports see file values.
   . ./.env
   set +a
+  # Compose reads .env from disk; also export publish ports for this process.
+  WEB_PORT="${WEB_PORT:-3000}"
+  DNS_PORT="${DNS_PORT:-53}"
+  export WEB_PORT DNS_PORT
+
+  check_host_ports
 
   log "Starting PostgreSQL"
   docker compose up -d postgres
@@ -164,12 +205,15 @@ main() {
     docker compose up -d --build --remove-orphans
   fi
 
+  log "Verifying CoreDNS is published on host port ${DNS_PORT}"
+  verify_coredns_published
+
   log "ProxyCore is up"
   printf '\n'
   printf '  Home:      %s\n' "$PROXYCORE_HOME"
   printf '  Dashboard: http://<host-ip>:%s\n' "${WEB_PORT}"
   printf '  Bootstrap: http://<host-ip>:%s/bootstrap\n' "${WEB_PORT}"
-  printf '  DNS:       <host-ip>:%s\n' "${DNS_PORT}"
+  printf '  DNS:       <host-ip>:%s (CoreDNS TCP/UDP)\n' "${DNS_PORT}"
   printf '  Nginx:     host network (80/443 + stream ports)\n'
   printf '\n'
   printf 'First install: open /bootstrap once to create the Owner.\n'
