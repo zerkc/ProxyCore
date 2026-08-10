@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -111,6 +112,43 @@ func (s *PostgresStore) CreateUser(ctx context.Context, user User) (User, error)
 		returning id::text, username, password_hash, role::text, active, created_at, updated_at
 	`, user.ID, user.Username, user.PasswordHash, string(user.Role), user.Active, user.CreatedAt, user.UpdatedAt)
 	return scanUser(row)
+}
+
+func (s *PostgresStore) UpdateUser(ctx context.Context, id string, patch UserPatch) (User, error) {
+	setClauses := []string{"updated_at = now()"}
+	args := []any{id}
+	next := 2
+	if patch.Role != nil {
+		setClauses = append(setClauses, fmt.Sprintf("role = $%d::proxycore_role", next))
+		args = append(args, string(*patch.Role))
+		next++
+	}
+	if patch.Active != nil {
+		setClauses = append(setClauses, fmt.Sprintf("active = $%d", next))
+		args = append(args, *patch.Active)
+		next++
+	}
+	if patch.PasswordHash != nil {
+		setClauses = append(setClauses, fmt.Sprintf("password_hash = $%d", next))
+		args = append(args, *patch.PasswordHash)
+		next++
+	}
+	query := "update users set " + strings.Join(setClauses, ", ") +
+		" where id = $1 returning id::text, username, password_hash, role::text, active, created_at, updated_at"
+	row := s.pool.QueryRow(ctx, query, args...)
+	user, err := scanUser(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return User{}, ErrUserNotFound
+	}
+	if err != nil {
+		return User{}, err
+	}
+	return user, nil
+}
+
+func (s *PostgresStore) DeleteUser(ctx context.Context, id string) error {
+	_, err := s.pool.Exec(ctx, `delete from users where id = $1`, id)
+	return err
 }
 
 func (s *PostgresStore) CreateSession(ctx context.Context, session Session) (Session, error) {

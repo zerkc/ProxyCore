@@ -13,6 +13,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/zerkc/ProxyCore/apps/api/internal/auth"
 	"github.com/zerkc/ProxyCore/apps/api/internal/config"
+	"github.com/zerkc/ProxyCore/apps/api/internal/configuration"
+	"github.com/zerkc/ProxyCore/apps/api/internal/domain"
 	"github.com/zerkc/ProxyCore/apps/api/internal/httpserver"
 )
 
@@ -43,6 +45,13 @@ func main() {
 		options = append(options, httpserver.WithAuthService(auth.NewService(store, auth.ServiceOptions{
 			SessionTTL: cfg.SessionTTL,
 		})))
+
+		defaultIngress := domain.Ingress{IPv4: cfg.ProxyIngressIPv4, IPv6: cfg.ProxyIngressIPv6}
+		configStore := configuration.New(pool, cfg.MasterKeyBase64, defaultIngress)
+		options = append(options,
+			httpserver.WithConfigurationStore(configStore),
+			httpserver.WithDefaultIngress(defaultIngress),
+		)
 	}
 
 	server := &http.Server{

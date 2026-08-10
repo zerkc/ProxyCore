@@ -16,9 +16,12 @@ type Config struct {
 	SessionCookieName string
 	SessionTTL        time.Duration
 	SecureCookies     bool
-	// NodeAPIURL is the transitional Node configuration API (no Next.js).
-	// When set, unmatched /api/* routes are reverse-proxied there.
-	NodeAPIURL string
+	// ProxyIngress addresses seed the configuration store's ingress on first use.
+	ProxyIngressIPv4 string
+	ProxyIngressIPv6 string
+	// ACME directory URLs for Let's Encrypt issuance (staging vs production).
+	ACMEDirectoryURL           string
+	ACMEProductionDirectoryURL string
 }
 
 func Load() (Config, error) {
@@ -36,8 +39,11 @@ func Load() (Config, error) {
 		// Homelab UI is often reached over plain HTTP (LAN IP). Secure cookies
 		// are opt-in so sessions work without TLS; set PROXYCORE_SECURE_COOKIES=1
 		// when terminating HTTPS in front of the API.
-		SecureCookies: envBool("PROXYCORE_SECURE_COOKIES", false),
-		NodeAPIURL:    strings.TrimRight(env("PROXYCORE_NODE_API_URL", ""), "/"),
+		SecureCookies:              envBool("PROXYCORE_SECURE_COOKIES", false),
+		ProxyIngressIPv4:           strings.TrimSpace(os.Getenv("PROXY_INGRESS_IPV4")),
+		ProxyIngressIPv6:           strings.TrimSpace(os.Getenv("PROXY_INGRESS_IPV6")),
+		ACMEDirectoryURL:           env("ACME_DIRECTORY_URL", "https://acme-staging-v02.api.letsencrypt.org/directory"),
+		ACMEProductionDirectoryURL: env("ACME_PRODUCTION_DIRECTORY_URL", "https://acme-v02.api.letsencrypt.org/directory"),
 	}
 	if !strings.HasPrefix(cfg.Addr, ":") && !strings.Contains(cfg.Addr, ":") {
 		port, err := strconv.Atoi(cfg.Addr)

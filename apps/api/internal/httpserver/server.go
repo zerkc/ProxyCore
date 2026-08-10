@@ -5,8 +5,6 @@ import (
 	"errors"
 	"log"
 	"net/http"
-	"net/http/httputil"
-	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -16,13 +14,17 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/zerkc/ProxyCore/apps/api/internal/auth"
 	"github.com/zerkc/ProxyCore/apps/api/internal/config"
+	"github.com/zerkc/ProxyCore/apps/api/internal/configuration"
+	"github.com/zerkc/ProxyCore/apps/api/internal/domain"
 )
 
 type Server struct {
-	cfg  config.Config
-	mux  *http.ServeMux
-	log  *log.Logger
-	auth *auth.Service
+	cfg            config.Config
+	mux            *http.ServeMux
+	log            *log.Logger
+	auth           *auth.Service
+	config         *configuration.Store
+	defaultIngress domain.Ingress
 }
 
 type Option func(*Server)
@@ -30,6 +32,18 @@ type Option func(*Server)
 func WithAuthService(service *auth.Service) Option {
 	return func(s *Server) {
 		s.auth = service
+	}
+}
+
+func WithConfigurationStore(store *configuration.Store) Option {
+	return func(s *Server) {
+		s.config = store
+	}
+}
+
+func WithDefaultIngress(ingress domain.Ingress) Option {
+	return func(s *Server) {
+		s.defaultIngress = ingress
 	}
 }
 
@@ -63,38 +77,30 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/auth/bootstrap", s.handleAuthBootstrap)
 	s.mux.HandleFunc("POST /api/auth/login", s.handleAuthLogin)
 	s.mux.HandleFunc("POST /api/auth/logout", s.handleAuthLogout)
-	if proxy := s.nodeAPIProxy(); proxy != nil {
-		// Transitional: configuration routes still served by Node (no Next.js).
-		s.mux.Handle("/api/", proxy)
-	}
-	s.mux.Handle("/", s.spaHandler())
-}
 
-func (s *Server) nodeAPIProxy() http.Handler {
-	if strings.TrimSpace(s.cfg.NodeAPIURL) == "" {
-		return nil
-	}
-	target, err := url.Parse(s.cfg.NodeAPIURL)
-	if err != nil {
-		s.log.Printf("invalid PROXYCORE_NODE_API_URL: %v", err)
-		return nil
-	}
-	proxy := httputil.NewSingleHostReverseProxy(target)
-	original := proxy.Director
-	proxy.Director = func(req *http.Request) {
-		original(req)
-		req.Host = target.Host
-		req.Header.Set("X-Forwarded-Host", req.Header.Get("Host"))
-		req.Header.Set("X-Forwarded-Proto", "http")
-	}
-	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
-		s.log.Printf("node-api proxy %s: %v", r.URL.Path, err)
-		writeJSON(w, http.StatusBadGateway, map[string]any{
-			"ok":    false,
-			"error": "configuration API unavailable",
-		})
-	}
-	return proxy
+	// Configuration API (ported from the transitional node-api).
+	s.mux.HandleFunc("GET /api/status", s.handleStatus)
+	s.mux.HandleFunc("GET /api/settings", s.handleGetSettings)
+	s.mux.HandleFunc("PUT /api/settings", s.handlePutSettings)
+	s.mux.HandleFunc("POST /api/apply", s.handleApply)
+	s.mux.HandleFunc("GET /api/users", s.handleListUsers)
+	s.mux.HandleFunc("POST /api/users", s.handleCreateUser)
+	s.mux.HandleFunc("PATCH /api/users/{userId}", s.handleUpdateUser)
+	s.mux.HandleFunc("DELETE /api/users/{userId}", s.handleDeleteUser)
+	s.mux.HandleFunc("GET /api/zones", s.handleListZones)
+	s.mux.HandleFunc("POST /api/zones", s.handleCreateZone)
+	s.mux.HandleFunc("GET /api/zones/{zoneId}/records", s.handleGetZoneRecords)
+	s.mux.HandleFunc("POST /api/zones/{zoneId}/records", s.handleAddRecord)
+	s.mux.HandleFunc("PATCH /api/zones/{zoneId}/records/{recordId}", s.handlePatchRecord)
+	s.mux.HandleFunc("GET /api/streams", s.handleListStreams)
+	s.mux.HandleFunc("POST /api/streams", s.handleCreateStream)
+	s.mux.HandleFunc("PATCH /api/streams/{streamId}", s.handlePatchStream)
+	s.mux.HandleFunc("DELETE /api/streams/{streamId}", s.handleDeleteStream)
+	s.mux.HandleFunc("GET /api/certificates", s.handleListCertificates)
+	s.mux.HandleFunc("POST /api/certificates", s.handleIssueCertificate)
+	s.mux.HandleFunc("GET /api/acme-challenge/{token}", s.handleAcmeChallenge)
+
+	s.mux.Handle("/", s.spaHandler())
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
@@ -180,17 +186,71 @@ func (s *Server) handleAuthLogout(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (s *Server) requireUser(w http.ResponseWriter, r *http.Request) (auth.User, bool) {
+// requireUser authenticates the caller, enforces roles, and performs the
+// ingress-initialization side effect (matching the Node requireUser).
+func (s *Server) requireUser(w http.ResponseWriter, r *http.Request, roles ...auth.Role) (auth.User, bool) {
 	if s.auth == nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "error": "auth is not configured"})
+		writeConfigError(w, &httpError{status: http.StatusServiceUnavailable, message: "auth is not configured"})
 		return auth.User{}, false
 	}
 	user, err := s.auth.Authenticate(r.Context(), s.tokenFromRequest(r))
 	if err != nil {
-		writeJSON(w, http.StatusUnauthorized, map[string]any{"ok": false, "error": "authentication required"})
+		writeConfigError(w, &httpError{status: http.StatusUnauthorized, message: "Authentication required"})
 		return auth.User{}, false
 	}
+	if len(roles) > 0 && !roleAllowed(user.Role, roles) {
+		writeConfigError(w, &httpError{status: http.StatusForbidden, message: "Permission denied"})
+		return auth.User{}, false
+	}
+	if s.config != nil {
+		if err := s.initializeIngressSideEffect(r, user); err != nil {
+			writeConfigError(w, err)
+			return auth.User{}, false
+		}
+	}
 	return user, true
+}
+
+func (s *Server) initializeIngressSideEffect(r *http.Request, user auth.User) error {
+	requestIngress := inferRequestIngress(r)
+	ingress := domain.Ingress{
+		IPv4: firstNonEmpty(s.defaultIngress.IPv4, requestIngress.IPv4),
+		IPv6: firstNonEmpty(s.defaultIngress.IPv6, requestIngress.IPv6),
+	}
+	initialized, err := s.config.InitializeIngress(r.Context(), ingress)
+	if err != nil {
+		return err
+	}
+	if !initialized {
+		return nil
+	}
+	settings, err := s.config.GetSettings(r.Context())
+	if err != nil {
+		return err
+	}
+	if settings.DefaultPool == nil {
+		return nil
+	}
+	_, err = s.config.CreateApplyJob(r.Context(), user.ID)
+	return err
+}
+
+func roleAllowed(role auth.Role, roles []auth.Role) bool {
+	for _, allowed := range roles {
+		if role == allowed {
+			return true
+		}
+	}
+	return false
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 type credentialsRequest struct {

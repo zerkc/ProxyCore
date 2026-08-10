@@ -62,6 +62,8 @@ type Store interface {
 	FindUserByUsername(ctx context.Context, username string) (*User, error)
 	FindUserByID(ctx context.Context, id string) (*User, error)
 	CreateUser(ctx context.Context, user User) (User, error)
+	UpdateUser(ctx context.Context, id string, patch UserPatch) (User, error)
+	DeleteUser(ctx context.Context, id string) error
 	CreateSession(ctx context.Context, session Session) (Session, error)
 	FindSessionByTokenHash(ctx context.Context, tokenHash string) (*Session, error)
 	RevokeSession(ctx context.Context, id string, revokedAt time.Time) error
