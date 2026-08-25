@@ -2,14 +2,19 @@ import {
   createContext,
   FormEvent,
   useContext,
+  useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from "react";
 import { useNavigate } from "react-router-dom";
 import type { EditableRecord } from "./RecordDialog";
-import type { StatusPayload, Zone } from "./types";
+import type { JobRecord, StatusPayload, UpdatePayload, Zone } from "./types";
+import { selectFailedJob } from "./patch-bar-state";
+
+const UPDATE_POLL_INTERVAL_MS = 30 * 60 * 1000;
 
 type DashboardContextValue = {
   status?: StatusPayload;
@@ -43,7 +48,14 @@ type DashboardContextValue = {
   deleteStream: (streamId: string) => Promise<boolean>;
   apply: () => Promise<void>;
   logout: () => Promise<void>;
+  update?: UpdatePayload;
+  updateLoading: boolean;
+  updateError: string;
+  refreshUpdate: () => Promise<void>;
   inSync: boolean;
+  failedJob?: JobRecord;
+  failureReason: string;
+  autoRetrying: boolean;
 };
 
 const DashboardContext = createContext<DashboardContextValue | null>(null);
@@ -59,6 +71,11 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   const [editingRecord, setEditingRecord] = useState<EditableRecord>();
   const [ingressIpv4, setIngressIpv4] = useState("");
   const [resolver, setResolver] = useState("192.168.1.1");
+  const [update, setUpdate] = useState<UpdatePayload>();
+  const [updateLoading, setUpdateLoading] = useState(true);
+  const [updateError, setUpdateError] = useState("");
+
+  const autoRetriedJobIdRef = useRef<string | null>(null);
 
   const activeZone = useMemo(
     () => status?.zones.find((zone) => zone.id === selectedZone),
@@ -69,6 +86,24 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     !!status?.desiredRevision &&
     !!status?.appliedRevision &&
     status.desiredRevision.checksum === status.appliedRevision.checksum;
+
+  const failedJob = useMemo(
+    () => (status?.jobs ? selectFailedJob(status.jobs) : undefined),
+    [status?.jobs],
+  );
+
+  const failureReason = failedJob?.errorMessage ?? "Apply failed";
+
+  const autoRetrying = useMemo(() => {
+    if (!status?.jobs) return false;
+    const failed = selectFailedJob(status.jobs);
+    if (!failed) return false;
+    if (autoRetriedJobIdRef.current !== failed.id) return false;
+    const newerExists = status.jobs.some(
+      (j) => Date.parse(j.createdAt) > Date.parse(failed.createdAt),
+    );
+    return !newerExists;
+  }, [status?.jobs]);
 
   async function refresh() {
     const response = await fetch("/api/status", {
@@ -95,6 +130,25 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
         : "",
     );
   }
+
+  const refreshUpdate = useCallback(async () => {
+    setUpdateLoading(true);
+    try {
+      const response = await fetch("/api/updates", {
+        cache: "no-store",
+      });
+      if (!response.ok) {
+        throw new Error(`Version check failed (${response.status})`);
+      }
+      const payload = (await response.json()) as UpdatePayload;
+      setUpdate(payload);
+      setUpdateError("");
+    } catch {
+      setUpdateError("Version check unavailable");
+    } finally {
+      setUpdateLoading(false);
+    }
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -124,6 +178,46 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
       }
     };
   }, [navigate]);
+
+  useEffect(() => {
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    async function tick() {
+      await refreshUpdate();
+      if (cancelled) {
+        return;
+      }
+      timer = setTimeout(() => {
+        void tick();
+      }, UPDATE_POLL_INTERVAL_MS);
+    }
+
+    void tick();
+    return () => {
+      cancelled = true;
+      if (timer) {
+        clearTimeout(timer);
+      }
+    };
+  }, [refreshUpdate]);
+
+  useEffect(() => {
+    if (!status?.jobs) return;
+    const failed = selectFailedJob(status.jobs);
+    if (!failed) return;
+    if (autoRetriedJobIdRef.current === failed.id) return;
+    const newerExists = status.jobs.some(
+      (j) => Date.parse(j.createdAt) > Date.parse(failed.createdAt),
+    );
+    if (newerExists) return;
+    autoRetriedJobIdRef.current = failed.id;
+    void autoRetryApply();
+  }, [status?.jobs]);
+
+  async function autoRetryApply() {
+    await mutate("/api/apply", {}, "Apply queued (auto-retry)");
+  }
 
   async function createZone(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -234,6 +328,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   }
 
   async function apply() {
+    autoRetriedJobIdRef.current = null;
     await mutate("/api/apply", {}, "Apply queued");
   }
 
@@ -314,7 +409,14 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     deleteStream,
     apply,
     logout,
+    update,
+    updateLoading,
+    updateError,
+    refreshUpdate,
     inSync,
+    failedJob,
+    failureReason,
+    autoRetrying,
   };
 
   return (
