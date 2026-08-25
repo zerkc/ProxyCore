@@ -3,6 +3,8 @@ import type { ReactNode } from "react";
 import { useDashboard } from "./dashboard-context";
 import { dashboardNav, resolveDashboardNav } from "./nav";
 import { RecordDialog } from "./RecordDialog";
+import { VersionStatus } from "./VersionStatus";
+import { deriveBarState } from "./patch-bar-state";
 
 export default function DashboardShell({ children }: { children: ReactNode }) {
   const pathname = useLocation().pathname;
@@ -18,7 +20,14 @@ export default function DashboardShell({ children }: { children: ReactNode }) {
     saveRecord,
     apply,
     logout,
+    update,
+    updateLoading,
+    updateError,
+    refreshUpdate,
     inSync,
+    failedJob,
+    failureReason,
+    autoRetrying,
   } = useDashboard();
 
   const zoneRouteMatch = pathname.match(/^\/dashboard\/dns\/([^/]+)\/?$/);
@@ -55,6 +64,8 @@ export default function DashboardShell({ children }: { children: ReactNode }) {
             ["queued", "validating", "applying"].includes(job.status),
           ) ?? false
         }
+        failureReason={failedJob ? failureReason : undefined}
+        autoRetrying={autoRetrying}
         onApply={apply}
       />
 
@@ -72,6 +83,12 @@ export default function DashboardShell({ children }: { children: ReactNode }) {
               Sign out
             </button>
           </div>
+          <VersionStatus
+            update={update}
+            loading={updateLoading}
+            error={updateError}
+            onRetry={() => void refreshUpdate()}
+          />
           <nav
             className="mt-8 grid grid-cols-2 gap-1.5 sm:grid-cols-3 lg:grid-cols-1"
             aria-label="Main navigation"
@@ -165,6 +182,8 @@ function PatchBar({
   applied,
   inSync,
   pendingJob,
+  failureReason,
+  autoRetrying,
   onApply,
 }: {
   loaded: boolean;
@@ -172,16 +191,23 @@ function PatchBar({
   applied?: { revisionNumber: number; checksum: string };
   inSync: boolean;
   pendingJob: boolean;
+  failureReason?: string;
+  autoRetrying: boolean;
   onApply: () => void;
 }) {
+  const state = deriveBarState({ loaded, pendingJob, inSync, failureReason });
+  const label =
+    state.kind === "checking"
+      ? "Checking patch state"
+      : state.kind === "applying"
+        ? "Apply in progress"
+        : state.kind === "failed"
+          ? `Failed: ${state.reason}`
+          : state.kind === "pending"
+            ? "Patch pending"
+            : "Patch live";
+
   const waiting = !loaded || pendingJob || !inSync;
-  const label = !loaded
-    ? "Checking patch state"
-    : pendingJob
-      ? "Apply in progress"
-      : inSync
-        ? "Patch live"
-        : "Patch pending";
   const revisionLabel =
     desired && applied
       ? `r${desired.revisionNumber} → r${applied.revisionNumber}`
@@ -195,6 +221,7 @@ function PatchBar({
     <div
       className="pc-sync-bar"
       data-drift={waiting ? "true" : "false"}
+      data-failed={state.kind === "failed" ? "true" : "false"}
       role="status"
       aria-live="polite"
     >
@@ -225,7 +252,7 @@ function PatchBar({
           <button
             type="button"
             onClick={onApply}
-            disabled={!loaded}
+            disabled={!loaded || autoRetrying}
             className={`rounded-lg px-2.5 py-1 text-[11px] font-semibold transition ${
               waiting && loaded
                 ? "bg-signal text-[#1a120c] hover:bg-[#e6893d]"
