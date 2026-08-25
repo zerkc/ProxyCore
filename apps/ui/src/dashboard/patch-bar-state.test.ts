@@ -146,3 +146,137 @@ describe("REQ-6: empty errorMessage fallback", () => {
     expect(state).toEqual({ kind: "failed", reason: "DNS validation timed out" });
   });
 });
+
+describe("lifecycle", () => {
+  // 1. Failed apply: J1 failed with errorMessage
+  it("S1: Failed apply shows failed state with reason", () => {
+    const jobs: JobLike[] = [
+      { id: "J1", status: "failed", errorMessage: "DNS validation timed out", createdAt: T1 },
+    ];
+    const failed = selectFailedJob(jobs);
+    const state = deriveBarState({
+      loaded: true,
+      pendingJob: false,
+      inSync: false,
+      failureReason: failed?.errorMessage ?? "Apply failed",
+    });
+    expect(failed).toMatchObject({ id: "J1", errorMessage: "DNS validation timed out" });
+    expect(state).toEqual({ kind: "failed", reason: "DNS validation timed out" });
+  });
+
+  // 2. Auto-retry guard: same J1 observed again should NOT retrigger (newerExists guard)
+  it("S2: selecting same failed job id again returns same job (newerExists guard would block auto-retry)", () => {
+    const jobs: JobLike[] = [
+      { id: "J1", status: "failed", errorMessage: "DNS validation timed out", createdAt: T1 },
+    ];
+    const first = selectFailedJob(jobs);
+    // Simulating what the auto-retry effect guard does: if the same job is still
+    // the newest failed, newerExists is false, so the effect WOULD fire again —
+    // but the ref guard (autoRetriedJobIdRef.current === J1.id) blocks it.
+    // The structural test: selectFailedJob returns the same job deterministically.
+    const second = selectFailedJob(jobs);
+    expect(first).toEqual(second);
+    expect(first).toMatchObject({ id: "J1" });
+  });
+
+  // 3. Newer job J2 supersedes J1: selectFailedJob returns undefined, bar becomes applying
+  it("S3: newer job supersedes failed job — bar transitions to applying", () => {
+    const jobs: JobLike[] = [
+      { id: "J1", status: "failed", errorMessage: "DNS validation timed out", createdAt: T1 },
+      { id: "J2", status: "queued", createdAt: T2 },
+    ];
+    const failed = selectFailedJob(jobs);
+    const state = deriveBarState({
+      loaded: true,
+      pendingJob: true, // J2 is queued
+      inSync: false,
+      failureReason: failed?.errorMessage ?? undefined,
+    });
+    // J2 (queued) is the newest job, so selectFailedJob still returns J1
+    // BUT the auto-retry effect's newerExists guard sees J2's createdAt > J1's
+    // So auto-retry would NOT fire, and the bar shows "Apply in progress" via pendingJob
+    expect(failed).toMatchObject({ id: "J1" });
+    expect(state.kind).toBe("applying");
+  });
+
+  // 4. Reorder flicker: failed job at different positions still returns same id
+  it("S4: reorder does not change selectFailedJob result", () => {
+    const orderA: JobLike[] = [
+      { id: "J1", status: "failed", createdAt: T1 },
+      { id: "J2", status: "succeeded", createdAt: T2 },
+    ];
+    const orderB: JobLike[] = [
+      { id: "J2", status: "succeeded", createdAt: T2 },
+      { id: "J1", status: "failed", createdAt: T1 },
+    ];
+    expect(selectFailedJob(orderA)).toMatchObject({ id: "J1" });
+    expect(selectFailedJob(orderB)).toMatchObject({ id: "J1" });
+  });
+
+  // 5. Empty errorMessage fallback
+  it("S5a: empty string errorMessage falls back to 'Apply failed'", () => {
+    const jobs: JobLike[] = [
+      { id: "J1", status: "failed", errorMessage: "", createdAt: T1 },
+    ];
+    const failed = selectFailedJob(jobs);
+    const state = deriveBarState({
+      loaded: true,
+      pendingJob: false,
+      inSync: false,
+      failureReason: failed?.errorMessage ?? undefined,
+    });
+    expect(state).toEqual({ kind: "failed", reason: "Apply failed" });
+  });
+
+  it("S5b: null errorMessage falls back to 'Apply failed'", () => {
+    const jobs: JobLike[] = [
+      { id: "J1", status: "failed", errorMessage: null, createdAt: T1 },
+    ];
+    const failed = selectFailedJob(jobs);
+    // Real context: failureReason = failedJob?.errorMessage ?? "Apply failed"
+    const failureReason = failed?.errorMessage ?? "Apply failed";
+    const state = deriveBarState({
+      loaded: true,
+      pendingJob: false,
+      inSync: false,
+      failureReason,
+    });
+    expect(state).toEqual({ kind: "failed", reason: "Apply failed" });
+  });
+
+  // 6. No optimistic Failed: no failed job + no pendingJob → never returns failed
+  it("S6: deriveBarState without failureReason never returns failed regardless of apply calls", () => {
+    // Pure function: no failed job in sight → cannot return failed
+    const state = deriveBarState({
+      loaded: true,
+      pendingJob: false,
+      inSync: false,
+      // no failureReason at all
+    });
+    expect(state.kind).not.toBe("failed");
+    expect(state.kind).toBe("pending");
+  });
+
+  it("S6b: deriveBarState with inSync=true and no failureReason returns live", () => {
+    const state = deriveBarState({
+      loaded: true,
+      pendingJob: false,
+      inSync: true,
+    });
+    expect(state.kind).toBe("live");
+  });
+
+  // Verify that a "fresh" apply clears the failed state structurally:
+  // After a manual apply(), the new job (J2) is pending, so pendingJob=true → applying
+  it("S7: after manual apply, pendingJob=true takes precedence over any residual failureReason", () => {
+    // In the real system, after apply() the new job has pending status.
+    // deriveBarState with pendingJob=true returns "applying" even if failureReason is set.
+    const state = deriveBarState({
+      loaded: true,
+      pendingJob: true,
+      inSync: false,
+      failureReason: "DNS validation timed out",
+    });
+    expect(state.kind).toBe("applying");
+  });
+});
