@@ -5,7 +5,7 @@
 
 Single-host homelab control plane for **local DNS** and **secure ingress**.
 
-**Version:** `0.1.0`
+**Version:** `0.1.1`
 
 Manage zones and records in a Cloudflare-style UI, toggle proxy on A/AAAA/CNAME, issue certificates, and forward TCP/UDP streams — without hand-editing CoreDNS or Nginx.
 
