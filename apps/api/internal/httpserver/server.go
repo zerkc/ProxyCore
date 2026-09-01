@@ -16,6 +16,7 @@ import (
 	"github.com/zerkc/ProxyCore/apps/api/internal/config"
 	"github.com/zerkc/ProxyCore/apps/api/internal/configuration"
 	"github.com/zerkc/ProxyCore/apps/api/internal/domain"
+	"github.com/zerkc/ProxyCore/apps/api/internal/update"
 	"github.com/zerkc/ProxyCore/apps/api/internal/version"
 )
 
@@ -25,6 +26,7 @@ type Server struct {
 	log            *log.Logger
 	auth           *auth.Service
 	config         *configuration.Store
+	updates        *update.Checker
 	defaultIngress domain.Ingress
 }
 
@@ -39,6 +41,12 @@ func WithAuthService(service *auth.Service) Option {
 func WithConfigurationStore(store *configuration.Store) Option {
 	return func(s *Server) {
 		s.config = store
+	}
+}
+
+func WithUpdateChecker(checker *update.Checker) Option {
+	return func(s *Server) {
+		s.updates = checker
 	}
 }
 
@@ -75,6 +83,7 @@ func (s *Server) Handler() http.Handler {
 func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/health", s.handleHealth)
 	s.mux.HandleFunc("GET /api/ready", s.handleReady)
+	s.mux.HandleFunc("GET /api/updates", s.handleUpdates)
 	s.mux.HandleFunc("POST /api/auth/bootstrap", s.handleAuthBootstrap)
 	s.mux.HandleFunc("POST /api/auth/login", s.handleAuthLogin)
 	s.mux.HandleFunc("POST /api/auth/logout", s.handleAuthLogout)

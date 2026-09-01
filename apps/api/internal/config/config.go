@@ -26,6 +26,10 @@ type Config struct {
 	AcmeEmail string
 	// How often the API scans for Let's Encrypt certificates due for renewal.
 	CertRenewalInterval time.Duration
+	// Update checks are lazy and cached; they never run during API startup.
+	UpdateCheckEnabled  bool
+	UpdateCheckInterval time.Duration
+	UpdateCheckTimeout  time.Duration
 }
 
 func Load() (Config, error) {
@@ -50,6 +54,9 @@ func Load() (Config, error) {
 		ACMEProductionDirectoryURL: env("ACME_PRODUCTION_DIRECTORY_URL", "https://acme-v02.api.letsencrypt.org/directory"),
 		AcmeEmail:                  strings.TrimSpace(os.Getenv("PROXYCORE_ACME_EMAIL")),
 		CertRenewalInterval:        envDuration("PROXYCORE_CERT_RENEWAL_INTERVAL", time.Hour),
+		UpdateCheckEnabled:         envBool("PROXYCORE_UPDATE_CHECK_ENABLED", true),
+		UpdateCheckInterval:        envDuration("PROXYCORE_UPDATE_CHECK_INTERVAL", 6*time.Hour),
+		UpdateCheckTimeout:         envDuration("PROXYCORE_UPDATE_CHECK_TIMEOUT", 5*time.Second),
 	}
 	if !strings.HasPrefix(cfg.Addr, ":") && !strings.Contains(cfg.Addr, ":") {
 		port, err := strconv.Atoi(cfg.Addr)

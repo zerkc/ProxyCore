@@ -16,6 +16,8 @@ import (
 	"github.com/zerkc/ProxyCore/apps/api/internal/configuration"
 	"github.com/zerkc/ProxyCore/apps/api/internal/domain"
 	"github.com/zerkc/ProxyCore/apps/api/internal/httpserver"
+	"github.com/zerkc/ProxyCore/apps/api/internal/update"
+	"github.com/zerkc/ProxyCore/apps/api/internal/version"
 )
 
 func main() {
@@ -27,7 +29,14 @@ func main() {
 
 	var pool *pgxpool.Pool
 	var configStore *configuration.Store
-	var options []httpserver.Option
+	options := []httpserver.Option{
+		httpserver.WithUpdateChecker(update.NewChecker(update.CheckerOptions{
+			CurrentVersion: version.Version,
+			Enabled:        cfg.UpdateCheckEnabled,
+			TTL:            cfg.UpdateCheckInterval,
+			Timeout:        cfg.UpdateCheckTimeout,
+		})),
+	}
 	if cfg.DatabaseURL != "" {
 		connectCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		var err error
