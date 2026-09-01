@@ -9,17 +9,16 @@ import { IngressView } from "./dashboard/IngressView";
 import { StreamsView } from "./dashboard/streams/StreamsView";
 import { OperatorsView, Overview } from "./dashboard/views";
 import { BootstrapPage } from "./pages/BootstrapPage";
-import { HomePage } from "./pages/HomePage";
 import { LoginPage } from "./pages/LoginPage";
 
 export function App() {
   return (
     <Routes>
-      <Route path="/" element={<HomePage />} />
+      <Route path="/" element={<Navigate to="/login" replace />} />
       <Route path="/login" element={<LoginPage />} />
       <Route path="/bootstrap" element={<BootstrapPage />} />
       <Route path="/dashboard/*" element={<DashboardRoutes />} />
-      <Route path="*" element={<Navigate to="/" replace />} />
+      <Route path="*" element={<Navigate to="/login" replace />} />
     </Routes>
   );
 }
