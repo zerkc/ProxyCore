@@ -1,0 +1,24 @@
+change: fix-patchbar-failed-apply-state
+status: archived
+mode: hybrid
+delivery_strategy: exception-ok
+current_phase: archive
+docker_verification: not-applicable-ui-only
+completed_phases:
+  - explore
+  - propose
+  - spec
+  - design
+  - tasks
+  - apply
+  - verify
+  - archive
+pending_phases: []
+artifacts:
+  proposal: openspec/changes/fix-patchbar-failed-apply-state/proposal.md
+  specs: openspec/changes/fix-patchbar-failed-apply-state/specs
+  design: openspec/changes/fix-patchbar-failed-apply-state/design.md
+  tasks: openspec/changes/fix-patchbar-failed-apply-state/tasks.md
+  verify: openspec/changes/fix-patchbar-failed-apply-state/verify-report.md
+  archive: openspec/changes/fix-patchbar-failed-apply-state/archive.md
+engram_prefix: sdd/fix-patchbar-failed-apply-state
