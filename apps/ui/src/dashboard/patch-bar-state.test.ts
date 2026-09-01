@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { selectFailedJob, deriveBarState, type JobLike } from "./patch-bar-state";
+import {
+  selectFailedJob,
+  selectRelevantFailedJob,
+  deriveBarState,
+  type JobLike,
+} from "./patch-bar-state";
 
 const T1 = "2024-01-01T10:00:00.000Z";
 const T2 = "2024-01-01T11:00:00.000Z";
@@ -84,55 +89,191 @@ describe("selectFailedJob", () => {
   });
 });
 
+describe("selectRelevantFailedJob", () => {
+  it("returns undefined for undefined input", () => {
+    expect(selectRelevantFailedJob(undefined)).toBeUndefined();
+  });
+
+  it("returns undefined when there is no failed job", () => {
+    const jobs: JobLike[] = [
+      { id: "J1", status: "applied", createdAt: T2 },
+      { id: "J2", status: "queued", createdAt: T1 },
+    ];
+    expect(selectRelevantFailedJob(jobs)).toBeUndefined();
+  });
+
+  it("returns the failed job when it is the most recent job overall", () => {
+    const jobs: JobLike[] = [
+      { id: "J1", status: "applied", createdAt: T2 },
+      { id: "J2", status: "failed", createdAt: T3 },
+    ];
+    expect(selectRelevantFailedJob(jobs)).toMatchObject({ id: "J2" });
+  });
+
+  it("returns undefined when a newer applied job supersedes a historical failure", () => {
+    const jobs: JobLike[] = [
+      {
+        id: "J1",
+        status: "failed",
+        errorMessage: "old DNS error",
+        createdAt: T1,
+      },
+      { id: "J2", status: "applied", createdAt: T2 },
+      { id: "J3", status: "applied", createdAt: T3 },
+    ];
+    expect(selectRelevantFailedJob(jobs)).toBeUndefined();
+  });
+
+  it("returns undefined when a newer queued/applying job supersedes a failure", () => {
+    const jobs: JobLike[] = [
+      { id: "J1", status: "failed", errorMessage: "stale", createdAt: T1 },
+      { id: "J2", status: "queued", createdAt: T2 },
+    ];
+    expect(selectRelevantFailedJob(jobs)).toBeUndefined();
+  });
+
+  it("matches the user's bug: latest job is applied and healthy, only a historical failure exists", () => {
+    // Mirrors the payload reported in the bug: dozens of applied jobs, one
+    // older failed job. The bar must NOT show the stale failure.
+    const jobs: JobLike[] = [
+      {
+        id: "old-fail",
+        status: "failed",
+        errorMessage: "Fixed service operation failed with exit 1",
+        createdAt: T1,
+      },
+      { id: "applied-1", status: "applied", createdAt: T2 },
+      { id: "applied-2", status: "applied", createdAt: T3 },
+    ];
+    expect(selectRelevantFailedJob(jobs)).toBeUndefined();
+    // sanity: pure selectFailedJob would still return the stale one
+    expect(selectFailedJob(jobs)).toMatchObject({ id: "old-fail" });
+  });
+
+  it("ignores jobs whose createdAt fails Date.parse when checking for newer jobs", () => {
+    const jobs: JobLike[] = [
+      { id: "J1", status: "failed", createdAt: T1 },
+      { id: "J2", status: "applied", createdAt: "not-a-date" },
+    ];
+    expect(selectRelevantFailedJob(jobs)).toMatchObject({ id: "J1" });
+  });
+});
+
 describe("deriveBarState", () => {
   it("returns checking when loaded is false", () => {
-    expect(deriveBarState({ loaded: false, pendingJob: false, inSync: true, failureReason: "anything" })).toEqual({ kind: "checking" });
-    expect(deriveBarState({ loaded: false, pendingJob: true, inSync: false })).toEqual({ kind: "checking" });
+    expect(
+      deriveBarState({
+        loaded: false,
+        pendingJob: false,
+        inSync: true,
+        failureReason: "anything",
+      }),
+    ).toEqual({ kind: "checking" });
+    expect(
+      deriveBarState({ loaded: false, pendingJob: true, inSync: false }),
+    ).toEqual({ kind: "checking" });
   });
 
   it("returns applying when pendingJob is true", () => {
-    expect(deriveBarState({ loaded: true, pendingJob: true, inSync: true })).toEqual({ kind: "applying" });
-    expect(deriveBarState({ loaded: true, pendingJob: true, inSync: false, failureReason: "ignored" })).toEqual({ kind: "applying" });
+    expect(
+      deriveBarState({ loaded: true, pendingJob: true, inSync: true }),
+    ).toEqual({ kind: "applying" });
+    expect(
+      deriveBarState({
+        loaded: true,
+        pendingJob: true,
+        inSync: false,
+        failureReason: "ignored",
+      }),
+    ).toEqual({ kind: "applying" });
   });
 
   it("returns failed when failureReason is set, even if inSync is true", () => {
-    expect(deriveBarState({ loaded: true, pendingJob: false, inSync: true, failureReason: "DNS timeout" })).toEqual({ kind: "failed", reason: "DNS timeout" });
+    expect(
+      deriveBarState({
+        loaded: true,
+        pendingJob: false,
+        inSync: true,
+        failureReason: "DNS timeout",
+      }),
+    ).toEqual({ kind: "failed", reason: "DNS timeout" });
   });
 
   it("returns failed when failureReason is set, even if inSync is false", () => {
-    expect(deriveBarState({ loaded: true, pendingJob: false, inSync: false, failureReason: "DNS timeout" })).toEqual({ kind: "failed", reason: "DNS timeout" });
+    expect(
+      deriveBarState({
+        loaded: true,
+        pendingJob: false,
+        inSync: false,
+        failureReason: "DNS timeout",
+      }),
+    ).toEqual({ kind: "failed", reason: "DNS timeout" });
   });
 
   it("returns live when inSync is true and no failure", () => {
-    expect(deriveBarState({ loaded: true, pendingJob: false, inSync: true })).toEqual({ kind: "live" });
-    expect(deriveBarState({ loaded: true, pendingJob: false, inSync: true, failureReason: undefined })).toEqual({ kind: "live" });
+    expect(
+      deriveBarState({ loaded: true, pendingJob: false, inSync: true }),
+    ).toEqual({ kind: "live" });
+    expect(
+      deriveBarState({
+        loaded: true,
+        pendingJob: false,
+        inSync: true,
+        failureReason: undefined,
+      }),
+    ).toEqual({ kind: "live" });
   });
 
   it("returns pending when inSync is false and no failure", () => {
-    expect(deriveBarState({ loaded: true, pendingJob: false, inSync: false })).toEqual({ kind: "pending" });
+    expect(
+      deriveBarState({ loaded: true, pendingJob: false, inSync: false }),
+    ).toEqual({ kind: "pending" });
   });
 
   it("failureReason takes precedence over both live and pending", () => {
-    const withReason = deriveBarState({ loaded: true, pendingJob: false, inSync: true, failureReason: "x" });
+    const withReason = deriveBarState({
+      loaded: true,
+      pendingJob: false,
+      inSync: true,
+      failureReason: "x",
+    });
     expect(withReason.kind).toBe("failed");
-    const noReason = deriveBarState({ loaded: true, pendingJob: false, inSync: false });
+    const noReason = deriveBarState({
+      loaded: true,
+      pendingJob: false,
+      inSync: false,
+    });
     expect(noReason.kind).toBe("pending");
   });
 });
 
 describe("REQ-6: empty errorMessage fallback", () => {
   it("returns failed with Apply failed when failureReason is empty string", () => {
-    const state = deriveBarState({ loaded: true, pendingJob: false, inSync: false, failureReason: "" });
+    const state = deriveBarState({
+      loaded: true,
+      pendingJob: false,
+      inSync: false,
+      failureReason: "",
+    });
     expect(state).toEqual({ kind: "failed", reason: "Apply failed" });
   });
 
   it("returns failed with Apply failed when failureReason is null", () => {
-    const state = deriveBarState({ loaded: true, pendingJob: false, inSync: false, failureReason: null });
+    const state = deriveBarState({
+      loaded: true,
+      pendingJob: false,
+      inSync: false,
+      failureReason: null,
+    });
     expect(state).toEqual({ kind: "failed", reason: "Apply failed" });
   });
 
   it("returns pending when failureReason is omitted (undefined)", () => {
-    const state = deriveBarState({ loaded: true, pendingJob: false, inSync: false });
+    const state = deriveBarState({
+      loaded: true,
+      pendingJob: false,
+      inSync: false,
+    });
     expect(state).toEqual({ kind: "pending" });
   });
 
@@ -143,7 +284,10 @@ describe("REQ-6: empty errorMessage fallback", () => {
       inSync: true,
       failureReason: "DNS validation timed out",
     });
-    expect(state).toEqual({ kind: "failed", reason: "DNS validation timed out" });
+    expect(state).toEqual({
+      kind: "failed",
+      reason: "DNS validation timed out",
+    });
   });
 });
 
@@ -151,7 +295,12 @@ describe("lifecycle", () => {
   // 1. Failed apply: J1 failed with errorMessage
   it("S1: Failed apply shows failed state with reason", () => {
     const jobs: JobLike[] = [
-      { id: "J1", status: "failed", errorMessage: "DNS validation timed out", createdAt: T1 },
+      {
+        id: "J1",
+        status: "failed",
+        errorMessage: "DNS validation timed out",
+        createdAt: T1,
+      },
     ];
     const failed = selectFailedJob(jobs);
     const state = deriveBarState({
@@ -160,14 +309,25 @@ describe("lifecycle", () => {
       inSync: false,
       failureReason: failed?.errorMessage ?? "Apply failed",
     });
-    expect(failed).toMatchObject({ id: "J1", errorMessage: "DNS validation timed out" });
-    expect(state).toEqual({ kind: "failed", reason: "DNS validation timed out" });
+    expect(failed).toMatchObject({
+      id: "J1",
+      errorMessage: "DNS validation timed out",
+    });
+    expect(state).toEqual({
+      kind: "failed",
+      reason: "DNS validation timed out",
+    });
   });
 
   // 2. Auto-retry guard: same J1 observed again should NOT retrigger (newerExists guard)
   it("S2: selecting same failed job id again returns same job (newerExists guard would block auto-retry)", () => {
     const jobs: JobLike[] = [
-      { id: "J1", status: "failed", errorMessage: "DNS validation timed out", createdAt: T1 },
+      {
+        id: "J1",
+        status: "failed",
+        errorMessage: "DNS validation timed out",
+        createdAt: T1,
+      },
     ];
     const first = selectFailedJob(jobs);
     // Simulating what the auto-retry effect guard does: if the same job is still
@@ -182,7 +342,12 @@ describe("lifecycle", () => {
   // 3. Newer job J2 supersedes J1: selectFailedJob returns undefined, bar becomes applying
   it("S3: newer job supersedes failed job — bar transitions to applying", () => {
     const jobs: JobLike[] = [
-      { id: "J1", status: "failed", errorMessage: "DNS validation timed out", createdAt: T1 },
+      {
+        id: "J1",
+        status: "failed",
+        errorMessage: "DNS validation timed out",
+        createdAt: T1,
+      },
       { id: "J2", status: "queued", createdAt: T2 },
     ];
     const failed = selectFailedJob(jobs);

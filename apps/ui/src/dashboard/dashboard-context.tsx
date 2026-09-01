@@ -12,7 +12,7 @@ import {
 import { useNavigate } from "react-router-dom";
 import type { EditableRecord } from "./RecordDialog";
 import type { JobRecord, StatusPayload, UpdatePayload, Zone } from "./types";
-import { selectFailedJob } from "./patch-bar-state";
+import { selectRelevantFailedJob } from "./patch-bar-state";
 
 const UPDATE_POLL_INTERVAL_MS = 30 * 60 * 1000;
 
@@ -88,7 +88,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     status.desiredRevision.checksum === status.appliedRevision.checksum;
 
   const failedJob = useMemo(
-    () => (status?.jobs ? selectFailedJob(status.jobs) : undefined),
+    () => (status?.jobs ? selectRelevantFailedJob(status.jobs) : undefined),
     [status?.jobs],
   );
 
@@ -96,13 +96,10 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
 
   const autoRetrying = useMemo(() => {
     if (!status?.jobs) return false;
-    const failed = selectFailedJob(status.jobs);
+    const failed = selectRelevantFailedJob(status.jobs);
     if (!failed) return false;
     if (autoRetriedJobIdRef.current !== failed.id) return false;
-    const newerExists = status.jobs.some(
-      (j) => Date.parse(j.createdAt) > Date.parse(failed.createdAt),
-    );
-    return !newerExists;
+    return true;
   }, [status?.jobs]);
 
   async function refresh() {
@@ -204,13 +201,9 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     if (!status?.jobs) return;
-    const failed = selectFailedJob(status.jobs);
+    const failed = selectRelevantFailedJob(status.jobs);
     if (!failed) return;
     if (autoRetriedJobIdRef.current === failed.id) return;
-    const newerExists = status.jobs.some(
-      (j) => Date.parse(j.createdAt) > Date.parse(failed.createdAt),
-    );
-    if (newerExists) return;
     autoRetriedJobIdRef.current = failed.id;
     void autoRetryApply();
   }, [status?.jobs]);

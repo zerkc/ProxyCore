@@ -22,12 +22,35 @@ export function selectFailedJob(
     if (j.status !== "failed") continue;
     const t = Date.parse(j.createdAt);
     if (Number.isNaN(t)) continue;
-    if (t > bestCreated || (t === bestCreated && best !== undefined && j.id > best.id)) {
+    if (
+      t > bestCreated ||
+      (t === bestCreated && best !== undefined && j.id > best.id)
+    ) {
       best = j;
       bestCreated = t;
     }
   }
   return best;
+}
+
+// A failed job is only relevant to the current patch-bar state when it is
+// the most recent job overall. Any newer job (queued, applying, applied,
+// succeeded, …) supersedes the historical failure, otherwise the bar would
+// keep nagging about a stale error forever after a successful retry.
+export function selectRelevantFailedJob(
+  jobs: readonly JobLike[] | undefined,
+): JobLike | undefined {
+  const failed = selectFailedJob(jobs);
+  if (!failed) return undefined;
+  if (!jobs) return failed;
+  const failedTime = Date.parse(failed.createdAt);
+  if (Number.isNaN(failedTime)) return undefined;
+  for (const j of jobs) {
+    if (j.id === failed.id) continue;
+    const t = Date.parse(j.createdAt);
+    if (!Number.isNaN(t) && t > failedTime) return undefined;
+  }
+  return failed;
 }
 
 export function deriveBarState(input: {
