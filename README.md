@@ -41,8 +41,15 @@ Then open `http://<host-ip>:3000/bootstrap` once to create the Owner.
 | `WEB_PORT` | `3000` | Dashboard / API |
 | `DNS_PORT` | `53` | CoreDNS |
 | `SKIP_BUILD` | `0` | Set `1` to recreate without rebuild |
+| `PROXYCORE_UPDATE_CHECK_ENABLED` | `1` | Set `0` to disable stable release checks against GitHub |
+| `PROXYCORE_UPDATE_CHECK_INTERVAL` | `6h` | Minimum time between GitHub release checks |
+| `PROXYCORE_UPDATE_CHECK_TIMEOUT` | `5s` | Timeout for each GitHub release request |
 
 Details: [docs/runbooks/bootstrap.md](docs/runbooks/bootstrap.md).
+
+The dashboard checks the latest stable GitHub release on demand and shows a
+link when a newer version is available. The result is cached by the API; this
+feature only informs you and never updates the installation automatically.
 
 ## Stack
 
