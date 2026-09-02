@@ -1,10 +1,19 @@
+# syntax=docker/dockerfile:1.10
+
 # One-shot Drizzle migrator (Bun). Prefer building this off-box on 1GB hosts.
 # Retire when Go owns schema migrations.
 FROM oven/bun:1.3.14-alpine
 WORKDIR /app
+
+# Lockfile and workspace markers first. apps/ui/package.json lets the
+# --filter resolve the workspace name; we then exclude it.
 COPY package.json bun.lock bunfig.toml tsconfig.json ./
 COPY apps/ui/package.json ./apps/ui/package.json
 COPY packages ./packages
 COPY drizzle.config.ts ./
-RUN bun install --frozen-lockfile --production --filter '!@proxycore/ui'
+
+# Cache mount — repeat builds skip redownloading deps.
+RUN --mount=type=cache,id=bun-runtime,target=/root/.bun/install/cache \
+    bun install --frozen-lockfile --production --filter '!@proxycore/ui'
+
 CMD ["bun", "run", "packages/db/src/migrate.ts"]

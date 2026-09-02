@@ -1,13 +1,21 @@
+# syntax=docker/dockerfile:1.10
 FROM oven/bun:1.3.14-alpine
 
 WORKDIR /app
 
+# Lockfile and workspace markers first — these rarely change. apps/ui/package.json
+# is needed so --filter '!@proxycore/ui' can resolve the workspace name.
 COPY package.json bun.lock bunfig.toml tsconfig.json ./
 COPY apps/ui/package.json ./apps/ui/package.json
-COPY apps/control ./apps/control
 COPY packages ./packages
 COPY drizzle.config.ts ./
 
-RUN bun install --frozen-lockfile --production --filter '!@proxycore/ui'
+# Install with cache mount — repeat builds skip redownloading deps entirely.
+# Source is NOT copied yet, so source changes won't bust this layer.
+RUN --mount=type=cache,id=bun-runtime,target=/root/.bun/install/cache \
+    bun install --frozen-lockfile --production --filter '!@proxycore/ui'
+
+# Source last — changes here only invalidate layers below this point.
+COPY apps/control ./apps/control
 
 CMD ["bun", "run", "control"]
