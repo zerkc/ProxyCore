@@ -371,10 +371,29 @@ a {
   }
 }
 
+.pc-spinner {
+  width: 0.85rem;
+  height: 0.85rem;
+  border-radius: 999px;
+  border: 2px solid color-mix(in srgb, var(--signal) 35%, transparent);
+  border-top-color: var(--signal);
+  animation: pc-spin 0.9s linear infinite;
+  flex-shrink: 0;
+  display: inline-block;
+}
+
+@keyframes pc-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .pc-enter,
   .pc-sync-bar[data-drift="true"],
-  .pc-sync-cable::after {
+  .pc-sync-cable::after,
+  .pc-spinner {
     animation: none !important;
+    border-top-color: var(--signal);
   }
 }
