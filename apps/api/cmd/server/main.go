@@ -20,6 +20,16 @@ import (
 	"github.com/zerkc/ProxyCore/apps/api/internal/version"
 )
 
+func updaterClientFromConfig(cfg config.Config) httpserver.Option {
+	if cfg.UpdaterURL == "" {
+		return nil
+	}
+	return httpserver.WithUpdaterClient(&httpserver.UpdaterHTTPClient{
+		URL:    cfg.UpdaterURL + "/internal/apply",
+		Client: &http.Client{Timeout: 10 * time.Second},
+	})
+}
+
 func main() {
 	logger := log.New(os.Stdout, "", log.LstdFlags|log.Lmsgprefix)
 	cfg, err := config.Load()
@@ -36,6 +46,9 @@ func main() {
 			TTL:            cfg.UpdateCheckInterval,
 			Timeout:        cfg.UpdateCheckTimeout,
 		})),
+	}
+	if opt := updaterClientFromConfig(cfg); opt != nil {
+		options = append(options, opt)
 	}
 	if cfg.DatabaseURL != "" {
 		connectCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

@@ -30,6 +30,10 @@ type Config struct {
 	UpdateCheckEnabled  bool
 	UpdateCheckInterval time.Duration
 	UpdateCheckTimeout  time.Duration
+	// UpdaterURL is the base URL of the internal updater service on the control
+	// network (e.g. http://updater:8080). When empty the /api/updates/apply route
+	// returns 503 so the feature is safely disabled.
+	UpdaterURL string
 }
 
 func Load() (Config, error) {
@@ -57,6 +61,7 @@ func Load() (Config, error) {
 		UpdateCheckEnabled:         envBool("PROXYCORE_UPDATE_CHECK_ENABLED", true),
 		UpdateCheckInterval:        envDuration("PROXYCORE_UPDATE_CHECK_INTERVAL", 6*time.Hour),
 		UpdateCheckTimeout:         envDuration("PROXYCORE_UPDATE_CHECK_TIMEOUT", 5*time.Second),
+		UpdaterURL:                 strings.TrimSpace(os.Getenv("PROXYCORE_UPDATER_URL")),
 	}
 	if !strings.HasPrefix(cfg.Addr, ":") && !strings.Contains(cfg.Addr, ":") {
 		port, err := strconv.Atoi(cfg.Addr)

@@ -28,6 +28,7 @@ type Server struct {
 	config         *configuration.Store
 	updates        *update.Checker
 	defaultIngress domain.Ingress
+	updaterClient UpdaterClient
 }
 
 type Option func(*Server)
@@ -47,6 +48,12 @@ func WithConfigurationStore(store *configuration.Store) Option {
 func WithUpdateChecker(checker *update.Checker) Option {
 	return func(s *Server) {
 		s.updates = checker
+	}
+}
+
+func WithUpdaterClient(client UpdaterClient) Option {
+	return func(s *Server) {
+		s.updaterClient = client
 	}
 }
 
@@ -84,6 +91,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/health", s.handleHealth)
 	s.mux.HandleFunc("GET /api/ready", s.handleReady)
 	s.mux.HandleFunc("GET /api/updates", s.handleUpdates)
+	s.mux.HandleFunc("POST /api/updates/apply", s.handleUpdateApply)
 	s.mux.HandleFunc("POST /api/auth/bootstrap", s.handleAuthBootstrap)
 	s.mux.HandleFunc("POST /api/auth/login", s.handleAuthLogin)
 	s.mux.HandleFunc("POST /api/auth/logout", s.handleAuthLogout)
