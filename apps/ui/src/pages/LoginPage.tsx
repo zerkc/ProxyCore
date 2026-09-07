@@ -1,5 +1,6 @@
 import { FormEvent, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
+import { SESSION_USERNAME_KEY } from "../api";
 
 export function LoginPage() {
   const navigate = useNavigate();
@@ -16,9 +17,16 @@ export function LoginPage() {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ username, password }),
     });
+    const body = (await response.json()) as {
+      error?: string;
+      user?: { username?: string };
+    };
     if (!response.ok) {
-      setError((await response.json()).error ?? "Sign-in failed");
+      setError(body.error ?? "Sign-in failed");
       return;
+    }
+    if (body.user?.username) {
+      sessionStorage.setItem(SESSION_USERNAME_KEY, body.user.username);
     }
     navigate("/dashboard");
   }

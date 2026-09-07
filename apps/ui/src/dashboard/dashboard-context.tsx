@@ -10,6 +10,7 @@ import {
   type ReactNode,
 } from "react";
 import { useNavigate } from "react-router-dom";
+import { SESSION_USERNAME_KEY } from "../api";
 import type { EditableRecord } from "./RecordDialog";
 import type { JobRecord, StatusPayload, UpdatePayload, Zone } from "./types";
 import { selectRelevantFailedJob } from "./patch-bar-state";
@@ -18,6 +19,7 @@ const UPDATE_POLL_INTERVAL_MS = 30 * 60 * 1000;
 
 type DashboardContextValue = {
   status?: StatusPayload;
+  user: string;
   message: string;
   error: string;
   setMessage: (value: string) => void;
@@ -74,6 +76,9 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   const [update, setUpdate] = useState<UpdatePayload>();
   const [updateLoading, setUpdateLoading] = useState(true);
   const [updateError, setUpdateError] = useState("");
+  const [user] = useState<string>(
+    () => sessionStorage.getItem(SESSION_USERNAME_KEY) ?? "",
+  );
 
   const autoRetriedJobIdRef = useRef<string | null>(null);
 
@@ -361,11 +366,13 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
       method: "POST",
       credentials: "include",
     });
+    sessionStorage.removeItem(SESSION_USERNAME_KEY);
     navigate("/login");
   }
 
   const value: DashboardContextValue = {
     status,
+    user,
     message,
     error,
     setMessage,

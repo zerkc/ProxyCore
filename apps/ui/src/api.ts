@@ -1,3 +1,5 @@
+export const SESSION_USERNAME_KEY = "proxycore_username";
+
 export type PublicUser = {
   id: string;
   username: string;
@@ -5,10 +7,7 @@ export type PublicUser = {
   active: boolean;
 };
 
-export async function api<T>(
-  path: string,
-  init: RequestInit = {},
-): Promise<T> {
+export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   const response = await fetch(path, {
     credentials: "include",
     headers: {
