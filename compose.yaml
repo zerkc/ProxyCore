@@ -17,6 +17,7 @@ services:
     networks: [control]
 
   # Go control plane: SPA + auth + all configuration routes + ACME challenge.
+  # The UI (static SPA) is bundled into the api image.
   api:
     build:
       context: .
@@ -35,6 +36,7 @@ services:
       PROXYCORE_UPDATE_CHECK_ENABLED: ${PROXYCORE_UPDATE_CHECK_ENABLED:-1}
       PROXYCORE_UPDATE_CHECK_INTERVAL: ${PROXYCORE_UPDATE_CHECK_INTERVAL:-6h}
       PROXYCORE_UPDATE_CHECK_TIMEOUT: ${PROXYCORE_UPDATE_CHECK_TIMEOUT:-5s}
+      PROXYCORE_UPDATER_URL: ${PROXYCORE_UPDATER_URL:-http://updater:8080}
     depends_on:
       postgres:
         condition: service_healthy
@@ -52,6 +54,75 @@ services:
       timeout: 5s
       retries: 6
     networks: [control, data]
+
+  # Self-update orchestrator. Reaches the docker socket + the compose project
+  # so it can build (local mode) or pull (registry mode), migrate, and restart
+  # api/worker. When the update succeeds
+  # it writes a bootstrap request to the shared volume; the updater-bootstrap
+  # sidecar (below) watches that file and replaces this container's image.
+  # Talks to the api over the internal `control` network on PROXYCORE_UPDATER_ADDR
+  # (default :8080). Never publishes ports; only the api can call /internal/* on it.
+  updater:
+    build:
+      context: .
+      dockerfile: infra/compose/Dockerfile.updater
+    # Set PROXYCORE_UPDATER_IMAGE to a registry tag in real deployments.
+    image: ${PROXYCORE_UPDATER_IMAGE:-proxycore-updater:local}
+    environment:
+      PROXYCORE_UPDATER_ADDR: ":8080"
+      PROXYCORE_UPDATE_MODE: ${PROXYCORE_UPDATE_MODE:-build}
+      PROXYCORE_HOST_HOME: ${PROXYCORE_HOST_HOME:-${PWD}}
+      PROXYCORE_COMPOSE_FILE: ${PROXYCORE_HOST_HOME:-${PWD}}/compose.yaml
+      PROXYCORE_ENV_FILE: ${PROXYCORE_HOST_HOME:-${PWD}}/.env
+      PROXYCORE_COMPOSE_PROJECT: ${COMPOSE_PROJECT_NAME:-proxycore}
+      PROXYCORE_UPDATER_SERVICES: "api worker"
+      PROXYCORE_MIGRATE_SERVICE: migrate
+      PROXYCORE_HEALTH_URL: http://api:3000/api/health
+      PROXYCORE_HEALTH_TIMEOUT: ${PROXYCORE_HEALTH_TIMEOUT:-90s}
+      PROXYCORE_BOOTSTRAP_REQUEST_FILE: /bootstrap/request.json
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${PROXYCORE_HOST_HOME:-${PWD}}:${PROXYCORE_HOST_HOME:-${PWD}}:ro
+      - updater-bootstrap-state:/bootstrap
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    networks: [control]
+
+  # Self-update sidecar: watches the shared updater-bootstrap-state volume for
+  # a bootstrap request JSON written by the updater after a successful apply.
+  # Claims the file atomically (mv), builds/pulls the new updater image, and
+  # recreates the updater container — all without killing itself. Requires the Docker socket
+  # and compose project files mounted at runtime. No published ports.
+  updater-bootstrap:
+    build:
+      context: .
+      dockerfile: infra/compose/Dockerfile.updater-bootstrap
+    image: proxycore-updater-bootstrap:local
+    environment:
+      PROXYCORE_HOST_HOME: ${PROXYCORE_HOST_HOME:-${PWD}}
+      PROXYCORE_UPDATE_MODE: ${PROXYCORE_UPDATE_MODE:-build}
+      PROXYCORE_COMPOSE_FILE: ${PROXYCORE_HOST_HOME:-${PWD}}/compose.yaml
+      PROXYCORE_COMPOSE_PROJECT: ${COMPOSE_PROJECT_NAME:-proxycore}
+      PROXYCORE_COMPOSE_ENV_FILE: ${PROXYCORE_HOST_HOME:-${PWD}}/.env
+      PROXYCORE_BOOTSTRAP_MODE: ${PROXYCORE_UPDATE_MODE:-build}
+      PROXYCORE_BOOTSTRAP_UPDATER_IMAGE: ${PROXYCORE_UPDATER_IMAGE:-proxycore-updater:local}
+      PROXYCORE_BOOTSTRAP_REQUEST_FILE: /bootstrap/request.json
+      PROXYCORE_BOOTSTRAP_WORK_DIR: /bootstrap/work
+      PROXYCORE_BOOTSTRAP_INTERVAL: ${PROXYCORE_BOOTSTRAP_INTERVAL:-5}
+      PROXYCORE_BOOTSTRAP_RETRIES: ${PROXYCORE_BOOTSTRAP_RETRIES:-3}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${PROXYCORE_HOST_HOME:-${PWD}}:${PROXYCORE_HOST_HOME:-${PWD}}:ro
+      - updater-bootstrap-state:/bootstrap
+    restart: unless-stopped
+    networks: [control]
 
   # Drizzle migrator (Node one-shot). Not started with `up`; used by install.sh.
   migrate:
@@ -180,6 +251,7 @@ volumes:
   certificates:
   coredns-zones:
   coredns-config:
+  updater-bootstrap-state:
 
 networks:
   control:

@@ -177,6 +177,11 @@ main() {
   cd "$PROXYCORE_HOME"
   ensure_env
 
+  # The updater sidecar invokes Docker Compose through the host socket. Give
+  # it the real host project path so relative bind mounts resolve on the host,
+  # not inside the sidecar container.
+  export PROXYCORE_HOST_HOME="$(pwd)"
+
   # Export compose project name for stable container names across updates.
   export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-proxycore}"
 

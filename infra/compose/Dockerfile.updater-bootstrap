@@ -1,0 +1,17 @@
+# syntax=docker/dockerfile:1.10
+
+# updater-bootstrap — sidecar container that watches a shared volume for
+# bootstrap requests written by the updater and replaces the updater's own
+# image/container without killing itself.
+#
+# Runs as root. Requires the Docker socket and compose project files to be
+# mounted at runtime so it can issue `docker compose pull` and
+# `docker compose up --force-recreate` commands.
+FROM alpine:3.22
+RUN apk add --no-cache ca-certificates tzdata docker-cli docker-cli-compose
+WORKDIR /app
+
+COPY scripts/updater-bootstrap.sh /app/updater-bootstrap.sh
+RUN chmod +x /app/updater-bootstrap.sh
+
+ENTRYPOINT ["/app/updater-bootstrap.sh"]

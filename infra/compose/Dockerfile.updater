@@ -1,0 +1,31 @@
+# syntax=docker/dockerfile:1.10
+
+# Updater: orchestrates self-update of api/worker/ui by building local images or
+# pulling registry images through the docker CLI + compose plugin. Requires
+# /var/run/docker.sock and the project's
+# compose.yaml to be mounted at runtime.
+FROM golang:1.25-alpine AS builder
+WORKDIR /src
+
+# Layer 1: deps (cached on go.mod/go.sum changes only).
+COPY apps/updater/go.mod apps/updater/go.sum* ./
+RUN go mod download
+
+# Layer 2: source + build.
+COPY apps/updater/ ./
+RUN --mount=type=cache,id=go-mod,target=/go/pkg/mod \
+    --mount=type=cache,id=go-build,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=linux go build -trimpath \
+       -o /out/proxycore-updater ./cmd
+
+# Runtime: alpine + docker CLI + compose plugin + the static binary.
+# NOTE: runs as root because the docker socket already implies host-root
+# privileges; the dedicated user would need the host's docker GID, which
+# varies per install. Re-introducing the non-root user requires plumbing
+# the GID through compose.yaml (build arg or env).
+FROM alpine:3.22
+RUN apk add --no-cache ca-certificates tzdata docker-cli docker-cli-compose
+WORKDIR /app
+COPY --from=builder /out/proxycore-updater /app/proxycore-updater
+COPY compose.yaml /app/compose.yaml
+ENTRYPOINT ["/app/proxycore-updater"]
