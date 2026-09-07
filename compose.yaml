@@ -226,6 +226,7 @@ services:
     # Host networking so HTTP/HTTPS and dynamic stream ports bind on the host
     # without republishing Compose ports after each stream change.
     network_mode: host
+    restart: unless-stopped
     volumes:
       - certificates:/etc/nginx/certs:ro
       - candidates:/var/lib/proxycore:ro

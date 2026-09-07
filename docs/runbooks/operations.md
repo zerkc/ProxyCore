@@ -1,5 +1,22 @@
 # ProxyCore Operations Runbook
 
+## Nginx configuration persistence
+
+On every successful apply, the promoted Nginx config is persisted to the stable
+file `<candidates>/nginx-live.conf` on the shared candidates volume **after** it
+is confirmed inside the container. A copy of the previous stable config is saved
+as `nginx-previous-live.conf`. When the Nginx container restarts or is recreated,
+the entrypoint script restores the stable config (validated with `nginx -t`) before
+Nginx starts. Legacy candidates in `<revision>/nginx/nginx.conf` are used as a
+best-effort fallback for installations created before this fix. If no valid config
+exists, Nginx starts with the baked default and logs a warning; an apply restores
+full functionality.
+
+The stable file is updated atomically only after the container promotion succeeds.
+If persistence fails, the container is restored to its pre-promotion state and the
+apply fails. Rollback restores both the container config and the persistent stable
+file to the last known-good state.
+
 ## Apply and rollback
 
 The worker renders a revision, stages it, validates it, promotes it, reloads

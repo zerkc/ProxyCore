@@ -1,4 +1,5 @@
 import Docker from "dockerode";
+import { randomUUID } from "node:crypto";
 import {
   access,
   chmod,
@@ -6,11 +7,12 @@ import {
   mkdir,
   readFile,
   readdir,
+  rename,
   rm,
   stat,
   writeFile,
 } from "node:fs/promises";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
 import { FixedServiceControl, type FixedHandlers } from "./service";
 import type { ControlRequest, ControlService } from "./protocol";
 
@@ -26,9 +28,13 @@ export type DockerControlOptions = {
 export function createDockerServiceControl(
   options: DockerControlOptions = {},
 ): FixedServiceControl {
-  const docker = new Docker({ socketPath: options.socketPath ?? "/var/run/docker.sock" });
-  const candidateRoot = options.candidateRoot ?? "/var/lib/proxycore/candidates";
-  const corednsZonesRoot = options.corednsZonesRoot ?? "/var/lib/proxycore/coredns-zones";
+  const docker = new Docker({
+    socketPath: options.socketPath ?? "/var/run/docker.sock",
+  });
+  const candidateRoot =
+    options.candidateRoot ?? "/var/lib/proxycore/candidates";
+  const corednsZonesRoot =
+    options.corednsZonesRoot ?? "/var/lib/proxycore/coredns-zones";
   const corednsConfigRoot =
     options.corednsConfigRoot ?? "/var/lib/proxycore/coredns-config";
   const containers = {
@@ -92,8 +98,7 @@ async function executeDockerOperation(
       return { status: "validated", checksum: request.checksum };
     case "promote":
       if (request.service === "nginx") {
-        await exec(container, ["cp", "/etc/nginx/nginx.conf", "/etc/nginx/.proxycore.previous.conf"]);
-        await exec(container, ["cp", `${request.candidatePath}/nginx.conf`, "/etc/nginx/nginx.conf"]);
+        await promoteNginx(container, request.candidatePath, candidateRoot);
       } else {
         await promoteCoreDns(
           container,
@@ -118,9 +123,14 @@ async function executeDockerOperation(
       return { status: "healthy" };
     case "rollback":
       if (request.service === "nginx") {
-        await exec(container, ["cp", "/etc/nginx/.proxycore.previous.conf", "/etc/nginx/nginx.conf"]);
+        await rollbackNginx(container, candidateRoot);
       } else {
-        await rollbackCoreDns(container, candidateRoot, corednsZonesRoot, corednsConfigRoot);
+        await rollbackCoreDns(
+          container,
+          candidateRoot,
+          corednsZonesRoot,
+          corednsConfigRoot,
+        );
       }
       return { status: "rolled-back" };
   }
@@ -182,7 +192,10 @@ async function findLatestAppliedCorefile(
       }
       if (!entry.isFile() || entry.name !== "Corefile") continue;
       // Worker layout: <candidateRoot>/<rev>/coredns/Corefile
-      if (!path.includes("/coredns/Corefile") && !path.endsWith(`${join("coredns", "Corefile")}`)) {
+      if (
+        !path.includes("/coredns/Corefile") &&
+        !path.endsWith(`${join("coredns", "Corefile")}`)
+      ) {
         continue;
       }
       const info = await stat(path);
@@ -204,17 +217,24 @@ async function promoteCoreDns(
   configRoot: string,
 ): Promise<void> {
   const liveCorefilePath = corednsLiveCorefilePath(configRoot);
-  const previousCorefilePath = join(candidateRoot, ".proxycore-previous-coredns-corefile");
-  const previousZonesPath = join(candidateRoot, ".proxycore-previous-coredns-zones");
+  const previousCorefilePath = join(
+    candidateRoot,
+    ".proxycore-previous-coredns-corefile",
+  );
+  const previousZonesPath = join(
+    candidateRoot,
+    ".proxycore-previous-coredns-zones",
+  );
 
   await mkdir(configRoot, { recursive: true, mode: 0o755 });
   let previousCorefile: Buffer;
   try {
     previousCorefile = await readFile(liveCorefilePath);
   } catch {
-    previousCorefile = await readArchiveFile(container, "/etc/coredns-config/Corefile").catch(() =>
-      readArchiveFile(container, "/etc/coredns/Corefile"),
-    );
+    previousCorefile = await readArchiveFile(
+      container,
+      "/etc/coredns-config/Corefile",
+    ).catch(() => readArchiveFile(container, "/etc/coredns/Corefile"));
   }
   await writeFile(previousCorefilePath, previousCorefile, { mode: 0o600 });
   await rm(previousZonesPath, { recursive: true, force: true });
@@ -225,11 +245,16 @@ async function promoteCoreDns(
     const corefile = await readFile(join(candidatePath, "Corefile"));
     // Persist on the shared volume so container recreate keeps applied config.
     await writeFile(liveCorefilePath, corefile, { mode: 0o644 });
-    await container.putArchive(createTar([{ name: "Corefile", contents: corefile }]), {
-      path: "/etc/coredns-config",
-    });
+    await container.putArchive(
+      createTar([{ name: "Corefile", contents: corefile }]),
+      {
+        path: "/etc/coredns-config",
+      },
+    );
   } catch (error) {
-    await writeFile(liveCorefilePath, previousCorefile, { mode: 0o644 }).catch(() => undefined);
+    await writeFile(liveCorefilePath, previousCorefile, { mode: 0o644 }).catch(
+      () => undefined,
+    );
     await replaceDirectory(zonesRoot, previousZonesPath).catch(() => undefined);
     throw error;
   }
@@ -242,14 +267,23 @@ async function rollbackCoreDns(
   configRoot: string,
 ): Promise<void> {
   const liveCorefilePath = corednsLiveCorefilePath(configRoot);
-  const previousCorefilePath = join(candidateRoot, ".proxycore-previous-coredns-corefile");
-  const previousZonesPath = join(candidateRoot, ".proxycore-previous-coredns-zones");
+  const previousCorefilePath = join(
+    candidateRoot,
+    ".proxycore-previous-coredns-corefile",
+  );
+  const previousZonesPath = join(
+    candidateRoot,
+    ".proxycore-previous-coredns-zones",
+  );
   const previousCorefile = await readFile(previousCorefilePath);
   await mkdir(configRoot, { recursive: true, mode: 0o755 });
   await writeFile(liveCorefilePath, previousCorefile, { mode: 0o644 });
-  await container.putArchive(createTar([{ name: "Corefile", contents: previousCorefile }]), {
-    path: "/etc/coredns-config",
-  });
+  await container.putArchive(
+    createTar([{ name: "Corefile", contents: previousCorefile }]),
+    {
+      path: "/etc/coredns-config",
+    },
+  );
   await replaceDirectory(zonesRoot, previousZonesPath);
 }
 
@@ -276,18 +310,26 @@ async function copyDirectory(source: string, target: string): Promise<void> {
       continue;
     }
     if (!entry.isFile()) {
-      throw new Error(`Unsupported file type in CoreDNS zone directory: ${entry.name}`);
+      throw new Error(
+        `Unsupported file type in CoreDNS zone directory: ${entry.name}`,
+      );
     }
     await copyFile(sourcePath, targetPath);
     await chmod(targetPath, 0o644);
   }
 }
 
-async function readArchiveFile(container: Docker.Container, path: string): Promise<Buffer> {
+async function readArchiveFile(
+  container: Docker.Container,
+  path: string,
+): Promise<Buffer> {
   return extractFirstFileFromTar(await readArchive(container, path));
 }
 
-async function readArchive(container: Docker.Container, path: string): Promise<Buffer> {
+async function readArchive(
+  container: Docker.Container,
+  path: string,
+): Promise<Buffer> {
   const stream = await container.getArchive({ path });
   return new Promise<Buffer>((resolve, reject) => {
     const chunks: Buffer[] = [];
@@ -309,7 +351,11 @@ export function extractFirstFileFromTar(archive: Buffer): Buffer {
     if (header.every((byte) => byte === 0)) {
       break;
     }
-    const sizeText = header.subarray(124, 136).toString("ascii").replace(/\0.*$/, "").trim();
+    const sizeText = header
+      .subarray(124, 136)
+      .toString("ascii")
+      .replace(/\0.*$/, "")
+      .trim();
     const size = Number.parseInt(sizeText, 8) || 0;
     const typeFlag = header[156];
     const payload = archive.subarray(offset, offset + size);
@@ -337,7 +383,10 @@ function createTar(entries: Array<{ name: string; contents: Buffer }>): Buffer {
     writeTarString(header, 265, 32, "root");
     writeTarString(header, 297, 32, "root");
     header.fill(0x20, 148, 156);
-    const checksum = header.reduce((sum, value) => sum + value, 0).toString(8).padStart(6, "0");
+    const checksum = header
+      .reduce((sum, value) => sum + value, 0)
+      .toString(8)
+      .padStart(6, "0");
     header.write(checksum, 148, 6, "ascii");
     header[154] = 0;
     header[155] = 0x20;
@@ -349,16 +398,234 @@ function createTar(entries: Array<{ name: string; contents: Buffer }>): Buffer {
   return Buffer.concat(blocks);
 }
 
-function writeTarString(header: Buffer, offset: number, length: number, value: string): void {
+function writeTarString(
+  header: Buffer,
+  offset: number,
+  length: number,
+  value: string,
+): void {
   Buffer.from(value, "ascii").subarray(0, length).copy(header, offset);
 }
 
-function writeTarOctal(header: Buffer, offset: number, length: number, value: number): void {
+function writeTarOctal(
+  header: Buffer,
+  offset: number,
+  length: number,
+  value: number,
+): void {
   const text = value.toString(8).padStart(length - 1, "0");
   header.write(`${text}\0`, offset, length, "ascii");
 }
 
-export function assertCandidatePath(candidatePath: string, candidateRoot: string): void {
+// ── Nginx stable-config helpers ──────────────────────────────────────────────
+
+export const NGINX_STABLE_CONFIG = "nginx-live.conf";
+export const NGINX_PREVIOUS_STABLE_CONFIG = "nginx-previous-live.conf";
+
+export function nginxLiveConfigPath(candidateRoot: string): string {
+  return join(candidateRoot, NGINX_STABLE_CONFIG);
+}
+
+export function nginxPreviousStableConfigPath(candidateRoot: string): string {
+  return join(candidateRoot, NGINX_PREVIOUS_STABLE_CONFIG);
+}
+
+/**
+ * Find the newest legacy nginx.conf candidate under candidateRoot.
+ * Only considers paths matching <candidateRoot>/<rev>/nginx/nginx.conf.
+ * Returns the absolute path or undefined.
+ */
+export async function findNewestLegacyNginxCandidate(
+  candidateRoot: string,
+): Promise<string | undefined> {
+  let bestPath: string | undefined;
+  let bestMtime = 0;
+
+  async function visit(directory: string): Promise<void> {
+    let entries;
+    try {
+      entries = await readdir(directory, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const path = join(directory, entry.name);
+      if (entry.isDirectory()) {
+        await visit(path);
+        continue;
+      }
+      // Legacy layout: <candidateRoot>/<rev>/nginx/nginx.conf
+      if (!entry.isFile() || entry.name !== "nginx.conf") continue;
+      if (
+        !path.includes("/nginx/nginx.conf") &&
+        !path.endsWith(join("nginx", "nginx.conf"))
+      ) {
+        continue;
+      }
+      const info = await stat(path);
+      if (info.mtimeMs >= bestMtime) {
+        bestMtime = info.mtimeMs;
+        bestPath = path;
+      }
+    }
+  }
+
+  await visit(candidateRoot);
+  return bestPath;
+}
+
+/**
+ * Atomically write the stable Nginx config using a temp file + rename while
+ * retaining the previous stable config for rollback.
+ */
+export async function writeStableNginxConfig(
+  candidateRoot: string,
+  contents: Buffer,
+  previousContents?: Buffer,
+): Promise<void> {
+  const stablePath = nginxLiveConfigPath(candidateRoot);
+  const previousStablePath = nginxPreviousStableConfigPath(candidateRoot);
+
+  await mkdir(dirname(stablePath), { recursive: true, mode: 0o755 });
+  if (previousContents && previousContents.length > 0) {
+    await writeFileAtomically(previousStablePath, previousContents);
+  } else {
+    await rm(previousStablePath, { force: true });
+  }
+  await writeFileAtomically(stablePath, contents);
+}
+
+async function readFileIfPresent(path: string): Promise<Buffer | undefined> {
+  try {
+    return await readFile(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return undefined;
+    }
+    throw error;
+  }
+}
+
+async function writeFileAtomically(
+  path: string,
+  contents: Buffer,
+  mode = 0o644,
+): Promise<void> {
+  const temporaryPath = `${path}.tmp-${process.pid}-${randomUUID()}`;
+  try {
+    await writeFile(temporaryPath, contents, { mode });
+    await rename(temporaryPath, path);
+  } finally {
+    await rm(temporaryPath, { force: true });
+  }
+}
+
+// ── Nginx promote / rollback ─────────────────────────────────────────────────
+
+/**
+ * Promote an Nginx candidate and persist it only after the container copy
+ * succeeds. The container snapshot is kept as a second rollback guard for
+ * the first apply, before a stable config exists on the shared volume.
+ */
+async function promoteNginx(
+  container: Docker.Container,
+  candidatePath: string,
+  candidateRoot: string,
+): Promise<void> {
+  const candidateConfigPath = join(candidatePath, "nginx.conf");
+  const candidateContents = await readFile(candidateConfigPath);
+  const previousContainerConfig = await readArchiveFile(
+    container,
+    "/etc/nginx/nginx.conf",
+  ).catch(() => undefined);
+
+  try {
+    await exec(container, [
+      "cp",
+      "/etc/nginx/nginx.conf",
+      "/etc/nginx/.proxycore.previous.conf",
+    ]);
+  } catch {
+    // First apply or a freshly recreated container without a live config.
+  }
+
+  try {
+    await exec(container, ["cp", candidateConfigPath, "/etc/nginx/nginx.conf"]);
+    await writeStableNginxConfig(
+      candidateRoot,
+      candidateContents,
+      previousContainerConfig,
+    );
+  } catch (error) {
+    try {
+      if (previousContainerConfig) {
+        await container.putArchive(
+          createTar([
+            { name: "nginx.conf", contents: previousContainerConfig },
+          ]),
+          { path: "/etc/nginx" },
+        );
+      } else {
+        await exec(container, [
+          "cp",
+          "/etc/nginx/.proxycore.previous.conf",
+          "/etc/nginx/nginx.conf",
+        ]);
+      }
+    } catch {
+      // Preserve the original promotion error; the next health/recovery pass
+      // will report the container state if the best-effort restore failed.
+    }
+    throw error;
+  }
+}
+
+/**
+ * Roll back Nginx to the previous stable config. The persistent previous file
+ * is authoritative once at least one stable promotion has completed; the
+ * in-container backup covers the first promotion from the baked default.
+ */
+async function rollbackNginx(
+  container: Docker.Container,
+  candidateRoot: string,
+): Promise<void> {
+  const stablePath = nginxLiveConfigPath(candidateRoot);
+  const previousStablePath = nginxPreviousStableConfigPath(candidateRoot);
+  const previousConfig = await readFileIfPresent(previousStablePath);
+
+  if (previousConfig) {
+    const currentStable = await readFileIfPresent(stablePath);
+    await writeFileAtomically(stablePath, previousConfig);
+    try {
+      await container.putArchive(
+        createTar([{ name: "nginx.conf", contents: previousConfig }]),
+        { path: "/etc/nginx" },
+      );
+    } catch (error) {
+      if (currentStable) {
+        await writeFileAtomically(stablePath, currentStable).catch(
+          () => undefined,
+        );
+      }
+      throw error;
+    }
+    return;
+  }
+
+  await exec(container, [
+    "cp",
+    "/etc/nginx/.proxycore.previous.conf",
+    "/etc/nginx/nginx.conf",
+  ]);
+  await rm(stablePath, { force: true });
+}
+
+// ── Candidate path assertion ────────────────────────────────────────────────
+
+export function assertCandidatePath(
+  candidatePath: string,
+  candidateRoot: string,
+): void {
   if (
     !candidatePath.startsWith(`${candidateRoot}/`) ||
     candidatePath.includes("..") ||
@@ -368,7 +635,10 @@ export function assertCandidatePath(candidatePath: string, candidateRoot: string
   }
 }
 
-async function exec(container: Docker.Container, command: string[]): Promise<void> {
+async function exec(
+  container: Docker.Container,
+  command: string[],
+): Promise<void> {
   const process = await container.exec({
     Cmd: command,
     AttachStdout: true,
@@ -383,6 +653,8 @@ async function exec(container: Docker.Container, command: string[]): Promise<voi
   });
   const result = await process.inspect();
   if (result.ExitCode !== 0) {
-    throw new Error(`Fixed service operation failed with exit ${result.ExitCode ?? "unknown"}`);
+    throw new Error(
+      `Fixed service operation failed with exit ${result.ExitCode ?? "unknown"}`,
+    );
   }
 }
