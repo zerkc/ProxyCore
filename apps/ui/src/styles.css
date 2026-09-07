@@ -492,10 +492,43 @@ a {
   display: inline-block;
 }
 
+.pc-update-spinner {
+  width: 2.5rem;
+  height: 2.5rem;
+}
+
 @keyframes pc-spin {
   to {
     transform: rotate(360deg);
   }
+}
+
+@keyframes dialog-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes card-in {
+  from {
+    opacity: 0;
+    transform: scale(0.96) translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+.animate-dialog-in {
+  animation: dialog-in 180ms ease-out both;
+}
+
+.animate-card-in {
+  animation: card-in 200ms cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -503,7 +536,9 @@ a {
   .pc-spinner,
   .pc-topbar-bell-badge[data-kind="checking"],
   .pc-topbar-bell-badge[data-kind="applying"],
-  .pc-topbar-bell-active {
+  .pc-topbar-bell-active,
+  .animate-dialog-in,
+  .animate-card-in {
     animation: none !important;
   }
   .pc-spinner {

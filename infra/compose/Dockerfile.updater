@@ -24,7 +24,7 @@ RUN --mount=type=cache,id=go-mod,target=/go/pkg/mod \
 # varies per install. Re-introducing the non-root user requires plumbing
 # the GID through compose.yaml (build arg or env).
 FROM alpine:3.22
-RUN apk add --no-cache ca-certificates tzdata docker-cli docker-cli-compose
+RUN apk add --no-cache ca-certificates tzdata docker-cli docker-cli-compose git
 WORKDIR /app
 COPY --from=builder /out/proxycore-updater /app/proxycore-updater
 COPY compose.yaml /app/compose.yaml

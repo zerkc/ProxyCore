@@ -18,6 +18,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -35,6 +36,10 @@ type Options struct {
 	// UpdateMode selects whether api/worker images are pulled or built locally.
 	// Pull is the default to preserve registry-backed deployments.
 	UpdateMode string
+	// SourceDir, when non-empty, is the path to the managed Git checkout on the
+	// host. In build mode the updater fetches and checks out the target tag
+	// here before building. Must be writable by the updater container.
+	SourceDir string
 	// ComposeFile is the absolute path to compose.yaml inside the container.
 	ComposeFile string
 	// ProjectName is the docker compose project name (matches
@@ -172,6 +177,11 @@ func (u *Updater) InFlight() bool {
 // (typically an HTTP handler) should treat Apply as long-running and return
 // quickly to the client with 202; the actual work continues here.
 func (u *Updater) Apply(ctx context.Context, targetVersion string) (*Status, error) {
+	canonicalTag, err := normalizeTag(targetVersion)
+	if err != nil {
+		return nil, err
+	}
+
 	u.mu.Lock()
 	if u.inFlgt {
 		u.mu.Unlock()
@@ -195,6 +205,7 @@ func (u *Updater) Apply(ctx context.Context, targetVersion string) (*Status, err
 	}()
 
 	steps := []StepResult{}
+	originalHead := ""
 
 	runStep := func(name string, fn func() (string, error)) {
 		step := StepResult{Name: name, Status: "ok", StartedAt: time.Now().UTC()}
@@ -210,11 +221,62 @@ func (u *Updater) Apply(ctx context.Context, targetVersion string) (*Status, err
 		u.opts.Logger.Printf("updater: %s status=%s duration=%s err=%q",
 			name, step.Status, step.Duration, step.Error)
 		if err != nil {
-			// capture current state before bailing
+			// Capture current state before bailing. If we fetched source earlier
+			// in this run, try to restore the original HEAD.
 			u.mu.Lock()
 			status.Steps = append([]StepResult(nil), steps...)
 			status.Status = "failed"
 			u.mu.Unlock()
+			if originalHead != "" {
+				u.restoreSource(ctx, originalHead)
+				originalHead = ""
+			}
+		} else if name == "bootstrap" {
+			// Bootstrap step succeeded — update is committed. Discard originalHead
+			// so we do not accidentally restore on a later failure.
+			originalHead = ""
+		}
+	}
+
+	// ── fetch-source (build mode only) ──────────────────────────────────────
+	// In build mode we must checkout the requested tag before building so that
+	// Dockerfile.api picks up the right VERSION file instead of whatever
+	// source is currently on disk.
+	if u.opts.UpdateMode == UpdateModeBuild && u.opts.SourceDir != "" {
+		runStep("fetch-source", func() (string, error) {
+			tag := canonicalTag
+			// 1. Record current HEAD so we can restore on failure.
+			head, err := u.opts.Exec(ctx, "git", u.gitArgs(u.opts.SourceDir, "rev-parse", "HEAD")...)
+			if err != nil {
+				return "", fmt.Errorf("rev-parse HEAD: %w", err)
+			}
+			originalHead = strings.TrimSpace(head)
+			// 2. Reject dirty working tree.
+			dirty, err := u.opts.Exec(ctx, "git", u.gitArgs(u.opts.SourceDir, "status", "--porcelain")...)
+			if err != nil {
+				return "", fmt.Errorf("git status: %w", err)
+			}
+			if strings.TrimSpace(dirty) != "" {
+				return "", ErrSourceDirty
+			}
+			// 3. Fetch the tag from origin.
+			_, err = u.opts.Exec(ctx, "git", u.gitArgs(u.opts.SourceDir, "fetch", "origin", "refs/tags/"+tag+":refs/tags/"+tag)...)
+			if err != nil {
+				return "", fmt.Errorf("%w: git fetch origin tag %s", ErrGitFetchFailed, tag)
+			}
+			// 4. Checkout the tag as detached HEAD.
+			_, err = u.opts.Exec(
+				ctx,
+				"git",
+				u.gitArgs(u.opts.SourceDir, "checkout", "--detach", "--force", "refs/tags/"+tag)...,
+			)
+			if err != nil {
+				return "", fmt.Errorf("%w: git checkout %s", ErrGitCheckoutFailed, tag)
+			}
+			return fmt.Sprintf("checked out %s (was %s)", tag, originalHead), nil
+		})
+		if lastStepFailed(steps) {
+			return u.fail(status, steps), ErrStepFailed
 		}
 	}
 
@@ -310,6 +372,57 @@ func (u *Updater) fail(status *Status, steps []StepResult) *Status {
 	return status
 }
 
+// restoreSource attempts to git checkout the original HEAD. Errors are logged
+// but not returned because restore is best-effort after a failure.
+func (u *Updater) restoreSource(ctx context.Context, originalHead string) {
+	if originalHead == "" {
+		return
+	}
+	if u.opts.SourceDir == "" || u.opts.Exec == nil {
+		u.opts.Logger.Printf("updater: restoreSource skipped (no SourceDir or Exec)")
+		return
+	}
+
+	restoreCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	out, err := u.opts.Exec(
+		restoreCtx,
+		"git",
+		u.gitArgs(u.opts.SourceDir, "checkout", "--detach", "--force", originalHead)...,
+	)
+	if err != nil {
+		u.opts.Logger.Printf("updater: restoreSource failed to checkout %s: %s — %v",
+			originalHead, out, err)
+		return
+	}
+	u.opts.Logger.Printf("updater: restored source to %s", originalHead)
+}
+
+// gitArgs prepends -C <dir> to a git argument list, using argument arrays
+// instead of shell interpolation for safety.
+func (u *Updater) gitArgs(dir string, args ...string) []string {
+	out := make([]string, 0, 2+len(args))
+	out = append(out, "-C", dir)
+	out = append(out, args...)
+	return out
+}
+
+// normalizeTag strips an optional leading 'v' from a stable release version
+// and returns the canonical tag form (e.g. "0.1.5" → "v0.1.5").
+func normalizeTag(version string) (string, error) {
+	version = strings.TrimSpace(strings.TrimPrefix(version, "v"))
+	if !isValidVersion(version) {
+		return "", fmt.Errorf("%w: %q", ErrInvalidTargetVersion, version)
+	}
+	return "v" + version, nil
+}
+
+var validVersionRe = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+$`)
+
+func isValidVersion(version string) bool {
+	return validVersionRe.MatchString(strings.TrimSpace(version))
+}
+
 func normalizeUpdateMode(mode string) string {
 	if strings.EqualFold(strings.TrimSpace(mode), UpdateModeBuild) {
 		return UpdateModeBuild
@@ -400,6 +513,20 @@ var ErrStepFailed = errors.New("updater: a step failed; see Status.Steps")
 // ErrBootstrapRequestFailed indicates the bootstrap request could not be
 // written; the update succeeded but the sidecar cannot self-replace.
 var ErrBootstrapRequestFailed = errors.New("updater: bootstrap request write failed")
+
+// ErrInvalidTargetVersion is returned when an update target is not a stable
+// semantic version that can be mapped to a release tag.
+var ErrInvalidTargetVersion = errors.New("updater: invalid target version")
+
+// ErrSourceDirty is returned when the managed Git checkout has uncommitted
+// changes and the updater cannot safely fetch/checkout the target tag.
+var ErrSourceDirty = errors.New("updater: managed source directory has uncommitted changes")
+
+// ErrGitFetchFailed is wrapped with the tag name when git fetch fails.
+var ErrGitFetchFailed = errors.New("updater: git fetch of tag failed")
+
+// ErrGitCheckoutFailed is wrapped with the tag name when git checkout fails.
+var ErrGitCheckoutFailed = errors.New("updater: git checkout of tag failed")
 
 // atomicWriteFile writes data to a new file inside dir with the given prefix
 // and returns the absolute path. The caller is responsible for renaming or

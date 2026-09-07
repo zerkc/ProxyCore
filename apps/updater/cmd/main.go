@@ -39,6 +39,7 @@ func main() {
 
 	u := updater.New(updater.Options{
 		UpdateMode:           cfg.UpdateMode,
+		SourceDir:            cfg.SourceDir,
 		ComposeFile:          cfg.ComposeFile,
 		ProjectName:          cfg.ProjectName,
 		Services:             cfg.Services,
@@ -129,6 +130,7 @@ func main() {
 type config struct {
 	Addr                 string
 	UpdateMode           string
+	SourceDir            string
 	ComposeFile          string
 	ProjectName          string
 	Services             []string
@@ -153,6 +155,7 @@ func loadConfig() (*config, error) {
 		cfg.Services = []string{"api", "worker"}
 	}
 	cfg.BootstrapRequestFile = os.Getenv("PROXYCORE_BOOTSTRAP_REQUEST_FILE")
+	cfg.SourceDir = strings.TrimSpace(os.Getenv("PROXYCORE_SOURCE_DIR"))
 	if d, err := time.ParseDuration(envOr("PROXYCORE_HEALTH_TIMEOUT", "90s")); err == nil {
 		cfg.HealthTimeout = d
 	} else {

@@ -72,6 +72,7 @@ services:
       PROXYCORE_UPDATER_ADDR: ":8080"
       PROXYCORE_UPDATE_MODE: ${PROXYCORE_UPDATE_MODE:-build}
       PROXYCORE_HOST_HOME: ${PROXYCORE_HOST_HOME:-${PWD}}
+      PROXYCORE_SOURCE_DIR: ${PROXYCORE_HOST_HOME:-${PWD}}
       PROXYCORE_COMPOSE_FILE: ${PROXYCORE_HOST_HOME:-${PWD}}/compose.yaml
       PROXYCORE_ENV_FILE: ${PROXYCORE_HOST_HOME:-${PWD}}/.env
       PROXYCORE_COMPOSE_PROJECT: ${COMPOSE_PROJECT_NAME:-proxycore}
@@ -82,7 +83,7 @@ services:
       PROXYCORE_BOOTSTRAP_REQUEST_FILE: /bootstrap/request.json
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-      - ${PROXYCORE_HOST_HOME:-${PWD}}:${PROXYCORE_HOST_HOME:-${PWD}}:ro
+      - ${PROXYCORE_HOST_HOME:-${PWD}}:${PROXYCORE_HOST_HOME:-${PWD}}
       - updater-bootstrap-state:/bootstrap
     depends_on:
       api:

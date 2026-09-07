@@ -17,16 +17,29 @@ may still be served by the transitional `node-api` (tsx) behind the Go edge.
 
 Optional environment variables before `| sh`:
 
-| Variable | Default | Purpose |
-| --- | --- | --- |
-| `PROXYCORE_HOME` | `/opt/proxycore` or `~/proxycore` | Install directory |
-| `PROXYCORE_BRANCH` | `main` | Git branch |
-| `WEB_PORT` | `3000` | Control-plane port |
-| `DNS_PORT` | `53` | CoreDNS publish port |
-| `SKIP_BUILD` | `0` | Set `1` to recreate without rebuild |
+| Variable           | Default                           | Purpose                             |
+| ------------------ | --------------------------------- | ----------------------------------- |
+| `PROXYCORE_HOME`   | `/opt/proxycore` or `~/proxycore` | Install directory                   |
+| `PROXYCORE_BRANCH` | `main`                            | Git branch                          |
+| `WEB_PORT`         | `3000`                            | Control-plane port                  |
+| `DNS_PORT`         | `53`                              | CoreDNS publish port                |
+| `SKIP_BUILD`       | `0`                               | Set `1` to recreate without rebuild |
 
 Re-run the same command to update: pull, migrate, rebuild/recreate. `.env` is
 preserved.
+
+### Dashboard self-updates
+
+The dashboard update action uses the default local build mode. Before building,
+the updater fetches and checks out the requested `v<version>` tag in the managed
+checkout, then rebuilds the API, worker, and migration images from that source.
+Keep the checkout clean and allow the host to reach GitHub; an update stops
+before restarting services when tracked files have local changes or the target
+tag cannot be fetched.
+
+During an update the dashboard locks the page and keeps a full-screen progress
+dialog open through the service restart. Refresh the page only after the dialog
+reports that the new version is live.
 
 ## Manual preconditions
 
