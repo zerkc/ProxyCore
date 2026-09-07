@@ -1,12 +1,9 @@
 import { Link } from "react-router-dom";
-import type { FormEvent } from "react";
 import type { StatusPayload } from "../types";
 
 export function DnsZonesView(props: {
   status?: StatusPayload;
-  zoneName: string;
-  setZoneName: (value: string) => void;
-  createZone: (event: FormEvent<HTMLFormElement>) => void;
+  openCreate: () => void;
 }) {
   const zones = props.status?.zones ?? [];
 
@@ -24,26 +21,20 @@ export function DnsZonesView(props: {
               zone is one authoritative namespace.
             </p>
           </div>
-          <p className="font-mono text-sm text-link">
-            {zones.length} {zones.length === 1 ? "zone" : "zones"}
-          </p>
+          <div className="flex items-center gap-3">
+            <p className="font-mono text-sm text-link">
+              {zones.length} {zones.length === 1 ? "zone" : "zones"}
+            </p>
+            <button
+              type="button"
+              className="pc-btn-ghost"
+              onClick={props.openCreate}
+              aria-label="Add zone"
+            >
+              Add zone
+            </button>
+          </div>
         </div>
-
-        <form
-          className="mt-6 flex flex-col gap-2 sm:flex-row"
-          onSubmit={props.createZone}
-        >
-          <input
-            value={props.zoneName}
-            onChange={(event) => props.setZoneName(event.target.value)}
-            className="pc-input mt-0 min-w-0 flex-1"
-            aria-label="Zone name"
-            placeholder="home.arpa"
-          />
-          <button className="pc-btn shrink-0" type="submit">
-            Add zone
-          </button>
-        </form>
       </section>
 
       <section className="space-y-2">

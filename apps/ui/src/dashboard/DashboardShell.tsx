@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 import { useDashboard } from "./dashboard-context";
 import { dashboardNav, resolveDashboardNav } from "./nav";
 import { RecordDialog } from "./RecordDialog";
+import { ZoneDialog } from "./dns/ZoneDialog";
 import { VersionStatus } from "./VersionStatus";
 import { deriveBarState } from "./patch-bar-state";
 
@@ -19,6 +20,10 @@ export default function DashboardShell({ children }: { children: ReactNode }) {
     recordDialogOpen,
     closeRecordDialog,
     saveRecord,
+    zoneDialogOpen,
+    openZoneDialog,
+    closeZoneDialog,
+    createZone,
     apply,
     logout,
     update,
@@ -163,6 +168,15 @@ export default function DashboardShell({ children }: { children: ReactNode }) {
         initial={editingRecord}
         onClose={closeRecordDialog}
         onSubmit={saveRecord}
+      />
+      <ZoneDialog
+        open={zoneDialogOpen}
+        onClose={closeZoneDialog}
+        onSubmit={async (name) => {
+          const ok = await createZone(name);
+          if (ok) closeZoneDialog();
+          return ok;
+        }}
       />
     </main>
   );

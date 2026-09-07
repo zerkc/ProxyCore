@@ -51,14 +51,12 @@ function DashboardOverviewPage() {
 }
 
 function DashboardDnsPage() {
-  const { status, zoneName, setZoneName, createZone } = useDashboard();
+  const { status, openZoneDialog } = useDashboard();
 
   return (
     <DnsZonesView
       status={status}
-      zoneName={zoneName}
-      setZoneName={setZoneName}
-      createZone={createZone}
+      openCreate={openZoneDialog}
     />
   );
 }

@@ -1,54 +1,55 @@
+import { useState } from "react";
 import { useDashboard } from "./dashboard-context";
+import { IngressDialog } from "./IngressDialog";
 
 export function IngressView() {
   const {
-    ingressIpv4,
-    setIngressIpv4,
-    resolver,
-    setResolver,
+    ingressIpv4: initialIpv4,
+    resolver: initialResolver,
     saveNetwork,
   } = useDashboard();
 
+  const [dialogOpen, setDialogOpen] = useState(false);
+  const [ipv4, setIpv4] = useState(initialIpv4);
+  const [resolver, setResolver] = useState(initialResolver);
+
   return (
     <div className="mt-8 max-w-xl">
-      <form onSubmit={saveNetwork} className="pc-panel p-6 md:p-8">
+      <div className="pc-panel p-6 md:p-8">
         <p className="pc-eyebrow">Ingress & forwarding</p>
         <h2 className="pc-title mt-2 text-2xl text-mist">
-          How ProxyCore answers and forwards
+          Network configuration
         </h2>
         <p className="mt-3 text-sm leading-6 text-mute">
-          These settings affect proxied DNS answers and the default resolver
-          used for names outside your zones. TCP/UDP port maps live under
-          Streams.
+          Advertised IPv4 used in proxied DNS answers, and the default resolver
+          for names outside your zones.
         </p>
-        <div className="mt-6 space-y-4">
-          <label className="pc-label">
-            Proxy advertised IPv4
-            <input
-              value={ingressIpv4}
-              onChange={(event) => setIngressIpv4(event.target.value)}
-              className="pc-input"
-              placeholder="Auto-detected LAN address"
-            />
-          </label>
-          <p className="-mt-2 text-xs leading-5 text-faint">
-            Used in proxied DNS answers. Detected automatically when possible;
-            override for another interface, NAT, or public address.
-          </p>
-          <label className="pc-label">
-            Default resolver
-            <input
-              value={resolver}
-              onChange={(event) => setResolver(event.target.value)}
-              className="pc-input"
-              placeholder="192.168.1.1"
-            />
-          </label>
-        </div>
-        <button className="pc-btn mt-6" type="submit">
-          Save network settings
+        <button
+          type="button"
+          className="pc-btn mt-6"
+          onClick={() => {
+            setIpv4(initialIpv4);
+            setResolver(initialResolver);
+            setDialogOpen(true);
+          }}
+        >
+          Configure network settings
         </button>
-      </form>
+      </div>
+
+      <IngressDialog
+        open={dialogOpen}
+        initialIpv4={initialIpv4}
+        initialResolver={initialResolver}
+        onClose={() => setDialogOpen(false)}
+        onSubmit={async ({ ipv4: newIpv4, resolver: newResolver }) => {
+          const ok = await saveNetwork(newIpv4, newResolver);
+          if (ok) {
+            setDialogOpen(false);
+          }
+          return ok;
+        }}
+      />
     </div>
   );
 }

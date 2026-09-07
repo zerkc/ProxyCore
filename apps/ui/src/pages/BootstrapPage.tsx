@@ -1,5 +1,6 @@
 import { FormEvent, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
+import { PasswordInput } from "../components/PasswordInput";
 
 export function BootstrapPage() {
   const navigate = useNavigate();
@@ -48,18 +49,15 @@ export function BootstrapPage() {
               required
             />
           </label>
-          <label className="pc-label">
-            Password
-            <input
-              value={password}
-              onChange={(event) => setPassword(event.target.value)}
-              className="pc-input"
-              type="password"
-              autoComplete="new-password"
-              minLength={5}
-              required
-            />
-          </label>
+          <PasswordInput
+            label="Password"
+            value={password}
+            onChange={setPassword}
+            autoComplete="new-password"
+            minLength={5}
+            required
+            className="pc-input"
+          />
         </div>
         {error ? (
           <p className="pc-toast-err !mt-5" role="alert">

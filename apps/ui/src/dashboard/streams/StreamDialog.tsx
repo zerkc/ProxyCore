@@ -1,4 +1,5 @@
 import { FormEvent, useEffect, useState } from "react";
+import { createPortal } from "react-dom";
 import type { StreamRoute } from "../types";
 
 export function StreamDialog(props: {
@@ -49,7 +50,7 @@ export function StreamDialog(props: {
     }
   }
 
-  return (
+  return createPortal(
     <div
       className="fixed inset-0 z-50 grid place-items-center bg-bay/85 p-4 backdrop-blur-sm"
       role="dialog"
@@ -167,6 +168,7 @@ export function StreamDialog(props: {
           </button>
         </div>
       </form>
-    </div>
+    </div>,
+    document.body,
   );
 }

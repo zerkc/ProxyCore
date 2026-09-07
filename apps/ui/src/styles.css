@@ -1,36 +1,10 @@
+@import "./styles/tokens.css";
 @import "@fontsource/syne/600.css";
 @import "@fontsource/source-sans-3/400.css";
 @import "@fontsource/source-sans-3/600.css";
 @import "@fontsource/ibm-plex-mono/400.css";
 @import "@fontsource/ibm-plex-mono/500.css";
 @import "tailwindcss";
-
-:root {
-  color-scheme: dark;
-  --font-syne: "Syne", ui-sans-serif, system-ui, sans-serif;
-  --font-source: "Source Sans 3", ui-sans-serif, system-ui, sans-serif;
-  --font-plex: "IBM Plex Mono", ui-monospace, monospace;
-  --bay: #12100e;
-  --panel: #1a1714;
-  --raised: #221e1a;
-  --line: #3a322b;
-  --mist: #ebe4d8;
-  --mute: #9a9084;
-  --faint: #6e665c;
-  --signal: #d9772f;
-  --signal-soft: rgba(217, 119, 47, 0.14);
-  --link: #6eb8c9;
-  --link-soft: rgba(110, 184, 201, 0.12);
-  --danger: #d4645a;
-  --danger-soft: rgba(212, 100, 90, 0.12);
-  --ok: #8fbfa0;
-  --ok-soft: rgba(143, 191, 160, 0.12);
-  --background: var(--bay);
-  --foreground: var(--mist);
-  --muted: var(--mute);
-  --accent: var(--signal);
-  --border: var(--line);
-}
 
 @theme inline {
   --color-bay: var(--bay);

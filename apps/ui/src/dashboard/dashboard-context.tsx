@@ -1,6 +1,5 @@
 import {
   createContext,
-  FormEvent,
   useContext,
   useCallback,
   useEffect,
@@ -24,8 +23,6 @@ type DashboardContextValue = {
   error: string;
   setMessage: (value: string) => void;
   setError: (value: string) => void;
-  zoneName: string;
-  setZoneName: (value: string) => void;
   selectedZone: string;
   setSelectedZone: (value: string) => void;
   activeZone?: Zone;
@@ -38,10 +35,13 @@ type DashboardContextValue = {
   openCreateRecord: () => void;
   openEditRecord: (record: EditableRecord) => void;
   closeRecordDialog: () => void;
+  zoneDialogOpen: boolean;
+  openZoneDialog: () => void;
+  closeZoneDialog: () => void;
   refresh: () => Promise<void>;
-  createZone: (event: FormEvent<HTMLFormElement>) => Promise<void>;
+  createZone: (name: string) => Promise<boolean>;
   saveRecord: (payload: Record<string, unknown>) => Promise<boolean>;
-  saveNetwork: (event: FormEvent<HTMLFormElement>) => Promise<void>;
+  saveNetwork: (ipv4: string, resolver: string) => Promise<boolean>;
   saveStream: (payload: Record<string, unknown>) => Promise<boolean>;
   updateStream: (
     streamId: string,
@@ -67,9 +67,9 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   const [status, setStatus] = useState<StatusPayload>();
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
-  const [zoneName, setZoneName] = useState("home.arpa");
   const [selectedZone, setSelectedZone] = useState("");
   const [recordDialogOpen, setRecordDialogOpen] = useState(false);
+  const [zoneDialogOpen, setZoneDialogOpen] = useState(false);
   const [editingRecord, setEditingRecord] = useState<EditableRecord>();
   const [ingressIpv4, setIngressIpv4] = useState("");
   const [resolver, setResolver] = useState("192.168.1.1");
@@ -217,19 +217,18 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     await mutate("/api/apply", {}, "Apply queued (auto-retry)");
   }
 
-  async function createZone(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
+  async function createZone(name: string): Promise<boolean> {
     setMessage("");
     setError("");
     const response = await fetch("/api/zones", {
       method: "POST",
       credentials: "include",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ name: zoneName }),
+      body: JSON.stringify({ name }),
     });
     if (response.status === 401) {
       navigate("/login");
-      return;
+      return false;
     }
     const payload = (await response.json().catch(() => ({}))) as {
       error?: string;
@@ -237,7 +236,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     };
     if (!response.ok) {
       setError(payload.error ?? "Change rejected");
-      return;
+      return false;
     }
     setMessage("Zone created");
     await refresh();
@@ -245,6 +244,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
       setSelectedZone(payload.zone.id);
       navigate(`/dashboard/dns/${payload.zone.id}`);
     }
+    return true;
   }
 
   async function saveRecord(
@@ -270,15 +270,17 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     return saved;
   }
 
-  async function saveNetwork(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    await mutate(
+  async function saveNetwork(
+    ipv4: string,
+    resolverVal: string,
+  ): Promise<boolean> {
+    return mutate(
       "/api/settings",
       {
-        ingress: { ipv4: ingressIpv4 || undefined },
+        ingress: { ipv4: ipv4 || undefined },
         defaultPool: {
           id: "default",
-          endpoints: [{ host: resolver, port: 53 }],
+          endpoints: [{ host: resolverVal, port: 53 }],
         },
       },
       "Network settings saved",
@@ -377,8 +379,6 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     error,
     setMessage,
     setError,
-    zoneName,
-    setZoneName,
     selectedZone,
     setSelectedZone,
     activeZone,
@@ -400,6 +400,9 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
       setRecordDialogOpen(false);
       setEditingRecord(undefined);
     },
+    zoneDialogOpen,
+    openZoneDialog: () => setZoneDialogOpen(true),
+    closeZoneDialog: () => setZoneDialogOpen(false),
     refresh,
     createZone,
     saveRecord,

@@ -1,6 +1,7 @@
 import { FormEvent, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { SESSION_USERNAME_KEY } from "../api";
+import { PasswordInput } from "../components/PasswordInput";
 
 export function LoginPage() {
   const navigate = useNavigate();
@@ -55,17 +56,14 @@ export function LoginPage() {
               required
             />
           </label>
-          <label className="pc-label">
-            Password
-            <input
-              value={password}
-              onChange={(event) => setPassword(event.target.value)}
-              className="pc-input"
-              type="password"
-              autoComplete="current-password"
-              required
-            />
-          </label>
+          <PasswordInput
+            label="Password"
+            value={password}
+            onChange={setPassword}
+            autoComplete="current-password"
+            required
+            className="pc-input"
+          />
         </div>
         {error ? (
           <p className="pc-toast-err !mt-5" role="alert">
