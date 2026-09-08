@@ -281,6 +281,7 @@ a {
   display: grid;
   grid-template-columns: var(--pc-rail-width) minmax(0, 1fr);
   min-width: 0;
+  min-height: calc(100vh - 3.5rem);
   transition: grid-template-columns 180ms ease;
 }
 
@@ -441,7 +442,6 @@ a {
   .pc-command-layout {
     position: relative;
     display: block;
-    min-height: calc(100vh - 3.5rem);
     transition: none;
   }
 

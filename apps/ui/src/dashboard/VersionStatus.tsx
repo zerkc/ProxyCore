@@ -167,10 +167,6 @@ export function VersionStatus({
 
   const hasUpdate =
     update.status === "update_available" && Boolean(latestVersion);
-  const canRetry =
-    Boolean(error) ||
-    update.status === "stale" ||
-    update.status === "unavailable";
   const statusMessage =
     update.status === "disabled"
       ? "Update checks off"
@@ -194,7 +190,7 @@ export function VersionStatus({
               v{normalizeVersion(update.currentVersion) ?? update.currentVersion}
             </p>
           </div>
-          {canRetry && phase === "idle" ? (
+          {phase === "idle" ? (
             <RetryButton loading={loading} onRetry={onRetry} />
           ) : null}
         </div>
@@ -569,7 +565,7 @@ function RetryButton({
       onClick={onRetry}
       disabled={loading}
     >
-      {loading ? "Checking…" : "Check again"}
+      {loading ? "Checking…" : "Check for updates"}
     </button>
   );
 }
