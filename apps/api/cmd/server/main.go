@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -21,12 +22,14 @@ import (
 )
 
 func updaterClientFromConfig(cfg config.Config) httpserver.Option {
-	if cfg.UpdaterURL == "" {
+	baseURL := strings.TrimRight(strings.TrimSpace(cfg.UpdaterURL), "/")
+	if baseURL == "" {
 		return nil
 	}
 	return httpserver.WithUpdaterClient(&httpserver.UpdaterHTTPClient{
-		URL:    cfg.UpdaterURL + "/internal/apply",
-		Client: &http.Client{Timeout: 10 * time.Second},
+		URL:       baseURL + "/internal/apply",
+		StatusURL: baseURL + "/internal/status",
+		Client:    &http.Client{Timeout: 10 * time.Second},
 	})
 }
 

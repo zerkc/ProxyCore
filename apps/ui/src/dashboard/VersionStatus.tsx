@@ -17,7 +17,7 @@ type VersionStatusProps = {
  * confirming  - user clicked once; show Cancel + Confirm pair
  * applying    - POST /api/updates/apply fired; polling every 5s
  * timeout     - apply exceeded APPLY_TIMEOUT_MS; user can resume polling
- * done        - update.currentVersion === latest.version (dialog still open
+ * done        - update.currentVersion === target version (dialog still open
  *               until user explicitly refreshes)
  */
 type ApplyPhase = "idle" | "confirming" | "applying" | "timeout" | "done";
@@ -26,6 +26,11 @@ const POLL_INTERVAL_MS = 5_000;
 const POLL_MAX_INTERVAL_MS = 30_000;
 const APPLY_TIMEOUT_MS = 5 * 60 * 1_000;
 const APPLY_REQUEST_TIMEOUT_MS = 5_000;
+
+function normalizeVersion(version?: string | null): string | undefined {
+  const normalized = version?.trim().replace(/^v/, "");
+  return normalized || undefined;
+}
 
 export function VersionStatus({
   update,
@@ -36,15 +41,28 @@ export function VersionStatus({
   const [phase, setPhase] = useState<ApplyPhase>("idle");
   const [applyTargetVersion, setApplyTargetVersion] = useState<string>();
   const latest = update?.latest;
-  const latestVersion = latest?.version;
-  const targetVersion = applyTargetVersion ?? latestVersion;
+  const latestVersion = normalizeVersion(latest?.version);
+  const serverTargetVersion = update?.updateInProgress
+    ? normalizeVersion(update.targetVersion)
+    : undefined;
+  const targetVersion =
+    normalizeVersion(applyTargetVersion) ?? serverTargetVersion ?? latestVersion;
   const consecutiveErrorsRef = useRef(0);
+
+  // Resume an update that was already running before this page loaded.
+  useEffect(() => {
+    if (phase !== "idle" || !update?.updateInProgress) return;
+    const target = normalizeVersion(update.targetVersion);
+    if (!target) return;
+    setApplyTargetVersion(target);
+    setPhase("applying");
+  }, [phase, update?.targetVersion, update?.updateInProgress]);
 
   // Detect success: poll handler will trigger this through onRetry/update.
   useEffect(() => {
     if (phase !== "applying" && phase !== "timeout") return;
     if (!update || !targetVersion) return;
-    if (update.currentVersion === targetVersion) {
+    if (normalizeVersion(update.currentVersion) === targetVersion) {
       setPhase("done");
     }
   }, [phase, update, targetVersion]);
@@ -147,7 +165,8 @@ export function VersionStatus({
     );
   }
 
-  const hasUpdate = update.status === "update_available" && Boolean(latest);
+  const hasUpdate =
+    update.status === "update_available" && Boolean(latestVersion);
   const canRetry =
     Boolean(error) ||
     update.status === "stale" ||
@@ -172,7 +191,7 @@ export function VersionStatus({
           <div className="min-w-0">
             <p className="pc-eyebrow">Version</p>
             <p className="mt-2 font-mono text-sm text-link">
-              v{update.currentVersion}
+              v{normalizeVersion(update.currentVersion) ?? update.currentVersion}
             </p>
           </div>
           {canRetry && phase === "idle" ? (
@@ -180,19 +199,19 @@ export function VersionStatus({
           ) : null}
         </div>
 
-        {hasUpdate && latest && phase === "idle" ? (
+        {hasUpdate && latestVersion && phase === "idle" ? (
           <UpdateAvailableCard
-            version={latest.version}
+            version={latestVersion}
             onConfirm={() => {
-              setApplyTargetVersion(latest.version);
+              setApplyTargetVersion(latestVersion);
               setPhase("confirming");
             }}
           />
         ) : null}
 
-        {hasUpdate && latest && phase === "confirming" ? (
+        {hasUpdate && latestVersion && phase === "confirming" ? (
           <ConfirmCard
-            version={latest.version}
+            version={latestVersion}
             onCancel={() => {
               setApplyTargetVersion(undefined);
               setPhase("idle");

@@ -6,7 +6,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"net/url"
+	"strings"
 
 	"github.com/zerkc/ProxyCore/apps/api/internal/auth"
 	"github.com/zerkc/ProxyCore/apps/api/internal/update"
@@ -18,10 +21,24 @@ type UpdaterClient interface {
 	Apply(ctx context.Context, targetVersion string) (int, error)
 }
 
-// UpdaterHTTPClient forwards apply requests to the real updater service.
+// UpdaterStatusClient optionally reads the current update status from the
+// internal updater service.
+type UpdaterStatusClient interface {
+	Status(ctx context.Context) (UpdaterStatus, error)
+}
+
+// UpdaterStatus is the subset of updater state needed by the public updates
+// endpoint.
+type UpdaterStatus struct {
+	Status        string `json:"status"`
+	TargetVersion string `json:"targetVersion"`
+}
+
+// UpdaterHTTPClient forwards requests to the real updater service.
 type UpdaterHTTPClient struct {
-	URL    string
-	Client *http.Client
+	URL       string
+	StatusURL string
+	Client    *http.Client
 }
 
 func (c *UpdaterHTTPClient) Apply(ctx context.Context, targetVersion string) (int, error) {
@@ -42,15 +59,81 @@ func (c *UpdaterHTTPClient) Apply(ctx context.Context, targetVersion string) (in
 	return resp.StatusCode, nil
 }
 
+func (c *UpdaterHTTPClient) Status(ctx context.Context) (UpdaterStatus, error) {
+	endpoint, err := c.statusURL()
+	if err != nil {
+		return UpdaterStatus{}, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return UpdaterStatus{}, fmt.Errorf("create status request: %w", err)
+	}
+	resp, err := c.Client.Do(req)
+	if err != nil {
+		return UpdaterStatus{}, fmt.Errorf("updater status request: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return UpdaterStatus{}, fmt.Errorf("updater status returned %s", resp.Status)
+	}
+
+	var status UpdaterStatus
+	decoder := json.NewDecoder(io.LimitReader(resp.Body, 1<<20))
+	if err := decoder.Decode(&status); err != nil {
+		return UpdaterStatus{}, fmt.Errorf("decode updater status: %w", err)
+	}
+	return status, nil
+}
+
+func (c *UpdaterHTTPClient) statusURL() (string, error) {
+	if statusURL := strings.TrimSpace(c.StatusURL); statusURL != "" {
+		return statusURL, nil
+	}
+
+	applyURL := strings.TrimSpace(c.URL)
+	parsed, err := url.Parse(applyURL)
+	if err != nil {
+		return "", fmt.Errorf("derive updater status URL: %w", err)
+	}
+	if parsed.Scheme == "" || parsed.Host == "" {
+		return "", fmt.Errorf("derive updater status URL: invalid apply URL %q", applyURL)
+	}
+	path := strings.TrimRight(parsed.Path, "/")
+	const applyPath = "/internal/apply"
+	if !strings.HasSuffix(path, applyPath) {
+		return "", fmt.Errorf("derive updater status URL: apply URL %q has no %s suffix", applyURL, applyPath)
+	}
+	parsed.Path = strings.TrimSuffix(path, "/apply") + "/status"
+	parsed.RawPath = ""
+	return parsed.String(), nil
+}
+
 func (s *Server) handleUpdates(w http.ResponseWriter, r *http.Request) {
+	var result update.Result
 	if s.updates == nil {
-		writeJSON(w, http.StatusOK, update.Result{
+		result = update.Result{
 			Status:         update.StatusDisabled,
 			CurrentVersion: version.Version,
-		})
-		return
+		}
+	} else {
+		result = s.updates.Check(r.Context())
 	}
-	writeJSON(w, http.StatusOK, s.updates.Check(r.Context()))
+
+	if client, ok := s.updaterClient.(UpdaterStatusClient); ok {
+		status, err := client.Status(r.Context())
+		if err == nil && status.Status == "running" {
+			targetVersion := normalizeUpdaterTarget(status.TargetVersion)
+			if targetVersion != "" {
+				result.UpdateInProgress = true
+				result.TargetVersion = targetVersion
+			}
+		}
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func normalizeUpdaterTarget(raw string) string {
+	return strings.TrimPrefix(strings.TrimSpace(raw), "v")
 }
 
 func (s *Server) handleUpdateApply(w http.ResponseWriter, r *http.Request) {

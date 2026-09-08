@@ -36,11 +36,13 @@ type Release struct {
 }
 
 type Result struct {
-	Status          string     `json:"status"`
-	CurrentVersion  string     `json:"currentVersion"`
-	Latest          *Release   `json:"latest"`
-	UpdateAvailable bool       `json:"updateAvailable"`
-	CheckedAt       *time.Time `json:"checkedAt"`
+	Status           string     `json:"status"`
+	CurrentVersion   string     `json:"currentVersion"`
+	Latest           *Release   `json:"latest"`
+	UpdateAvailable  bool       `json:"updateAvailable"`
+	CheckedAt        *time.Time `json:"checkedAt"`
+	UpdateInProgress bool       `json:"updateInProgress"`
+	TargetVersion    string     `json:"targetVersion,omitempty"`
 }
 
 type CheckerOptions struct {

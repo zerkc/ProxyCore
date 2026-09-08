@@ -58,4 +58,6 @@ export type UpdatePayload = {
   latest: UpdateRelease | null;
   updateAvailable: boolean;
   checkedAt: string | null;
+  updateInProgress: boolean;
+  targetVersion?: string;
 };
