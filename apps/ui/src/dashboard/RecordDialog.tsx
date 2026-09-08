@@ -59,12 +59,12 @@ type PathRuleDraft = {
 type ProxyTab = "record" | "origin" | "tls" | "nginx" | "routes" | "access";
 
 const proxyTabs: Array<{ id: ProxyTab; label: string; hint: string }> = [
-  { id: "record", label: "Record", hint: "DNS identity" },
-  { id: "origin", label: "Origin", hint: "Upstream target" },
+  { id: "record", label: "record", hint: "DNS identity" },
+  { id: "origin", label: "origin", hint: "Upstream target" },
   { id: "tls", label: "TLS", hint: "Client access" },
   { id: "nginx", label: "Nginx", hint: "Server directives" },
-  { id: "routes", label: "Routes", hint: "Paths and redirects" },
-  { id: "access", label: "Access", hint: "Basic Auth" },
+  { id: "routes", label: "routes", hint: "Paths and redirects" },
+  { id: "access", label: "access", hint: "Basic Auth" },
 ];
 
 const inputClass = "pc-input";
@@ -297,17 +297,17 @@ export function RecordDialog(props: {
       aria-labelledby="record-dialog-title"
     >
       <form
-        className="pc-panel max-h-[90vh] w-full max-w-3xl overflow-y-auto p-6 shadow-2xl shadow-black/40"
+        className="pc-panel max-h-[90vh] w-full max-w-3xl overflow-y-auto p-6 font-mono"
         onSubmit={handleSubmit}
       >
         <div className="flex items-start justify-between gap-4">
           <div>
-            <p className="pc-eyebrow pc-eyebrow-signal">DNS record</p>
+            <p className="pc-eyebrow pc-eyebrow-signal">dns record</p>
             <h2
               id="record-dialog-title"
               className="pc-title mt-2 text-2xl text-mist"
             >
-              {editing ? "Configure record" : "Configure new record"}
+              {editing ? "configure record" : "configure new record"}
             </h2>
             <p className="mt-2 text-sm text-mute">
               Choose whether ProxyCore serves this record directly or proxies it
@@ -323,33 +323,57 @@ export function RecordDialog(props: {
           </button>
         </div>
 
+        <div className="pc-proxy-mode mt-6" data-enabled={proxied}>
+          <div className="pc-proxy-mode-indicator">
+            <span className="pc-proxy-mode-dot" aria-hidden="true" />
+            <div>
+              <p className="pc-eyebrow">
+                {proxied ? "proxy route active" : "dns only"}
+              </p>
+              <p className="mt-1 text-xs leading-5 text-mute">
+                {proxied
+                  ? "Nginx will receive client traffic and forward it to the origin."
+                  : "ProxyCore answers this record directly without an upstream route."}
+              </p>
+            </div>
+          </div>
+          <label className="pc-proxy-mode-control">
+            <input
+              type="checkbox"
+              checked={proxied}
+              onChange={(event) => {
+                const enabled = event.target.checked;
+                setProxied(enabled);
+                setActiveTab(enabled ? "origin" : "record");
+              }}
+              className="size-4 accent-signal"
+              disabled={!['A', 'AAAA', 'CNAME'].includes(recordType)}
+              aria-label="Proxy through ProxyCore"
+            />
+            <span>{proxied ? "Proxy enabled" : "Enable proxy"}</span>
+          </label>
+        </div>
+
         {proxied ? (
           <div
-            className="mt-6 overflow-x-auto border-b border-line"
+            className="pc-proxy-tabs mt-4"
             role="tablist"
-            aria-label="Record configuration"
+            aria-label="Proxy configuration"
           >
-            <div className="flex min-w-max gap-1">
-              {proxyTabs.map((tab) => (
-                <button
-                  key={tab.id}
-                  type="button"
-                  role="tab"
-                  aria-selected={activeTab === tab.id}
-                  onClick={() => setActiveTab(tab.id)}
-                  className={`rounded-t-xl border-b-2 px-4 py-3 text-left transition ${
-                    activeTab === tab.id
-                      ? "border-signal bg-signal/10 text-signal"
-                      : "border-transparent text-faint hover:bg-raised/80 hover:text-mist"
-                  }`}
-                >
-                  <span className="block text-sm font-medium">{tab.label}</span>
-                  <span className="mt-1 block text-[11px] text-faint">
-                    {tab.hint}
-                  </span>
-                </button>
-              ))}
-            </div>
+            {proxyTabs.map((tab) => (
+              <button
+                key={tab.id}
+                type="button"
+                role="tab"
+                aria-selected={activeTab === tab.id}
+                data-active={activeTab === tab.id}
+                onClick={() => setActiveTab(tab.id)}
+                className="pc-proxy-tab"
+              >
+                <span className="pc-proxy-tab-label">{tab.label}</span>
+                <span className="pc-proxy-tab-hint">{tab.hint}</span>
+              </button>
+            ))}
           </div>
         ) : null}
 
@@ -392,25 +416,11 @@ export function RecordDialog(props: {
                 />
               </label>
             ) : (
-              <div className="rounded-xl border border-signal/25 bg-signal/10 p-4 text-sm leading-6 text-mist/90 md:col-span-2">
+              <div className="border border-signal/25 bg-signal/10 p-4 text-sm leading-6 text-mist/90 md:col-span-2">
                 The DNS answer comes from the configured proxy ingress. Set the
                 upstream target in the Origin tab.
               </div>
             )}
-            <label className="flex items-center gap-3 text-sm text-mist/90 md:col-span-2">
-              <input
-                type="checkbox"
-                checked={proxied}
-                onChange={(event) => {
-                  const enabled = event.target.checked;
-                  setProxied(enabled);
-                  setActiveTab(enabled ? "origin" : "record");
-                }}
-                className="size-4 accent-signal"
-                disabled={!["A", "AAAA", "CNAME"].includes(recordType)}
-              />
-              Proxy through ProxyCore
-            </label>
           </div>
         ) : null}
 
@@ -533,7 +543,7 @@ export function RecordDialog(props: {
                   ) : null}
                 </div>
                 {proxyTlsEnabled && availableCertificates.length === 0 ? (
-                  <p className="mt-4 rounded-xl border border-amber-300/30 bg-amber-300/10 p-3 text-sm text-amber-100">
+                  <p className="mt-4 border border-amber-300/30 bg-amber-300/10 p-3 text-sm text-amber-100">
                     HTTPS requires an active configured certificate for this
                     hostname before the record can be applied.
                   </p>
@@ -662,7 +672,7 @@ proxy_set_header X-Environment "homelab";`}
                     pathRules.map((rule, index) => (
                       <div
                         key={index}
-                        className="grid gap-2 rounded-xl border border-line p-3 md:grid-cols-2"
+                        className="grid gap-2 border border-line p-3 md:grid-cols-2"
                       >
                         <label className={labelClass}>
                           Kind

@@ -53,111 +53,114 @@ export function StreamsView(props: {
 
   return (
     <div className="mt-8 space-y-6">
-      <section className="pc-panel p-6 md:p-8">
-        <div className="flex flex-wrap items-end justify-between gap-4">
-          <div>
-            <p className="pc-eyebrow">Configured streams</p>
-            <h2 className="pc-title mt-2 text-2xl text-mist">
-              TCP / UDP port maps
-            </h2>
-            <p className="mt-2 max-w-xl text-sm leading-6 text-mute">
-              Listeners exposed by ProxyCore and forwarded to a literal upstream
-              IP and port on your network.
-            </p>
-          </div>
-          <button
-            type="button"
-            className="pc-btn"
-            onClick={() => {
-              setEditing(undefined);
-              setDialogOpen(true);
-            }}
-          >
-            Add stream
-          </button>
+      <header className="flex flex-col gap-5 border-b border-line/80 pb-5 md:flex-row md:items-end md:justify-between">
+        <div className="min-w-0">
+          <p className="pc-eyebrow">streams</p>
+          <h2 className="pc-title mt-2 text-2xl text-mist">
+            TCP / UDP port maps
+          </h2>
+          <p className="mt-3 font-mono text-sm text-link">
+            {props.streams.length}{" "}
+            {props.streams.length === 1 ? "stream" : "streams"}
+          </p>
+          <p className="mt-2 max-w-xl text-sm leading-6 text-mute">
+            Listeners exposed by ProxyCore and forwarded to a literal upstream
+            IP and port on your network.
+          </p>
         </div>
-        <p className="mt-4 font-mono text-sm text-link">
-          {props.streams.length}{" "}
-          {props.streams.length === 1 ? "stream" : "streams"}
-        </p>
-      </section>
+        <button
+          type="button"
+          className="pc-btn shrink-0 self-start md:self-auto"
+          onClick={() => {
+            setEditing(undefined);
+            setDialogOpen(true);
+          }}
+        >
+          Add stream
+        </button>
+      </header>
 
-      <section className="space-y-2">
-        {props.streams.length ? (
-          props.streams.map((stream) => {
+      {props.streams.length ? (
+        <div className="border-y border-line/80">
+          {props.streams.map((stream) => {
             const busy = busyId === stream.id;
             return (
               <article
                 key={stream.id}
-                className={`rounded-xl border px-4 py-4 transition sm:px-5 ${
+                className={`grid gap-3 border-b border-line/80 px-1 py-3.5 transition-colors last:border-b-0 sm:grid-cols-[auto_minmax(0,1fr)_auto] sm:items-center ${
                   stream.enabled
-                    ? "border-line/80 bg-bay/50"
-                    : "border-line/50 bg-raised/30 opacity-80"
+                    ? "hover:bg-panel/40"
+                    : "bg-raised/30 opacity-80"
                 }`}
               >
-                <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-                  <div className="min-w-0">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <span
-                        className={`rounded-md px-2 py-0.5 font-mono text-[11px] uppercase tracking-[0.12em] ${
-                          stream.enabled
-                            ? "bg-ok/15 text-ok"
-                            : "bg-faint/20 text-faint"
-                        }`}
-                      >
-                        {stream.enabled ? "enabled" : "disabled"}
-                      </span>
-                      <span className="rounded-md bg-link/10 px-2 py-0.5 font-mono text-[11px] uppercase tracking-[0.12em] text-link">
-                        {stream.protocol}
-                      </span>
-                    </div>
-                    <p className="mt-2 font-mono text-base text-mist">
-                      {stream.listenAddress}:{stream.listenPort}
-                    </p>
-                    <p className="mt-1 font-mono text-xs text-faint">
-                      → {stream.upstream.ip}:{stream.upstream.port}
-                    </p>
-                  </div>
-                  <div className="flex flex-wrap gap-2">
-                    <button
-                      type="button"
-                      className="pc-btn-ghost !text-xs"
-                      disabled={busy}
-                      onClick={() => void toggleEnabled(stream)}
-                    >
-                      {stream.enabled ? "Disable" : "Enable"}
-                    </button>
-                    <button
-                      type="button"
-                      className="pc-btn-ghost !text-xs"
-                      disabled={busy}
-                      onClick={() => {
-                        setEditing(stream);
-                        setDialogOpen(true);
-                      }}
-                    >
-                      Modify
-                    </button>
-                    <button
-                      type="button"
-                      className="rounded-xl border border-danger/40 px-3 py-2 text-xs text-danger transition hover:bg-danger/10 disabled:opacity-50"
-                      disabled={busy}
-                      onClick={() => void remove(stream)}
-                    >
-                      Delete
-                    </button>
-                  </div>
+                <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 sm:min-w-[132px]">
+                  <span
+                    className={`inline-flex items-center gap-2 font-mono text-[11px] uppercase tracking-[0.12em] ${
+                      stream.enabled ? "text-ok" : "text-faint"
+                    }`}
+                  >
+                    <span
+                      className={`h-1.5 w-1.5 shrink-0 ${
+                        stream.enabled ? "bg-ok" : "bg-faint"
+                      }`}
+                      aria-hidden
+                    />
+                    {stream.enabled ? "enabled" : "disabled"}
+                  </span>
+                  <span className="border-l border-line pl-3 font-mono text-[11px] uppercase tracking-[0.12em] text-link">
+                    {stream.protocol}
+                  </span>
+                </div>
+                <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 font-mono">
+                  <span className="break-all text-sm text-mist">
+                    {stream.listenAddress}:{stream.listenPort}
+                  </span>
+                  <span className="text-faint" aria-hidden>
+                    →
+                  </span>
+                  <span className="break-all text-sm text-link">
+                    {stream.upstream.ip}:{stream.upstream.port}
+                  </span>
+                </div>
+                <div className="flex flex-wrap gap-2 sm:justify-end">
+                  <button
+                    type="button"
+                    className="pc-btn-ghost !text-xs"
+                    disabled={busy}
+                    onClick={() => void toggleEnabled(stream)}
+                  >
+                    {stream.enabled ? "Disable" : "Enable"}
+                  </button>
+                  <button
+                    type="button"
+                    className="pc-btn-ghost !text-xs"
+                    disabled={busy}
+                    onClick={() => {
+                      setEditing(stream);
+                      setDialogOpen(true);
+                    }}
+                  >
+                    Modify
+                  </button>
+                  <button
+                    type="button"
+                    className="rounded-none border border-danger/40 px-3 py-2 text-xs text-danger transition hover:bg-danger/10 disabled:opacity-50"
+                    disabled={busy}
+                    onClick={() => void remove(stream)}
+                  >
+                    Delete
+                  </button>
                 </div>
               </article>
             );
-          })
-        ) : (
-          <p className="rounded-xl border border-dashed border-line p-6 text-sm text-faint">
-            No TCP/UDP listeners yet. Add a stream to forward a port into your
-            network.
-          </p>
-        )}
-      </section>
+          })}
+        </div>
+      ) : (
+        <p className="border-y border-dashed border-line py-5 text-sm text-faint">
+          No TCP/UDP listeners yet. Add a stream to forward a port into your
+          network.
+        </p>
+      )}
 
       <StreamDialog
         open={dialogOpen}

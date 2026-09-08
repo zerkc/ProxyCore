@@ -58,19 +58,19 @@ export function StreamDialog(props: {
       aria-labelledby="stream-dialog-title"
     >
       <form
-        className="pc-panel w-full max-w-lg p-6 shadow-2xl shadow-black/40"
+        className="pc-panel w-full max-w-lg p-6 font-mono"
         onSubmit={handleSubmit}
       >
         <div className="flex items-start justify-between gap-4">
           <div>
             <p className="pc-eyebrow pc-eyebrow-signal">
-              {editing ? "Edit stream" : "New stream"}
+              {editing ? "edit stream" : "new stream"}
             </p>
             <h2
               id="stream-dialog-title"
               className="pc-title mt-2 text-2xl text-mist"
             >
-              {editing ? "Update port forward" : "Forward a port"}
+              {editing ? "update port forward" : "forward a port"}
             </h2>
             <p className="mt-2 text-sm leading-6 text-mute">
               Expose a TCP or UDP listener on ProxyCore and send it to a literal

@@ -364,9 +364,9 @@ function UpdateBlockingDialog({
     >
       <div
         className={[
-          "flex w-full max-w-sm flex-col items-center gap-5 rounded-2xl",
+          "flex w-full max-w-sm flex-col items-center gap-5 rounded-none",
           "border border-signal/40 bg-raised p-8",
-          "text-center shadow-2xl shadow-black/60",
+          "text-center",
           prefersReduced ? "" : "animate-card-in",
         ]
           .filter(Boolean)
@@ -494,7 +494,7 @@ function UpdateAvailableCard({
   onConfirm: () => void;
 }) {
   return (
-    <div className="mt-3 rounded-xl border border-signal/30 bg-signal/10 p-3">
+    <div className="mt-3 rounded-none border border-signal/30 bg-signal/10 p-3">
       <p className="pc-eyebrow pc-eyebrow-signal">Update available</p>
       <p className="mt-2 font-mono text-sm text-mist">v{version}</p>
       <button type="button" className="pc-btn mt-3 w-full" onClick={onConfirm}>
@@ -514,7 +514,7 @@ function ConfirmCard({
   onConfirm: () => void;
 }) {
   return (
-    <div className="mt-3 rounded-xl border border-signal/40 bg-signal/10 p-3">
+    <div className="mt-3 rounded-none border border-signal/40 bg-signal/10 p-3">
       <p className="pc-eyebrow pc-eyebrow-signal">Confirm update</p>
       <p className="mt-2 text-xs leading-5 text-mist">
         This will restart ProxyCore to install v{version}. An update may

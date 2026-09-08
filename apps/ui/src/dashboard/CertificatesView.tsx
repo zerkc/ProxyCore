@@ -125,64 +125,66 @@ export function CertificatesView(props: {
 
   return (
     <div className="mt-8 space-y-6">
-      <section className="pc-panel p-6">
-        <div className="flex flex-wrap items-end justify-between gap-4">
-          <div>
-            <p className="pc-eyebrow">Certificate inventory</p>
-            <h2 className="pc-title mt-2 text-2xl text-mist">
-              What Nginx can use
-            </h2>
-          </div>
-          <div className="flex flex-wrap gap-2">
-            <button
-              type="button"
-              className="pc-btn"
-              onClick={() => setDialogOpen(true)}
-            >
-              Request certificate
-            </button>
-            <button
-              type="button"
-              className="pc-btn-ghost !text-xs"
-              disabled={downloadingCA}
-              onClick={() => void downloadTrustCA()}
-            >
-              {downloadingCA ? "Preparing…" : "Download trust CA"}
-            </button>
-            <button
-              type="button"
-              className="pc-btn-ghost !text-xs"
-              onClick={() => void props.onRefresh()}
-            >
-              Refresh inventory
-            </button>
-          </div>
+      <header className="flex flex-col gap-5 border-b border-line/80 pb-5 md:flex-row md:items-end md:justify-between">
+        <div className="min-w-0">
+          <p className="pc-eyebrow">certificates</p>
+          <h2 className="pc-title mt-2 text-2xl text-mist">
+            What Nginx can use
+          </h2>
+          <p className="mt-3 font-mono text-xs uppercase tracking-[0.08em] text-faint">
+            {props.certificates.length} {props.certificates.length === 1 ? "certificate" : "certificates"} · certificate inventory
+          </p>
         </div>
-        <div className="mt-6 grid gap-3">
-          {props.certificates.length ? (
-            props.certificates.map((certificate) => (
-              <CertificateCard
-                key={certificate.id}
-                certificate={certificate}
-                regenerating={regeneratingId === certificate.id}
-                deleting={deletingId === certificate.id}
-                onRegenerate={
-                  certificate.issuer === "self-signed" &&
-                  certificate.status === "active"
-                    ? () => void regenerateSelfSigned(certificate.id)
-                    : undefined
-                }
-                onDelete={() => void deleteCertificate(certificate)}
-              />
-            ))
-          ) : (
-            <p className="rounded-xl border border-dashed border-line p-5 text-sm text-faint">
-              No certificates yet. Generate an internal certificate or request one
-              from a public certificate authority.
-            </p>
-          )}
+        <div className="flex flex-wrap items-center gap-2 md:justify-end">
+          <button
+            type="button"
+            className="pc-btn"
+            onClick={() => setDialogOpen(true)}
+          >
+            Request certificate
+          </button>
+          <button
+            type="button"
+            className="pc-btn-ghost !text-xs"
+            disabled={downloadingCA}
+            onClick={() => void downloadTrustCA()}
+          >
+            {downloadingCA ? "Preparing…" : "Download trust CA"}
+          </button>
+          <button
+            type="button"
+            className="pc-btn-ghost !text-xs"
+            onClick={() => void props.onRefresh()}
+          >
+            Refresh inventory
+          </button>
         </div>
-      </section>
+      </header>
+
+      {props.certificates.length ? (
+        <div className="border-y border-line/80">
+          {props.certificates.map((certificate) => (
+            <CertificateCard
+              key={certificate.id}
+              certificate={certificate}
+              regenerating={regeneratingId === certificate.id}
+              deleting={deletingId === certificate.id}
+              onRegenerate={
+                certificate.issuer === "self-signed" &&
+                certificate.status === "active"
+                  ? () => void regenerateSelfSigned(certificate.id)
+                  : undefined
+              }
+              onDelete={() => void deleteCertificate(certificate)}
+            />
+          ))}
+        </div>
+      ) : (
+        <p className="border-y border-dashed border-line py-5 text-sm text-faint">
+          No certificates yet. Generate an internal certificate or request one from
+          a public certificate authority.
+        </p>
+      )}
 
       <CertificateRequestDialog
         open={dialogOpen}
@@ -217,7 +219,7 @@ function CertificateCard(props: {
         : "text-signal";
   const busy = Boolean(props.regenerating || props.deleting);
   return (
-    <article className="grid gap-4 rounded-xl border border-line/80 bg-bay/50 p-4 md:grid-cols-[1fr_auto] md:items-center">
+    <article className="grid gap-4 border-b border-line/80 px-1 py-4 transition-colors last:border-b-0 hover:bg-panel/40 md:grid-cols-[minmax(0,1fr)_auto] md:items-center">
       <div className="min-w-0">
         <p className="truncate text-sm text-mist">
           {certificate.hostnames.join(", ")}

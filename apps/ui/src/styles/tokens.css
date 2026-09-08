@@ -1,9 +1,4 @@
-/*
- * ProxyCore design tokens.
- * Edit a value here to recolor the whole UI in one place.
- * All components read these via var(--name) or via Tailwind utilities
- * exposed by @theme inline in styles.css.
- */
+/* ProxyCore design tokens. */
 :root {
   color-scheme: dark;
 
@@ -12,28 +7,28 @@
   --font-source: "Source Sans 3", ui-sans-serif, system-ui, sans-serif;
   --font-plex: "IBM Plex Mono", ui-monospace, monospace;
 
-  /* Surfaces */
-  --bay: #12100e;
-  --panel: #1a1714;
-  --raised: #221e1a;
-  --line: #3a322b;
+  /* Console Luxe surfaces */
+  --bay: #0A0C0F;
+  --panel: #11141A;
+  --raised: #161A21;
+  --line: #1F252E;
 
   /* Text */
-  --mist: #ebe4d8;
-  --mute: #9a9084;
-  --faint: #6e665c;
+  --mist: #D4D8DD;
+  --mute: #7C8593;
+  --faint: #4A5260;
 
   /* Accents */
-  --signal: #d9772f;
-  --signal-soft: rgba(217, 119, 47, 0.14);
-  --link: #6eb8c9;
-  --link-soft: rgba(110, 184, 201, 0.12);
+  --signal: #79C07E;
+  --signal-soft: rgba(121, 192, 126, 0.12);
+  --link: #6FB4D9;
+  --link-soft: rgba(111, 180, 217, 0.12);
 
   /* Semantic */
-  --danger: #d4645a;
-  --danger-soft: rgba(212, 100, 90, 0.12);
-  --ok: #8fbfa0;
-  --ok-soft: rgba(143, 191, 160, 0.12);
+  --danger: #E36B6B;
+  --danger-soft: rgba(227, 107, 107, 0.12);
+  --ok: #79C07E;
+  --ok-soft: rgba(121, 192, 126, 0.12);
 
   /* Compatibility aliases */
   --background: var(--bay);

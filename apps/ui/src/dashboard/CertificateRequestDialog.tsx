@@ -152,17 +152,17 @@ export function CertificateRequestDialog(props: {
       aria-labelledby="cert-dialog-title"
     >
       <form
-        className="pc-panel max-h-[90vh] w-full max-w-4xl overflow-y-auto p-6 shadow-2xl shadow-black/40"
+        className="pc-panel max-h-[90vh] w-full max-w-4xl overflow-y-auto p-6 font-mono"
         onSubmit={submit}
       >
         <div className="flex items-start justify-between gap-4">
           <div>
-            <p className="pc-eyebrow pc-eyebrow-signal">Certificate desk</p>
+            <p className="pc-eyebrow pc-eyebrow-signal">certificate desk</p>
             <h2
               id="cert-dialog-title"
               className="pc-title mt-2 text-2xl text-mist"
             >
-              Request a certificate
+              request a certificate
             </h2>
             <p className="mt-2 text-sm text-mute">
               Self-signed for internal services, Let&apos;s Encrypt for public
@@ -219,7 +219,7 @@ export function CertificateRequestDialog(props: {
         </label>
 
         {mode === "self-signed" ? (
-          <div className="mt-5 space-y-3 rounded-xl border border-signal/25 bg-signal/10 p-4 text-sm leading-6 text-mist/90">
+          <div className="mt-5 space-y-3 border border-signal/25 bg-signal/10 p-4 text-sm leading-6 text-mist/90">
             <p>
               Issues a 1-year leaf certificate signed by this installation&apos;s
               private CA. Download the CA once and trust it on your PC —
@@ -280,7 +280,7 @@ export function CertificateRequestDialog(props: {
               </label>
             </div>
             {challenge === "http-01" ? (
-              <p className="rounded-xl border border-link/25 bg-link/10 p-4 text-xs leading-5 text-link">
+              <p className="border border-link/25 bg-link/10 p-4 text-xs leading-5 text-link">
                 Point the domain to this installation and make port 80 reachable
                 from the Internet while Let&apos;s Encrypt checks the challenge.
               </p>
@@ -321,7 +321,7 @@ export function CertificateRequestDialog(props: {
               </div>
             )}
             {hasWildcard && challenge === "http-01" ? (
-              <p className="rounded-xl border border-signal/30 bg-signal/10 p-3 text-xs text-signal">
+              <p className="border border-signal/30 bg-signal/10 p-3 text-xs text-signal">
                 Wildcards need DNS-01. Switch the challenge above.
               </p>
             ) : null}
@@ -381,9 +381,9 @@ function ModeButton(props: {
       role="tab"
       aria-selected={props.active}
       onClick={props.onClick}
-      className={`rounded-lg px-3 py-2 text-xs transition ${
+      className={`rounded-none px-3 py-2 text-xs transition ${
         props.active
-          ? "bg-signal font-semibold text-[#1a120c]"
+          ? "bg-signal font-semibold text-[#0A0C0F]"
           : "bg-bay text-mute hover:text-mist"
       }`}
     >
@@ -403,7 +403,7 @@ function FileField(props: {
         type="file"
         accept=".pem,.crt,.key,application/x-pem-file"
         onChange={(event) => props.onChange(event.target.files?.[0])}
-        className="mt-2 block w-full rounded-xl border border-dashed border-line bg-bay px-3 py-3 text-xs text-mute file:mr-3 file:rounded-lg file:border-0 file:bg-raised file:px-2 file:py-1.5 file:text-xs file:text-mist"
+        className="mt-2 block w-full rounded-none border border-dashed border-line bg-bay px-3 py-3 text-xs text-mute file:mr-3 file:rounded-none file:border-0 file:bg-raised file:px-2 file:py-1.5 file:text-xs file:text-mist"
       />
     </label>
   );

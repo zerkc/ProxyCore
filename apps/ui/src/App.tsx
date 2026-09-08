@@ -7,7 +7,7 @@ import { DnsZonesView } from "./dashboard/dns/DnsZonesView";
 import { ZoneRecordsView } from "./dashboard/dns/ZoneRecordsView";
 import { IngressView } from "./dashboard/IngressView";
 import { StreamsView } from "./dashboard/streams/StreamsView";
-import { OperatorsView, Overview } from "./dashboard/views";
+import { Overview } from "./dashboard/views";
 import { BootstrapPage } from "./pages/BootstrapPage";
 import { LoginPage } from "./pages/LoginPage";
 
@@ -37,7 +37,6 @@ function DashboardRoutes() {
           />
           <Route path="ingress" element={<IngressView />} />
           <Route path="streams" element={<DashboardStreamsPage />} />
-          <Route path="operators" element={<OperatorsView />} />
           <Route path="*" element={<Navigate to="/dashboard" replace />} />
         </Routes>
       </DashboardShell>

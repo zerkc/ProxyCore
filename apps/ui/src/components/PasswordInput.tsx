@@ -70,7 +70,7 @@ export function PasswordInput(props: PasswordInputProps) {
         aria-pressed={visible}
         tabIndex={0}
         onClick={() => setVisible((v) => !v)}
-        className="absolute inset-y-0 right-1 my-1 inline-flex items-center justify-center rounded-md px-2 text-mute transition hover:text-mist focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-signal"
+        className="absolute inset-y-0 right-1 my-1 inline-flex items-center justify-center rounded-none px-2 text-mute transition hover:text-mist focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-signal"
       >
         {visible ? <EyeOffIcon /> : <EyeIcon />}
       </button>

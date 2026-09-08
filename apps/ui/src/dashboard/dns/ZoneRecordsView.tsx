@@ -9,14 +9,14 @@ export function ZoneRecordsView(props: {
 }) {
   if (!props.zone) {
     return (
-      <div className="mt-8 space-y-4">
+      <div className="mt-6 space-y-4">
         <Link
           to="/dashboard/dns"
           className="inline-flex text-sm text-mute underline decoration-line underline-offset-4 transition hover:text-mist"
         >
           ← All zones
         </Link>
-        <p className="pc-panel p-6 text-sm text-faint">
+        <p className="border-b border-dashed border-line p-5 text-sm text-faint">
           That zone was not found. It may have been removed.
         </p>
       </div>
@@ -27,52 +27,56 @@ export function ZoneRecordsView(props: {
   const proxiedCount = zone.records.filter((record) => record.proxied).length;
 
   return (
-    <div className="mt-8 space-y-6">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <nav aria-label="Zone breadcrumb" className="flex flex-wrap items-center gap-2 text-sm">
-          <Link
-            to="/dashboard/dns"
-            className="text-mute underline decoration-line underline-offset-4 transition hover:text-mist"
+    <div className="mt-6 space-y-5">
+      <header className="border-b border-line/80 pb-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <nav
+            aria-label="Zone breadcrumb"
+            className="flex flex-wrap items-center gap-2 text-sm"
           >
-            Zones
-          </Link>
-          <span className="text-faint" aria-hidden>
-            /
+            <Link
+              to="/dashboard/dns"
+              className="text-mute underline decoration-line underline-offset-4 transition hover:text-mist"
+            >
+              Zones
+            </Link>
+            <span className="text-faint" aria-hidden>
+              /
+            </span>
+            <span className="font-mono text-signal">{zone.name}</span>
+          </nav>
+          <button className="pc-btn" type="button" onClick={props.openCreate}>
+            Add DNS record
+          </button>
+        </div>
+        <div className="mt-4 flex flex-wrap gap-x-5 gap-y-2 font-mono text-xs text-faint">
+          <span>
+            <span className="text-mute">{zone.records.length}</span>{" "}
+            {zone.records.length === 1 ? "record" : "records"}
           </span>
-          <span className="font-mono text-signal">{zone.name}</span>
-        </nav>
-        <button className="pc-btn-soft" type="button" onClick={props.openCreate}>
-          Add DNS record
-        </button>
-      </div>
+          <span>
+            <span className="text-mute">{proxiedCount}</span> proxied
+          </span>
+        </div>
+      </header>
 
-      <div className="flex flex-wrap gap-3 text-xs">
-        <span className="rounded-lg border border-line bg-bay/60 px-3 py-1.5 font-mono text-mute">
-          {zone.records.length}{" "}
-          {zone.records.length === 1 ? "record" : "records"}
-        </span>
-        <span className="rounded-lg border border-line bg-bay/60 px-3 py-1.5 font-mono text-mute">
-          {proxiedCount} proxied
-        </span>
-      </div>
-
-      <section className="space-y-2">
+      <section className="border-t border-line/80">
         {zone.records.length ? (
           zone.records.map((record) => (
             <div
               key={record.id}
-              className="flex items-center justify-between gap-3 rounded-xl border border-line/80 bg-bay/50 px-4 py-3.5 text-sm"
+              className="grid gap-3 border-b border-line/80 px-1 py-3.5 text-sm sm:px-2 md:grid-cols-[minmax(0,1fr)_minmax(12rem,0.8fr)_auto] md:items-center"
             >
               <div className="min-w-0">
                 <p className="truncate font-mono text-mist">{record.name}</p>
-                <p className="mt-1 font-mono text-xs text-faint">
-                  {record.type} /{" "}
-                  {record.proxied ? summarizeProxy(record) : "DNS-only"}
-                </p>
               </div>
+              <p className="truncate font-mono text-xs text-faint">
+                <span className="text-link">{record.type}</span> /{" "}
+                {record.proxied ? summarizeProxy(record) : "DNS-only"}
+              </p>
               <button
                 type="button"
-                className="pc-btn-ghost shrink-0 !px-3 !py-1.5 !text-xs"
+                className="pc-btn-ghost justify-self-start !px-3 !py-1.5 !text-xs md:justify-self-end"
                 onClick={() => props.openEdit(record)}
               >
                 Configure
@@ -80,7 +84,7 @@ export function ZoneRecordsView(props: {
             </div>
           ))
         ) : (
-          <p className="rounded-xl border border-dashed border-line p-6 text-sm text-faint">
+          <p className="border-b border-dashed border-line p-5 text-sm text-faint">
             No records in {zone.name} yet. Add the first hostname for this
             namespace.
           </p>

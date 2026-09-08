@@ -22,7 +22,7 @@ export function IngressDialog(props: {
         ref={(el) => {
           formRef = el ?? undefined;
         }}
-        className="pc-panel w-full max-w-md p-6 shadow-2xl shadow-black/40"
+        className="pc-panel w-full max-w-md p-6 font-mono"
         onSubmit={(event) => {
           event.preventDefault();
           const fd = new FormData(event.currentTarget);
@@ -34,12 +34,12 @@ export function IngressDialog(props: {
       >
         <div className="flex items-start justify-between gap-4">
           <div>
-            <p className="pc-eyebrow pc-eyebrow-signal">Ingress &amp; forwarding</p>
+            <p className="pc-eyebrow pc-eyebrow-signal">ingress &amp; forwarding</p>
             <h2
               id="ingress-dialog-title"
               className="pc-title mt-2 text-2xl text-mist"
             >
-              Network settings
+              network settings
             </h2>
             <p className="mt-2 text-sm text-mute">
               Advertised IPv4 used in proxied DNS answers, and the default

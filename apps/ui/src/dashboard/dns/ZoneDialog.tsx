@@ -15,7 +15,7 @@ export function ZoneDialog(props: {
       aria-labelledby="zone-dialog-title"
     >
       <form
-        className="pc-panel w-full max-w-md p-6 shadow-2xl shadow-black/40"
+        className="pc-panel w-full max-w-md p-6 font-mono"
         onSubmit={(event) => {
           event.preventDefault();
           const form = event.currentTarget;
@@ -26,12 +26,12 @@ export function ZoneDialog(props: {
       >
         <div className="flex items-start justify-between gap-4">
           <div>
-            <p className="pc-eyebrow pc-eyebrow-signal">DNS namespace</p>
+            <p className="pc-eyebrow pc-eyebrow-signal">dns namespace</p>
             <h2
               id="zone-dialog-title"
               className="pc-title mt-2 text-2xl text-mist"
             >
-              Add a new zone
+              add a new zone
             </h2>
             <p className="mt-2 text-sm text-mute">
               The namespace this homelab owns authoritatively. You can open it
