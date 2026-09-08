@@ -15,6 +15,7 @@ export type UserAccount = {
   passwordHash: string;
   role: Role;
   active: boolean;
+  passwordChangeRequired: boolean;
   createdAt: Date;
   updatedAt: Date;
 };
@@ -49,7 +50,7 @@ export interface AuthStore {
   findUserByUsername(username: string): Promise<UserAccount | undefined>;
   findUserById(id: string): Promise<UserAccount | undefined>;
   createUser(user: UserAccount): Promise<UserAccount>;
-  updateUser(id: string, patch: Partial<Pick<UserAccount, "role" | "active" | "passwordHash">>): Promise<UserAccount>;
+  updateUser(id: string, patch: Partial<Pick<UserAccount, "role" | "active" | "passwordHash" | "passwordChangeRequired">>): Promise<UserAccount>;
   deleteUser(id: string): Promise<void>;
   createSession(session: SessionRecord): Promise<SessionRecord>;
   findSessionByTokenHash(tokenHash: string): Promise<SessionRecord | undefined>;
@@ -221,6 +222,7 @@ export class AuthService {
       passwordHash: await hashPassword(password),
       role,
       active: true,
+      passwordChangeRequired: false,
       createdAt: now,
       updatedAt: now,
     };

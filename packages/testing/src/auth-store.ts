@@ -32,7 +32,7 @@ export class InMemoryAuthStore implements AuthStore {
 
   async updateUser(
     id: string,
-    patch: Partial<Pick<UserAccount, "role" | "active" | "passwordHash">>,
+    patch: Partial<Pick<UserAccount, "role" | "active" | "passwordHash" | "passwordChangeRequired">>,
   ): Promise<UserAccount> {
     const current = this.users.get(id);
     if (!current) {

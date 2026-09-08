@@ -31,6 +31,7 @@ type User struct {
 	PasswordHash string    `json:"-"`
 	Role         Role      `json:"role"`
 	Active       bool      `json:"active"`
+	PasswordChangeRequired bool `json:"passwordChangeRequired"`
 	CreatedAt    time.Time `json:"createdAt"`
 	UpdatedAt    time.Time `json:"updatedAt"`
 }
@@ -69,6 +70,8 @@ type Store interface {
 	RevokeSession(ctx context.Context, id string, revokedAt time.Time) error
 	TouchSession(ctx context.Context, id string, lastSeenAt time.Time) error
 	AddAudit(ctx context.Context, event AuditEvent) error
+	ResetPassword(ctx context.Context, username, passwordHash string, at time.Time, event AuditEvent) (User, error)
+	CompletePasswordChange(ctx context.Context, userID, currentSessionID, passwordHash string, at time.Time, event AuditEvent) (User, error)
 }
 
 type AuthSession struct {
@@ -187,6 +190,36 @@ func (s *Service) Authenticate(ctx context.Context, token string) (User, error) 
 	return *user, nil
 }
 
+func (s *Service) ResetPassword(ctx context.Context, username string) (string, error) {
+	normalized, err := NormalizeUsername(username)
+	if err != nil { return "", err }
+	temporary, err := GenerateTemporaryPassword()
+	if err != nil { return "", err }
+	hash, err := HashPassword(temporary)
+	if err != nil { return "", err }
+	now := s.now().UTC()
+	event := s.auditEvent("password.reset", "user", nil, nil, "success", nil)
+	if _, err := s.store.ResetPassword(ctx, normalized, hash, now, event); err != nil {
+		return "", err
+	}
+	return temporary, nil
+}
+
+func (s *Service) ChangePassword(ctx context.Context, token, password string) (User, error) {
+	if strings.TrimSpace(token) == "" { return User{}, ErrInvalidSession }
+	session, err := s.store.FindSessionByTokenHash(ctx, HashOpaqueToken(token))
+	if err != nil { return User{}, err }
+	now := s.now().UTC()
+	if session == nil || session.RevokedAt != nil || !session.ExpiresAt.After(now) { return User{}, ErrInvalidSession }
+	user, err := s.store.FindUserByID(ctx, session.UserID)
+	if err != nil { return User{}, err }
+	if user == nil || !user.Active { return User{}, ErrUnavailableUser }
+	hash, err := HashPassword(password)
+	if err != nil { return User{}, err }
+	event := s.auditEvent("password.change", "user", &user.ID, &user.ID, "success", nil)
+	return s.store.CompletePasswordChange(ctx, user.ID, session.ID, hash, now, event)
+}
+
 func (s *Service) Logout(ctx context.Context, token string) error {
 	return s.Revoke(ctx, token)
 }
@@ -232,17 +265,11 @@ func (s *Service) buildUser(username, password string, role Role) (User, error) 
 }
 
 func (s *Service) audit(ctx context.Context, action, resourceType string, resourceID, actorUserID *string, result string, afterValue any) error {
-	return s.store.AddAudit(ctx, AuditEvent{
-		ID:           newUUID(),
-		ActorUserID:  actorUserID,
-		Action:       action,
-		ResourceType: resourceType,
-		ResourceID:   resourceID,
-		AfterValue:   afterValue,
-		Correlation:  newUUID(),
-		Result:       result,
-		CreatedAt:    s.now().UTC(),
-	})
+	return s.store.AddAudit(ctx, s.auditEvent(action, resourceType, resourceID, actorUserID, result, afterValue))
+}
+
+func (s *Service) auditEvent(action, resourceType string, resourceID, actorUserID *string, result string, afterValue any) AuditEvent {
+	return AuditEvent{ID: newUUID(), ActorUserID: actorUserID, Action: action, ResourceType: resourceType, ResourceID: resourceID, AfterValue: afterValue, Correlation: newUUID(), Result: result, CreatedAt: s.now().UTC()}
 }
 
 var usernamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{2,63}$`)

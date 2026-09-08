@@ -22,6 +22,7 @@ const (
 	passwordSaltLength = 16
 	minPasswordLength  = 5
 	opaqueTokenBytes   = 32
+	temporaryPasswordBytes = 24
 )
 
 func HashPassword(password string) (string, error) {
@@ -76,6 +77,16 @@ func VerifyPassword(password, encoded string) bool {
 		return false
 	}
 	return len(derived) == len(expected) && subtle.ConstantTimeCompare(derived, expected) == 1
+}
+
+// GenerateTemporaryPassword returns a high-entropy, URL-safe password suitable
+// for copying from a terminal without transformation.
+func GenerateTemporaryPassword() (string, error) {
+	password := make([]byte, temporaryPasswordBytes)
+	if _, err := rand.Read(password); err != nil {
+		return "", fmt.Errorf("generate temporary password: %w", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(password), nil
 }
 
 func CreateOpaqueToken() (string, error) {

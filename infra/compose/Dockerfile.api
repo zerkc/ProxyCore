@@ -40,7 +40,9 @@ RUN --mount=type=cache,id=go-mod,target=/go/pkg/mod \
     VERSION="$(tr -d '[:space:]' < VERSION)" \
     && CGO_ENABLED=0 GOOS=linux go build -trimpath \
        -ldflags="-s -w -X github.com/zerkc/ProxyCore/apps/api/internal/version.Version=${VERSION}" \
-       -o /out/proxycore-api ./cmd/server
+       -o /out/proxycore-api ./cmd/server \
+    && CGO_ENABLED=0 GOOS=linux go build -trimpath \
+       -ldflags="-s -w" -o /out/proxycore-admin ./cmd/admin
 
 # Runtime: single static binary + SPA assets.
 FROM alpine:3.22
@@ -48,6 +50,7 @@ RUN apk add --no-cache ca-certificates tzdata wget \
   && adduser -D -H -u 10001 proxycore
 WORKDIR /app
 COPY --from=api /out/proxycore-api /app/proxycore-api
+COPY --from=api /out/proxycore-admin /usr/local/bin/proxycore-admin
 COPY --from=ui /ui/dist /app/ui
 ENV PROXYCORE_UI_DIST=/app/ui
 ENV PROXYCORE_API_ADDR=:3000

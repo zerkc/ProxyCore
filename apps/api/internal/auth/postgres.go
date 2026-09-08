@@ -30,9 +30,11 @@ func (s *PostgresStore) EnsureSchema(ctx context.Context) error {
 			password_hash text not null,
 			role proxycore_role not null,
 			active boolean not null default true,
+			password_change_required boolean not null default false,
 			created_at timestamptz not null default now(),
 			updated_at timestamptz not null default now()
 		);`,
+		`alter table users add column if not exists password_change_required boolean not null default false;`,
 		`create unique index if not exists users_username_idx on users (username);`,
 		`create table if not exists sessions (
 			id uuid primary key,
@@ -67,7 +69,7 @@ func (s *PostgresStore) EnsureSchema(ctx context.Context) error {
 
 func (s *PostgresStore) ListUsers(ctx context.Context) ([]User, error) {
 	rows, err := s.pool.Query(ctx, `
-		select id::text, username, password_hash, role::text, active, created_at, updated_at
+		select id::text, username, password_hash, role::text, active, password_change_required, created_at, updated_at
 		from users
 		order by username
 	`)
@@ -89,7 +91,7 @@ func (s *PostgresStore) ListUsers(ctx context.Context) ([]User, error) {
 
 func (s *PostgresStore) FindUserByUsername(ctx context.Context, username string) (*User, error) {
 	row := s.pool.QueryRow(ctx, `
-		select id::text, username, password_hash, role::text, active, created_at, updated_at
+		select id::text, username, password_hash, role::text, active, password_change_required, created_at, updated_at
 		from users
 		where username = $1
 	`, username)
@@ -98,7 +100,7 @@ func (s *PostgresStore) FindUserByUsername(ctx context.Context, username string)
 
 func (s *PostgresStore) FindUserByID(ctx context.Context, id string) (*User, error) {
 	row := s.pool.QueryRow(ctx, `
-		select id::text, username, password_hash, role::text, active, created_at, updated_at
+		select id::text, username, password_hash, role::text, active, password_change_required, created_at, updated_at
 		from users
 		where id = $1
 	`, id)
@@ -107,10 +109,10 @@ func (s *PostgresStore) FindUserByID(ctx context.Context, id string) (*User, err
 
 func (s *PostgresStore) CreateUser(ctx context.Context, user User) (User, error) {
 	row := s.pool.QueryRow(ctx, `
-		insert into users (id, username, password_hash, role, active, created_at, updated_at)
-		values ($1, $2, $3, $4::proxycore_role, $5, $6, $7)
-		returning id::text, username, password_hash, role::text, active, created_at, updated_at
-	`, user.ID, user.Username, user.PasswordHash, string(user.Role), user.Active, user.CreatedAt, user.UpdatedAt)
+		insert into users (id, username, password_hash, role, active, password_change_required, created_at, updated_at)
+		values ($1, $2, $3, $4::proxycore_role, $5, $6, $7, $8)
+		returning id::text, username, password_hash, role::text, active, password_change_required, created_at, updated_at
+	`, user.ID, user.Username, user.PasswordHash, string(user.Role), user.Active, user.PasswordChangeRequired, user.CreatedAt, user.UpdatedAt)
 	return scanUser(row)
 }
 
@@ -133,8 +135,13 @@ func (s *PostgresStore) UpdateUser(ctx context.Context, id string, patch UserPat
 		args = append(args, *patch.PasswordHash)
 		next++
 	}
+	if patch.PasswordChangeRequired != nil {
+		setClauses = append(setClauses, fmt.Sprintf("password_change_required = $%d", next))
+		args = append(args, *patch.PasswordChangeRequired)
+		next++
+	}
 	query := "update users set " + strings.Join(setClauses, ", ") +
-		" where id = $1 returning id::text, username, password_hash, role::text, active, created_at, updated_at"
+		" where id = $1 returning id::text, username, password_hash, role::text, active, password_change_required, created_at, updated_at"
 	row := s.pool.QueryRow(ctx, query, args...)
 	user, err := scanUser(row)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -179,6 +186,62 @@ func (s *PostgresStore) TouchSession(ctx context.Context, id string, lastSeenAt 
 	return err
 }
 
+func (s *PostgresStore) ResetPassword(ctx context.Context, username, passwordHash string, at time.Time, event AuditEvent) (User, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil { return User{}, err }
+	defer func() { _ = tx.Rollback(ctx) }()
+	row := tx.QueryRow(ctx, `
+		update users set password_hash = $2, password_change_required = true, updated_at = $3
+		where username = $1 and active = true
+		returning id::text, username, password_hash, role::text, active, password_change_required, created_at, updated_at
+	`, username, passwordHash, at)
+	user, err := scanUser(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		var active bool
+		findErr := tx.QueryRow(ctx, `select active from users where username = $1`, username).Scan(&active)
+		if errors.Is(findErr, pgx.ErrNoRows) { return User{}, ErrUserNotFound }
+		if findErr != nil { return User{}, findErr }
+		return User{}, ErrUnavailableUser
+	}
+	if err != nil { return User{}, err }
+	if _, err = tx.Exec(ctx, `update sessions set revoked_at = $2 where user_id = $1 and revoked_at is null`, user.ID, at); err != nil { return User{}, err }
+	event.ResourceID = &user.ID
+	if err = insertAudit(ctx, tx, event); err != nil { return User{}, err }
+	if err = tx.Commit(ctx); err != nil { return User{}, err }
+	return user, nil
+}
+
+func (s *PostgresStore) CompletePasswordChange(ctx context.Context, userID, currentSessionID, passwordHash string, at time.Time, event AuditEvent) (User, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil { return User{}, err }
+	defer func() { _ = tx.Rollback(ctx) }()
+	row := tx.QueryRow(ctx, `
+		update users set password_hash = $2, password_change_required = false, updated_at = $3
+		where id = $1 and active = true
+		returning id::text, username, password_hash, role::text, active, password_change_required, created_at, updated_at
+	`, userID, passwordHash, at)
+	user, err := scanUser(row)
+	if errors.Is(err, pgx.ErrNoRows) { return User{}, ErrUnavailableUser }
+	if err != nil { return User{}, err }
+	if _, err = tx.Exec(ctx, `update sessions set revoked_at = $3 where user_id = $1 and id <> $2 and revoked_at is null`, userID, currentSessionID, at); err != nil { return User{}, err }
+	if err = insertAudit(ctx, tx, event); err != nil { return User{}, err }
+	if err = tx.Commit(ctx); err != nil { return User{}, err }
+	return user, nil
+}
+
+type auditExecer interface { Exec(context.Context, string, ...any) (pgconn.CommandTag, error) }
+
+func insertAudit(ctx context.Context, db auditExecer, event AuditEvent) error {
+	var afterValue *string
+	if event.AfterValue != nil {
+		serialized, err := json.Marshal(event.AfterValue)
+		if err != nil { return fmt.Errorf("marshal audit after_value: %w", err) }
+		value := string(serialized); afterValue = &value
+	}
+	_, err := db.Exec(ctx, `insert into audit_events (id, actor_user_id, action, resource_type, resource_id, before_value, after_value, correlation_id, result, created_at) values ($1, $2, $3, $4, $5, null, $6::jsonb, $7, $8, $9)`, event.ID, event.ActorUserID, event.Action, event.ResourceType, event.ResourceID, afterValue, event.Correlation, event.Result, event.CreatedAt)
+	return err
+}
+
 func (s *PostgresStore) AddAudit(ctx context.Context, event AuditEvent) error {
 	var afterValue *string
 	if event.AfterValue != nil {
@@ -213,7 +276,7 @@ type scanner interface {
 func scanUser(row scanner) (User, error) {
 	var user User
 	var role string
-	if err := row.Scan(&user.ID, &user.Username, &user.PasswordHash, &role, &user.Active, &user.CreatedAt, &user.UpdatedAt); err != nil {
+	if err := row.Scan(&user.ID, &user.Username, &user.PasswordHash, &role, &user.Active, &user.PasswordChangeRequired, &user.CreatedAt, &user.UpdatedAt); err != nil {
 		return User{}, err
 	}
 	user.Role = Role(role)

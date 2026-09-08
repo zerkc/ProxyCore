@@ -20,7 +20,7 @@ export function LoginPage() {
     });
     const body = (await response.json()) as {
       error?: string;
-      user?: { username?: string };
+      user?: { username?: string; passwordChangeRequired?: boolean };
     };
     if (!response.ok) {
       setError(body.error ?? "Sign-in failed");
@@ -29,7 +29,7 @@ export function LoginPage() {
     if (body.user?.username) {
       sessionStorage.setItem(SESSION_USERNAME_KEY, body.user.username);
     }
-    navigate("/dashboard");
+    navigate(body.user?.passwordChangeRequired ? "/change-password" : "/dashboard");
   }
 
   return (

@@ -39,6 +39,7 @@ export class PgAuthStore implements AuthStore {
         passwordHash: user.passwordHash,
         role: user.role,
         active: user.active,
+        passwordChangeRequired: user.passwordChangeRequired,
         createdAt: user.createdAt,
         updatedAt: user.updatedAt,
       })
@@ -48,7 +49,7 @@ export class PgAuthStore implements AuthStore {
 
   async updateUser(
     id: string,
-    patch: Partial<Pick<UserAccount, "role" | "active" | "passwordHash">>,
+    patch: Partial<Pick<UserAccount, "role" | "active" | "passwordHash" | "passwordChangeRequired">>,
   ): Promise<UserAccount> {
     const [row] = await this.db
       .update(users)
@@ -56,6 +57,7 @@ export class PgAuthStore implements AuthStore {
         ...(patch.role === undefined ? {} : { role: patch.role }),
         ...(patch.active === undefined ? {} : { active: patch.active }),
         ...(patch.passwordHash === undefined ? {} : { passwordHash: patch.passwordHash }),
+        ...(patch.passwordChangeRequired === undefined ? {} : { passwordChangeRequired: patch.passwordChangeRequired }),
         updatedAt: new Date(),
       })
       .where(eq(users.id, id))
@@ -124,6 +126,7 @@ function toUser(row: typeof users.$inferSelect): UserAccount {
     passwordHash: row.passwordHash,
     role: row.role,
     active: row.active,
+    passwordChangeRequired: row.passwordChangeRequired,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };

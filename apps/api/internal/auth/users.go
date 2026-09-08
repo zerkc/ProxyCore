@@ -10,6 +10,7 @@ type UserPatch struct {
 	Role         *Role
 	Active       *bool
 	PasswordHash *string
+	PasswordChangeRequired *bool
 }
 
 // ErrUserNotFound is returned when a target user does not exist.

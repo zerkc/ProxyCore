@@ -9,6 +9,7 @@ import { IngressView } from "./dashboard/IngressView";
 import { StreamsView } from "./dashboard/streams/StreamsView";
 import { Overview } from "./dashboard/views";
 import { BootstrapPage } from "./pages/BootstrapPage";
+import { ChangePasswordPage } from "./pages/ChangePasswordPage";
 import { LoginPage } from "./pages/LoginPage";
 
 export function App() {
@@ -17,6 +18,7 @@ export function App() {
       <Route path="/" element={<Navigate to="/login" replace />} />
       <Route path="/login" element={<LoginPage />} />
       <Route path="/bootstrap" element={<BootstrapPage />} />
+      <Route path="/change-password" element={<ChangePasswordPage />} />
       <Route path="/dashboard/*" element={<DashboardRoutes />} />
       <Route path="*" element={<Navigate to="/login" replace />} />
     </Routes>

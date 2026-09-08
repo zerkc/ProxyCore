@@ -95,6 +95,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/auth/bootstrap", s.handleAuthBootstrap)
 	s.mux.HandleFunc("POST /api/auth/login", s.handleAuthLogin)
 	s.mux.HandleFunc("POST /api/auth/logout", s.handleAuthLogout)
+	s.mux.HandleFunc("POST /api/auth/change-password", s.handleAuthChangePassword)
 
 	// Configuration API (ported from the transitional node-api).
 	s.mux.HandleFunc("GET /api/status", s.handleStatus)
@@ -194,6 +195,32 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *Server) handleAuthChangePassword(w http.ResponseWriter, r *http.Request) {
+	if s.auth == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "error": "auth is not configured", "code": "AUTH_UNAVAILABLE"})
+		return
+	}
+	var input struct { Password string `json:"password"` }
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&input); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid JSON body", "code": "INVALID_REQUEST"})
+		return
+	}
+	user, err := s.auth.ChangePassword(r.Context(), s.tokenFromRequest(r), input.Password)
+	if err != nil {
+		switch {
+		case errors.Is(err, auth.ErrInvalidSession), errors.Is(err, auth.ErrUnavailableUser):
+			writeJSON(w, http.StatusUnauthorized, map[string]any{"ok": false, "error": "Authentication required", "code": "AUTH_REQUIRED"})
+		case strings.Contains(err.Error(), "password"):
+			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error(), "code": "PASSWORD_INVALID"})
+		default:
+			s.log.Printf("auth change password: %v", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "password change failed", "code": "PASSWORD_CHANGE_FAILED"})
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"user": user})
+}
+
 func (s *Server) handleAuthLogout(w http.ResponseWriter, r *http.Request) {
 	if s.auth == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "error": "auth is not configured"})
@@ -219,6 +246,10 @@ func (s *Server) requireUser(w http.ResponseWriter, r *http.Request, roles ...au
 	user, err := s.auth.Authenticate(r.Context(), s.tokenFromRequest(r))
 	if err != nil {
 		writeConfigError(w, &httpError{status: http.StatusUnauthorized, message: "Authentication required"})
+		return auth.User{}, false
+	}
+	if user.PasswordChangeRequired {
+		writeJSON(w, http.StatusForbidden, map[string]any{"ok": false, "error": "Password change required", "code": "PASSWORD_CHANGE_REQUIRED"})
 		return auth.User{}, false
 	}
 	if len(roles) > 0 && !roleAllowed(user.Role, roles) {

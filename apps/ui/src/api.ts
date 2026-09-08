@@ -5,6 +5,7 @@ export type PublicUser = {
   username: string;
   role: "owner" | "operator";
   active: boolean;
+  passwordChangeRequired: boolean;
 };
 
 export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {

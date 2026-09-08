@@ -85,7 +85,38 @@ func TestAuthHandlersBootstrapLoginLogout(t *testing.T) {
 	}
 }
 
+func TestPasswordResetRestrictedSessionAndChange(t *testing.T) {
+	srv, svc := newAuthTestFixture(t)
+	bootstrap := postJSON(t, srv.Handler(), "/api/auth/bootstrap", map[string]string{"username": "owner", "password": "initial-password"}, nil)
+	if bootstrap.Code != http.StatusCreated { t.Fatalf("bootstrap status=%d body=%s", bootstrap.Code, bootstrap.Body.String()) }
+	temporary, err := svc.ResetPassword(context.Background(), " OWNER ")
+	if err != nil { t.Fatalf("reset password: %v", err) }
+	login := postJSON(t, srv.Handler(), "/api/auth/login", map[string]string{"username": "owner", "password": temporary}, nil)
+	if login.Code != http.StatusOK { t.Fatalf("login status=%d body=%s", login.Code, login.Body.String()) }
+	cookie := login.Result().Cookies()[0]
+
+	req := httptest.NewRequest(http.MethodGet, "/api/users", nil)
+	req.AddCookie(cookie)
+	restricted := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(restricted, req)
+	if restricted.Code != http.StatusForbidden || !strings.Contains(restricted.Body.String(), "PASSWORD_CHANGE_REQUIRED") { t.Fatalf("restricted status=%d body=%s", restricted.Code, restricted.Body.String()) }
+
+	changed := postJSON(t, srv.Handler(), "/api/auth/change-password", map[string]string{"password": "new-secure-password"}, cookie)
+	if changed.Code != http.StatusOK { t.Fatalf("change status=%d body=%s", changed.Code, changed.Body.String()) }
+	req = httptest.NewRequest(http.MethodGet, "/api/users", nil)
+	req.AddCookie(cookie)
+	allowed := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(allowed, req)
+	if allowed.Code != http.StatusOK { t.Fatalf("allowed status=%d body=%s", allowed.Code, allowed.Body.String()) }
+}
+
 func newAuthTestServer(t *testing.T) *httpserver.Server {
+	t.Helper()
+	srv, _ := newAuthTestFixture(t)
+	return srv
+}
+
+func newAuthTestFixture(t *testing.T) (*httpserver.Server, *auth.Service) {
 	t.Helper()
 	if testing.Short() {
 		t.Skip("skipping database-backed auth handler tests in short mode")
@@ -132,11 +163,12 @@ func newAuthTestServer(t *testing.T) *httpserver.Server {
 	}
 
 	svc := auth.NewService(store, auth.ServiceOptions{SessionTTL: time.Hour})
-	return httpserver.New(config.Config{
+	srv := httpserver.New(config.Config{
 		UIDist:            t.TempDir(),
 		SessionCookieName: "proxycore_session",
 		SessionTTL:        time.Hour,
 	}, log.New(io.Discard, "", 0), httpserver.WithAuthService(svc))
+	return srv, svc
 }
 
 func postJSON(t *testing.T, handler http.Handler, target string, body any, cookie *http.Cookie) *httptest.ResponseRecorder {
