@@ -1,0 +1,29 @@
+change: primary-node-continuity
+status: exploring
+mode: hybrid
+delivery_strategy: exception-ok
+artifact_store: openspec
+research_lane: unselected
+execution_mode: auto
+pre_resolved_decisions:
+  secret_transport: cluster-key-shared-via-enrollment
+  sync_transport: node-pull-over-existing-api
+  owner_credentials: replicated-hashes-plus-local-emergency
+  certificate_renewal: primary-renews-node-retains-last-cert
+  standalone_archive_retention_days: 30
+  node_persistence: keep-postgresql
+current_phase: explore
+completed_phases:
+  - explore
+pending_phases:
+  - propose
+  - spec
+  - design
+  - tasks
+  - apply
+  - verify
+  - sync
+  - archive
+artifacts:
+  exploration: openspec/changes/primary-node-continuity/exploration.md
+engram_prefix: sdd/primary-node-continuity
