@@ -55,6 +55,19 @@ export const jobTargetEnum = pgEnum("proxycore_job_target", [
   "certificate",
 ]);
 
+/**
+ * PRIMARY/NODE topology role.
+ * Persisted in `installation_identity.role`.
+ * Phase 0 introduces the schema; transitions are wired in later work units.
+ */
+export const topologyRoleEnum = pgEnum("proxycore_topology_role", [
+  "standalone-primary",
+  "primary",
+  "primary-with-nodes",
+  "node",
+  "stale-primary",
+]);
+
 const createdAt = () =>
   timestamp("created_at", { withTimezone: true }).notNull().defaultNow();
 const updatedAt = () =>
@@ -320,6 +333,77 @@ export const operationalArtifacts = pgTable("operational_artifacts", {
   createdAt: createdAt(),
 });
 
+/**
+ * Single-row table that records durable installation identity, role, and
+ * leadership generation. Phase 0 introduces the schema; the service layer is
+ * added in WU 0.3.
+ */
+export const installationIdentity = pgTable("installation_identity", {
+  id: text("id").primaryKey(),
+  installationId: uuid("installation_id").notNull(),
+  nodeId: uuid("node_id").notNull(),
+  role: topologyRoleEnum("role").notNull().default("standalone-primary"),
+  leadershipGeneration: integer("leadership_generation").notNull().default(1),
+  latestKnownGeneration: integer("latest_known_generation").notNull().default(1),
+  clusterKeyId: uuid("cluster_key_id"),
+  updatedAt: updatedAt(),
+});
+
+/**
+ * History of cluster key-encryption keys (KEKs). A primary generates a new
+ * entry when promoting or rotating; nodes consume the active entry during
+ * enrollment. The wrapped_kek column is the cluster KEK encrypted with the
+ * local master key.
+ */
+export const clusterKeys = pgTable("cluster_keys", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  purpose: text("purpose").notNull(),
+  wrappedKek: text("wrapped_kek").notNull(),
+  wrappingKeyVersion: integer("wrapping_key_version").notNull(),
+  createdAt: createdAt(),
+  retiredAt: timestamp("retired_at", { withTimezone: true }),
+});
+
+/**
+ * Tracks enrollment metadata for the local installation when it acts as a
+ * node. The row is a single primary-keyed record identified by the literal
+ * "default" id.
+ */
+export const nodeState = pgTable("node_state", {
+  id: text("id").primaryKey(),
+  enrolledAt: timestamp("enrolled_at", { withTimezone: true }),
+  enrollmentTokenHash: text("enrollment_token_hash"),
+  enrollmentPrimaryId: uuid("enrollment_primary_id"),
+  lastSeenAt: timestamp("last_seen_at", { withTimezone: true }),
+  lastAppliedSnapshotId: uuid("last_applied_snapshot_id"),
+  updatedAt: updatedAt(),
+});
+
+/**
+ * Records each snapshot that successfully applied to the local installation.
+ * Used by Phase 1 to drive the round-trip and by Phase 0 to retain a
+ * previous known-good snapshot for rollback.
+ */
+export const appliedSnapshots = pgTable(
+  "applied_snapshots",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    sourcePrimaryId: uuid("source_primary_id").notNull(),
+    leadershipGeneration: integer("leadership_generation").notNull(),
+    snapshotVersion: integer("snapshot_version").notNull(),
+    replicationVersion: integer("replication_version").notNull(),
+    contentHash: text("content_hash").notNull(),
+    revisionId: uuid("revision_id").references(() => configRevisions.id),
+    appliedAt: timestamp("applied_at", { withTimezone: true }).notNull().defaultNow(),
+    discardedAt: timestamp("discarded_at", { withTimezone: true }),
+  },
+  (table) => ({
+    contentHashIndex: uniqueIndex("applied_snapshots_content_hash_idx").on(
+      table.contentHash,
+    ),
+  }),
+);
+
 export const schema = {
   installationSettings,
   users,
@@ -338,4 +422,8 @@ export const schema = {
   auditEvents,
   healthObservations,
   operationalArtifacts,
+  installationIdentity,
+  clusterKeys,
+  nodeState,
+  appliedSnapshots,
 };

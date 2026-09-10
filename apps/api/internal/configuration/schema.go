@@ -133,6 +133,53 @@ func EnsureSchema(ctx context.Context, pool *pgxpool.Pool) error {
 			finished_at timestamptz,
 			created_at timestamptz not null default now()
 		);`,
+		// --- Primary/Node continuity (Phase 0) ---
+		`do $$ begin create type proxycore_topology_role as enum (
+			'standalone-primary',
+			'primary',
+			'primary-with-nodes',
+			'node',
+			'stale-primary'
+		); exception when duplicate_object then null; end $$;`,
+		`create table if not exists installation_identity (
+			id text primary key,
+			installation_id uuid not null,
+			node_id uuid not null,
+			role proxycore_topology_role not null default 'standalone-primary',
+			leadership_generation bigint not null default 1,
+			latest_known_generation bigint not null default 1,
+			cluster_key_id uuid,
+			updated_at timestamptz not null default now()
+		);`,
+		`create table if not exists cluster_keys (
+			id uuid primary key default gen_random_uuid(),
+			purpose text not null,
+			wrapped_kek text not null,
+			wrapping_key_version integer not null,
+			created_at timestamptz not null default now(),
+			retired_at timestamptz
+		);`,
+		`create table if not exists node_state (
+			id text primary key,
+			enrolled_at timestamptz,
+			enrollment_token_hash text,
+			enrollment_primary_id uuid,
+			last_seen_at timestamptz,
+			last_applied_snapshot_id uuid,
+			updated_at timestamptz not null default now()
+		);`,
+		`create table if not exists applied_snapshots (
+			id uuid primary key default gen_random_uuid(),
+			source_primary_id uuid not null,
+			leadership_generation bigint not null,
+			snapshot_version integer not null,
+			replication_version integer not null,
+			content_hash text not null,
+			revision_id uuid references config_revisions(id),
+			applied_at timestamptz not null default now(),
+			discarded_at timestamptz
+		);`,
+		`create unique index if not exists applied_snapshots_content_hash_idx on applied_snapshots (content_hash);`,
 	}
 	for _, statement := range statements {
 		if _, err := pool.Exec(ctx, statement); err != nil {
