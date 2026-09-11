@@ -22,7 +22,66 @@ work begins.
 
 ## Phase 0 — Contracts and safety boundaries
 
-- [ ] 0.1 Add `Role`, `InstallationID`, `NodeID`, `LeadershipGeneration`,
+- [x] 0.1 Add `Role`, `InstallationID`, `NodeID`, `LeadershipGeneration`,
+      `SnapshotVersion`, `ReplicationVersion` types in
+      `apps/api/internal/domain/` plus a TS mirror in
+      `packages/domain/src/`. Tests cover generation, comparison, and
+      parsing.
+- [x] 0.2 Add `EnsureSchema` tables `installation_identity` (single row),
+      `node_state`, `cluster_keys`, `applied_snapshots` and Drizzle
+      mirrors. Tests assert idempotent re-run and required columns.
+- [x] 0.3 Add identity service (`apps/api/internal/identity/`): generate
+      installation ID on first boot, persist role and leadership
+      generation, expose `IsStalePrimary()`. Tests cover first boot,
+      restart, and stale detection.
+- [x] 0.4 Add cluster-KEK envelope helpers in
+      `packages/crypto/src/cluster.ts` (TS) and
+      `apps/api/internal/cluster/kek.go` (Go): `WrapWithClusterKey`,
+      `UnwrapWithClusterKey`, format `v1.kek:<iv>:<tag>:<ciphertext>`.
+      Tests cover round-trip, tamper rejection, and wrong-KEK rejection.
+- [x] 0.5 Add snapshot schema (`apps/api/internal/snapshot/schema.go`)
+      and TS mirror: replicated fields (settings, zones, streams,
+      certificates, secrets, administrator hashes), `nodeLocal` overlay
+      (ingress, nodeId, role, leadershipGeneration, clusterKeyRef),
+      transient metadata (snapshotVersion, replicationVersion,
+      contentHash, sourcePrimaryId, capturedAt). Tests cover schema
+      round-trip and field classification.
+- [x] 0.6 Add snapshot serialization (Go) using existing
+      `StableStringify`. Snapshot content hash uses the same canonical
+      stringification. Tests assert byte-stable hashing across processes.
+- [x] 0.7 Add compatibility check (`apps/api/internal/snapshot/compat.go`):
+      accept-list of `snapshotVersion` values; reject with explicit
+      reason when the local node cannot apply. Tests cover accept and
+      reject paths.
+- [x] 0.8 Add promotion state machine (`apps/api/internal/cluster/state.go`):
+      `standalone-primary`, `primary`, `primary-with-nodes`, `node`,
+      `stale-primary`. Transition guards: Owner-only; leadership
+      generation monotonic. Tests cover valid and rejected transitions.
+- [x] 0.9 Wire stale-primary startup guard in `cmd/server/main.go`:
+      refuse to expose writable endpoints when `IsStalePrimary()`.
+      Tests cover guard on, guard off (no stale state), and process
+      restart preservation.
+- [x] 0.10 Document the threat model in `docs/security-operations.md`:
+      enrollment, snapshot delivery, secret transport, threat actors,
+      mitigations.
+
+## Phase 0 work unit order (final)
+
+```
+0.1  TopologyRole + ID + LeadershipGeneration + Version types
+0.2  installation_identity, node_state, cluster_keys, applied_snapshots schema
+0.3  identity.Service with port pattern and stale-primary detection
+0.4  cluster.KEK v1.kek envelope (Go) + packages/crypto/src/cluster.ts (TS)
+0.5  snapshot.Envelope schema with replicated/nodeLocal/transient fields
+0.6  snapshot.Marshal / Unmarshal using StableStringify
+0.7  snapshot.CheckCompatibility with runtime-extensible accept-lists
+0.8  cluster.StateMachine with Phase 0/1 transition matrix
+0.9  startup identity bootstrap + /api/ready identity block
+0.10 docs/security-operations.md threat model + checklist additions
+```
+
+Each work unit ships in its own reviewable commit; the diff between
+consecutive commits is the smallest cohesive change.
       `SnapshotVersion`, `ReplicationVersion` types in
       `apps/api/internal/domain/` plus a TS mirror in
       `packages/domain/src/`. Tests cover generation, comparison, and

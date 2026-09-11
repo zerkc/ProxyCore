@@ -15,12 +15,13 @@ pre_resolved_decisions:
 current_phase: explore
 completed_phases:
   - explore
-pending_phases:
   - propose
   - spec
   - design
   - tasks
-  - apply
+  - apply-phase-0
+pending_phases:
+  - apply-phase-1
   - verify
   - sync
   - archive
