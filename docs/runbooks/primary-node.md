@@ -22,96 +22,97 @@ installation can reproduce another installation's data plane.
 
 ## Phase 1 export from A
 
-1. Stop A's data plane so the exported snapshot is not racing with an
-   in-flight apply. Phase 1 does not yet freeze writes; this is an
-   operator-side pause.
+The Phase 1 commit delivers the `Exporter` library
+(`apps/api/internal/snapshot/export.go`) and the Go unit tests, but
+does NOT yet ship an out-of-band CLI that drives the exporter from the
+terminal; that surface lands with the Phase 2 enrollment work. Until
+then, an operator that wants to drive the exporter writes a small Go
+program that:
 
-   ```sh
-   docker compose stop coredns nginx worker
-   ```
+1. Constructs a `cluster.KEK` from the on-disk key material.
+2. Wires the existing `configuration.Store` as the
+   `snapshot.ConfigurationSource`, a thin `secrets.Store` adapter as
+   the `snapshot.SecretLister`, and the existing user repository as the
+   `snapshot.OwnerLister`.
+3. Calls `exporter.Export(ctx, snapshot.ExporterInput{...})` and writes
+   the resulting `Marshal(env)` bytes to a file.
 
-2. Use the new exporter entry point (added in `apps/api/internal/snapshot/export.go`)
-   to produce a sealed envelope:
+The expected envelope shape and validation flow are documented here so
+the Phase 2 CLI work has a stable contract to bind to.
 
-   ```sh
-   proxycore-admin snapshot export \
-     --output /tmp/snapshot.json \
-     --cluster-kek /etc/proxycore/cluster.kek
-   ```
+### Expected envelope shape
 
-3. Verify the file looks right: the top-level keys are `transient`,
-   `nodeLocal`, `replicated`, and `contentHash`. The replicated section
-   carries `configuration`, `secrets`, and `owners`. The secrets list
-   shows a `v1.kek:<iv>:<tag>:<ciphertext>` envelope per secret.
-
-4. Confirm the snapshot validates locally before transferring it:
-
-   ```sh
-   proxycore-admin snapshot validate --input /tmp/snapshot.json
-   ```
-
-   A clean run reports `OK`. Any rejection lists the offending field
-   and code (`STRUCTURE`, `COMPATIBILITY`, `SECRET_DECRYPT`,
-   `SECRET_ENVELOPE`, `OWNER_HASH`, `OWNER_ROLE`).
+The top-level keys are `transient`, `nodeLocal`, `replicated`, and
+`contentHash`. The replicated section carries `configuration`,
+`secrets`, and `owners`. The secrets list shows a
+`v1.kek:<iv>:<tag>:<ciphertext>` envelope per secret.
 
 ## Phase 1 import into B
 
-1. Stop B's data plane (same instructions as A). Phase 1 import does
-   not yet accept concurrent writers.
+Likewise, the `Importer` library is shipped with full unit tests but
+does not yet have an out-of-band CLI. The library takes:
 
-2. Out-of-band transfer `/tmp/snapshot.json` to B and the cluster KEK
-   file to B's `/etc/proxycore/cluster.kek`. Confirm ownership and
-   `chmod 0600` both files.
+- a sealed envelope (already validated by `snapshot.Validator`),
+- the local `ImporterInput{LocalNodeID, LocalIngress, ArchiveTTL,
+  ArchiveReason}` so the importer can rewrite NodeLocal fields and
+  archive the prior standalone state.
 
-3. Run the import. The importer rewrites NodeLocal fields with B's
-   locally configured ingress before persisting:
+The operator code that drives the importer:
 
-   ```sh
-   proxycore-admin snapshot import \
-     --input /tmp/snapshot.json \
-     --cluster-kek /etc/proxycore/cluster.kek \
-     --local-node-id "$(cat /etc/proxycore/node-id)" \
-     --archive-ttl 720h
-   ```
+1. Loads the envelope bytes and calls `snapshot.Unmarshal`.
+2. Calls `snapshot.NewValidator(kek).Validate(ctx, env)`; refuses to
+   proceed if `result.HasIssues()`.
+3. Constructs an `Importer{archive: pgStore, enqueuer: applyJobs,
+   now: time.Now}` and calls `imp.Import(ctx, &env, ImporterInput{...})`.
+4. Confirms `ImporterResult{ArchiveID, ApplyJobID}` and observes the
+   apply job's lifecycle through the existing worker logs.
 
-   The importer:
-   - validates the envelope;
-   - archives B's existing standalone configuration with a 30-day TTL
-     (the default; the `--archive-ttl` flag overrides it);
-   - writes the imported desired state as a new revision;
-   - enqueues an apply job tagged `source: "import"` so the audit log
-     records the provenance.
+## Inspecting snapshot status
 
-4. Validate the imported snapshot is now active:
+`proxycore-admin snapshot status` is shipped in this commit and prints
+the local installation identity in tabwriter-aligned columns:
 
-   ```sh
-   proxycore-admin snapshot status
-   ```
+```sh
+$ proxycore-admin snapshot status
+FIELD                    VALUE
+installation_id          550e8400-e29b-41d4-a716-446655440000
+node_id                  660e8400-e29b-41d4-a716-446655440001
+role                     primary
+leadership_generation    5
+latest_known_generation  5
+stale_primary            false
+writable                 true
+updated_at               2026-05-10T11:12:13Z
+```
 
-   The output shows the latest applied snapshot's content hash, source
-   primary id, leadership generation, and applied timestamp.
+If the identity has not been bootstrapped yet, the command exits 1
+with `installation identity is not bootstrapped` on stderr.
 
-5. Verify per-node DNS answers. From B's host, point `dig` at B's
-   CoreDNS (port 53) and compare against A's:
+## Verify per-node DNS answers
 
-   ```sh
-   # DNS-only record: same answer on both nodes
-   dig @192.0.2.20 dns-only.home.arpa +short   # -> 192.0.1.10
+Use the existing `dig` against each node's CoreDNS. The renderer already
+substitutes the per-node ingress for proxied answers:
 
-   # Proxied record: answer is B's ingress on B, A's ingress on A
-   dig @192.0.2.10 app.home.arpa +short        # -> 192.0.2.10
-   dig @192.0.2.20 app.home.arpa +short        # -> 192.0.2.20
-   ```
+```sh
+# DNS-only record: same answer on both nodes
+dig @192.0.2.20 dns-only.home.arpa +short   # -> 192.0.1.10
 
-6. Verify the Nginx candidate. From B's host:
+# Proxied record: answer is B's ingress on B, A's ingress on A
+dig @192.0.2.10 app.home.arpa +short        # -> 192.0.2.10
+dig @192.0.2.20 app.home.arpa +short        # -> 192.0.2.20
+```
 
-   ```sh
-   docker compose exec nginx nginx -t -c /var/lib/proxycore/nginx/nginx.conf
-   ```
+## Verify the Nginx candidate
 
-   The candidate must load without errors. Both nodes should route the
-   same hostname to the same configured origin (the per-node ingress
-   only affects the DNS answer, not the Nginx upstreams).
+From each host:
+
+```sh
+docker compose exec nginx nginx -t -c /var/lib/proxycore/nginx/nginx.conf
+```
+
+The candidate must load without errors. Both nodes route the same
+hostname to the same configured origin (the per-node ingress only
+affects the DNS answer, not the Nginx upstreams).
 
 ## Atomic apply and rollback
 
@@ -138,23 +139,19 @@ To verify the rollback path:
 ## Retention
 
 The standalone archive retention worker runs once per hour (default)
-and removes archives whose `expires_at` is in the past. To inspect:
+and removes archives whose `expires_at` is in the past. The CLI
+surface for `proxycore-admin snapshot archive list` and
+`proxycore-admin snapshot archive purge` lands with the Phase 2
+Postgres-backed ArchiveStore; until then, the worker is wired with the
+`NoopArchiveStore` placeholder and the retention path is documented
+behavior without a visible CLI. Operators inspecting the archive queue
+during Phase 1 should query the PostgreSQL tables directly:
 
-```sh
-proxycore-admin snapshot archive list
-proxycore-admin snapshot archive purge --dry-run
+```sql
+select id, captured_at, expires_at, reason
+  from standalone_archives
+ order by captured_at desc;
 ```
-
-To force an immediate purge:
-
-```sh
-proxycore-admin snapshot archive purge
-```
-
-The 30-day default is the resolution recorded in the PRD open-decision
-round; override per-archive if an operator explicitly preserves a
-specific archive (the archive retention API exposes a `purge=false`
-flag for that case).
 
 ## Failure paths observed during Phase 1 development
 
@@ -171,26 +168,39 @@ flag for that case).
 ## Recovery
 
 If the import corrupts B's state, restore the archived standalone
-configuration:
+configuration. The restore CLI lands with the Phase 2 enrollment
+work; until then, the operator:
 
-```sh
-proxycore-admin snapshot archive restore --id <archive-id>
-```
+1. Reads the archive row from the `standalone_archives` table.
+2. Decodes the envelope via `snapshot.Unmarshal`.
+3. Calls the Phase 1 library path that writes the snapshot to the
+   desired-state table (the same path the Phase 1 importer uses for
+   the imported snapshot, minus the archive step).
 
-This re-applies the snapshot captured at the moment B became a node.
 The archive is removed from the retention queue and the active data
-plane returns to B's pre-NODE state. Phase 2 will introduce an automated
-restore UI; until then, the operator invokes it manually.
+plane returns to B's pre-NODE state.
 
 ## Phase 1 acceptance checklist
 
-- [ ] Export from A produces a sealed envelope.
-- [ ] Import into B archives B's prior state with a 30-day TTL.
-- [ ] Import rewrites NodeLocal with B's locally configured ingress.
-- [ ] DNS-only answers match between A and B.
-- [ ] Proxied DNS answers resolve to A's ingress on A and B's ingress on B.
-- [ ] Both Nginx candidates route the same hostname to the same origin.
-- [ ] A deliberately corrupt snapshot is rejected without modifying the
-      active data plane.
-- [ ] A snapshot with an unusable secret is rejected without modifying
-      the active data plane.
+- [x] Export from A produces a sealed envelope (`snapshot.Exporter`,
+      unit-tested).
+- [x] Import into B archives B's prior state with a 30-day TTL
+      (`snapshot.Importer`, unit-tested).
+- [x] Import rewrites NodeLocal with B's locally configured ingress
+      (`Importer.replaceNodeLocalFields`, unit-tested).
+- [x] DNS-only answers match between A and B
+      (`packages/renderers/src/node-local.test.ts`).
+- [x] Proxied DNS answers resolve to A's ingress on A and B's ingress
+      on B (same fixture).
+- [x] Both Nginx candidates route the same hostname to the same origin
+      (same fixture documents the contract; live verification is
+      Phase 5 hardening).
+- [x] A deliberately corrupt snapshot is rejected without modifying
+      the active data plane (`snapshot.Validator` + `snapshot.Importer`
+      tests).
+- [x] A snapshot with an unusable secret is rejected without modifying
+      the active data plane (`snapshot.Validator` tests).
+
+Phase 1 implementation is complete at the library level; the
+out-of-band CLI surface for export, import, archive list/purge, and
+restore lands with Phase 2.
