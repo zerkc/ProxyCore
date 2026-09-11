@@ -16,6 +16,7 @@ import (
 	"github.com/zerkc/ProxyCore/apps/api/internal/config"
 	"github.com/zerkc/ProxyCore/apps/api/internal/configuration"
 	"github.com/zerkc/ProxyCore/apps/api/internal/domain"
+	"github.com/zerkc/ProxyCore/apps/api/internal/identity"
 	"github.com/zerkc/ProxyCore/apps/api/internal/update"
 	"github.com/zerkc/ProxyCore/apps/api/internal/version"
 )
@@ -28,7 +29,8 @@ type Server struct {
 	config         *configuration.Store
 	updates        *update.Checker
 	defaultIngress domain.Ingress
-	updaterClient UpdaterClient
+	updaterClient  UpdaterClient
+	identitySvc    *identity.Service
 }
 
 type Option func(*Server)
@@ -63,6 +65,17 @@ func WithDefaultIngress(ingress domain.Ingress) Option {
 	}
 }
 
+// WithIdentityService wires the durable PRIMARY/NODE identity service into
+// the HTTP server. The service is exposed through identityService() so
+// handlers can gate writes on the local topology role. The startup-time
+// stale-primary guard lives in cmd/server/main.go; this option only stores
+// the reference for handler-level checks added in later phases.
+func WithIdentityService(svc *identity.Service) Option {
+	return func(s *Server) {
+		s.identitySvc = svc
+	}
+}
+
 func WithDBPool(pool *pgxpool.Pool) Option {
 	return func(s *Server) {
 		if pool != nil {
@@ -85,6 +98,13 @@ func New(cfg config.Config, logger *log.Logger, opts ...Option) *Server {
 
 func (s *Server) Handler() http.Handler {
 	return s.mux
+}
+
+// identityService returns the wired identity service, or nil if the server
+// has not been configured with one. Handlers SHOULD treat a nil return as
+// a server that is not yet bootstrapped against PostgreSQL.
+func (s *Server) identityService() *identity.Service {
+	return s.identitySvc
 }
 
 func (s *Server) routes() {
@@ -137,11 +157,24 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 func (s *Server) handleReady(w http.ResponseWriter, _ *http.Request) {
 	// Postgres readiness lands with the Go persistence port.
 	// For now the API process itself being up is enough to serve the SPA.
-	writeJSON(w, http.StatusOK, map[string]any{
+	body := map[string]any{
 		"ok":      true,
 		"service": "proxycore-api",
 		"version": version.Version,
-	})
+	}
+	if svc := s.identityService(); svc != nil {
+		current := svc.Current()
+		body["identity"] = map[string]any{
+			"installationId":       string(current.InstallationID),
+			"nodeId":               string(current.NodeID),
+			"role":                 string(current.Role),
+			"leadershipGeneration": current.LeadershipGeneration,
+			"latestKnownGeneration": current.LatestKnownGeneration,
+			"stalePrimary":         svc.IsStalePrimary(),
+			"writable":             svc.IsWritable(),
+		}
+	}
+	writeJSON(w, http.StatusOK, body)
 }
 
 func (s *Server) handleAuthBootstrap(w http.ResponseWriter, r *http.Request) {

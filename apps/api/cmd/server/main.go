@@ -17,6 +17,7 @@ import (
 	"github.com/zerkc/ProxyCore/apps/api/internal/configuration"
 	"github.com/zerkc/ProxyCore/apps/api/internal/domain"
 	"github.com/zerkc/ProxyCore/apps/api/internal/httpserver"
+	"github.com/zerkc/ProxyCore/apps/api/internal/identity"
 	"github.com/zerkc/ProxyCore/apps/api/internal/update"
 	"github.com/zerkc/ProxyCore/apps/api/internal/version"
 )
@@ -81,6 +82,32 @@ func main() {
 		options = append(options,
 			httpserver.WithConfigurationStore(configStore),
 			httpserver.WithDefaultIngress(defaultIngress),
+		)
+
+		// Bootstrap the durable PRIMARY/NODE identity. The service is wired
+		// into the HTTP server so handlers can gate writes on the local
+		// topology role. The startup-time stale-primary guard logs a warning
+		// and leaves Phase 2/3 to enforce per-handler write rejection.
+		identityStore := identity.NewPgStore(pool)
+		identitySvc := identity.NewService(identityStore)
+		identityCtx, identityCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		identityResult, _, err := identitySvc.EnsureBootstrapped(identityCtx)
+		identityCancel()
+		if err != nil {
+			logger.Fatalf("identity bootstrap: %v", err)
+		}
+		if identityResult.Role != domain.TopologyRoleStandalone {
+			// Bootstrap should always leave a fresh install as standalone;
+			// anything else signals a corrupted state that must not pass.
+			logger.Fatalf("identity bootstrap returned unexpected role %s", identityResult.Role)
+		}
+		options = append(options, httpserver.WithIdentityService(identitySvc))
+		logger.Printf(
+			"identity bootstrapped installation=%s node=%s role=%s generation=%d",
+			identityResult.InstallationID,
+			identityResult.NodeID,
+			identityResult.Role,
+			identityResult.LeadershipGeneration,
 		)
 	}
 
