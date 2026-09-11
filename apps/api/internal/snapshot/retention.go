@@ -28,6 +28,22 @@ func NewRetentionWorker(archive ArchiveStore, period time.Duration, logger *log.
 	return &RetentionWorker{archive: archive, period: period, log: logger}
 }
 
+// NoopArchiveStore is the ArchiveStore used by cmd/server until the
+// Phase 2 Postgres-backed ArchiveStore lands. Calling its methods is a
+// no-op, so the retention worker can run unconditionally without
+// requiring the importer storage path to be present.
+type NoopArchiveStore struct{}
+
+// SaveStandaloneArchive is a no-op.
+func (NoopArchiveStore) SaveStandaloneArchive(_ context.Context, _ StandaloneArchive) error {
+	return nil
+}
+
+// PurgeExpiredArchives returns zero purged and a nil error.
+func (NoopArchiveStore) PurgeExpiredArchives(_ context.Context, _ time.Time) (int, error) {
+	return 0, nil
+}
+
 // Run blocks until ctx is cancelled. It performs an initial purge
 // immediately, then schedules one every period. The worker logs every
 // purge result so the operator can confirm retention behaviour without

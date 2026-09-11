@@ -18,6 +18,7 @@ import (
 	"github.com/zerkc/ProxyCore/apps/api/internal/domain"
 	"github.com/zerkc/ProxyCore/apps/api/internal/httpserver"
 	"github.com/zerkc/ProxyCore/apps/api/internal/identity"
+	"github.com/zerkc/ProxyCore/apps/api/internal/snapshot"
 	"github.com/zerkc/ProxyCore/apps/api/internal/update"
 	"github.com/zerkc/ProxyCore/apps/api/internal/version"
 )
@@ -128,6 +129,13 @@ func main() {
 			Log:                    logger,
 		}, cfg.CertRenewalInterval)
 	}
+
+	// Start the standalone-archive retention worker. Phase 1 introduces
+	// the worker and the ArchiveStore seam; the actual ArchiveStore
+	// implementation that reads from PostgreSQL is added by the same
+	// change that wires enrollment in Phase 2. Until then, the worker
+	// runs with a no-op archive store and is a no-op itself.
+	go snapshot.NewRetentionWorker(snapshot.NoopArchiveStore{}, time.Hour, logger).Run(ctx)
 
 	go func() {
 		logger.Printf("proxycore-api listening on %s (ui=%s)", cfg.Addr, cfg.UIDist)
