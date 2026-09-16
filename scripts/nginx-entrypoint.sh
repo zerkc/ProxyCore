@@ -8,6 +8,7 @@ set -eu
 CANDIDATE_ROOT="${PROXYCORE_NGINX_CANDIDATE_ROOT:-/var/lib/proxycore/candidates}"
 CANDIDATE_ROOT="${CANDIDATE_ROOT%/}"
 STABLE_CONF="${PROXYCORE_NGINX_LIVE_CONFIG:-${CANDIDATE_ROOT}/nginx-live.conf}"
+PREVIOUS_STABLE_CONF="${CANDIDATE_ROOT}/nginx-previous-live.conf"
 NGINX_CONF_DEST="/etc/nginx/nginx.conf"
 
 log() {
@@ -59,6 +60,7 @@ find_newest_legacy_candidate() {
 log "Starting ProxyCore Nginx entrypoint"
 log "Candidates root: $CANDIDATE_ROOT"
 log "Stable config:   $STABLE_CONF"
+log "Previous stable: $PREVIOUS_STABLE_CONF"
 
 _installed=0
 if [ -s "$STABLE_CONF" ]; then
@@ -66,10 +68,23 @@ if [ -s "$STABLE_CONF" ]; then
     if install_config "$STABLE_CONF" "stable"; then
         _installed=1
     else
-        log "WARNING: stable config is invalid; trying legacy candidates"
+        log "WARNING: stable config is invalid; trying previous stable config"
     fi
 else
-    log "No stable live config; trying legacy candidates"
+    log "No stable live config; trying previous stable config"
+fi
+
+if [ "$_installed" -eq 0 ]; then
+    if [ -s "$PREVIOUS_STABLE_CONF" ]; then
+        log "Previous stable config found; validating..."
+        if install_config "$PREVIOUS_STABLE_CONF" "previous stable"; then
+            _installed=1
+        else
+            log "WARNING: previous stable config is invalid; trying legacy candidates"
+        fi
+    else
+        log "No previous stable config; trying legacy candidates"
+    fi
 fi
 
 if [ "$_installed" -eq 0 ]; then
