@@ -232,39 +232,54 @@ describe("worker polling", () => {
   });
 
   it("repairs a later drift after a previous reconciliation", async () => {
-    const revisions = new InMemoryRevisionStore();
-    const revision = await revisions.create(reconciliationSnapshot());
-    await revisions.markApplied(revision.id);
-    const jobs = new InMemoryJobStore();
-    const control = new SuccessfulControl([
-      "drift",
-      "healthy",
-      "drift",
-      "healthy",
-    ]);
-    const orchestrator = new ApplyOrchestrator({ jobs, revisions, control });
-    const options = { jobs, revisions, orchestrator };
+    const root = await mkdtemp(join(tmpdir(), "proxycore-worker-repeat-"));
+    try {
+      const revisions = new InMemoryRevisionStore();
+      const revision = await revisions.create(reconciliationSnapshot());
+      await revisions.markApplied(revision.id);
+      const jobs = new InMemoryJobStore();
+      const control = new SuccessfulControl([
+        "drift",
+        "healthy",
+        "drift",
+        "healthy",
+      ]);
+      const orchestrator = new ApplyOrchestrator({
+        jobs,
+        revisions,
+        control,
+        candidateRoot: root,
+      });
+      const options = {
+        jobs,
+        revisions,
+        orchestrator,
+        renderOptions: { candidateRoot: root },
+      };
 
-    const first = await pollOnce(options);
-    const second = await pollOnce(options);
+      const first = await pollOnce(options);
+      const second = await pollOnce(options);
 
-    expect(first?.status).toBe("applied");
-    expect(second?.status).toBe("applied");
-    expect(control.operations).toEqual([
-      "nginx:health",
-      "nginx:stage",
-      "nginx:validate",
-      "nginx:promote",
-      "nginx:reload",
-      "nginx:health",
-      "nginx:health",
-      "nginx:stage",
-      "nginx:validate",
-      "nginx:promote",
-      "nginx:reload",
-      "nginx:health",
-    ]);
-    expect(await jobs.list()).toHaveLength(2);
+      expect(first?.status).toBe("applied");
+      expect(second?.status).toBe("applied");
+      expect(control.operations).toEqual([
+        "nginx:health",
+        "nginx:stage",
+        "nginx:validate",
+        "nginx:promote",
+        "nginx:reload",
+        "nginx:health",
+        "nginx:health",
+        "nginx:stage",
+        "nginx:validate",
+        "nginx:promote",
+        "nginx:reload",
+        "nginx:health",
+      ]);
+      expect(await jobs.list()).toHaveLength(2);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   it("retries later drift after a failed reconciliation", async () => {
