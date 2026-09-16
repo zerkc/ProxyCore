@@ -1,9 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
-import type {
-  IngressAddresses,
-  TopologyRole,
-} from "./identity";
+import type { TopologyRole } from "./identity";
 import { SnapshotVersionV1, ReplicationVersionV1 } from "./identity";
+import type { IngressAddresses } from "./model";
 
 /**
  * ReplicatedSecret carries a secret-referenced-by-id and its cluster-KEK

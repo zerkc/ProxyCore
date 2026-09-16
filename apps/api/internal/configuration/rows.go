@@ -260,7 +260,10 @@ func scanJob(row scanner) (JobRecord, error) {
 		errorMessage *string
 	)
 	if err := row.Scan(
-		&job.ID, &job.RevisionID, &job.ActorUserID, &job.Target, &job.Status, &job.CorrelationID,
+		&job.ID, &job.RevisionID, &job.ActorUserID, &job.Target, &job.Status,
+		&job.Source, &job.SourcePrimaryID, &job.SourceNodeID, &job.SourceRevisionID,
+		&job.SnapshotContentHash, &job.SnapshotVersion, &job.ReplicationVersion,
+		&job.LeadershipGeneration, &job.CorrelationID,
 		&job.CreatedAt, &job.ClaimedAt, &job.StartedAt, &job.FinishedAt,
 		&validation, &applyOut, &healthOut, &errorMessage,
 	); err != nil {
@@ -275,8 +278,11 @@ func scanJob(row scanner) (JobRecord, error) {
 
 func listJobs(ctx context.Context, q querier) ([]JobRecord, error) {
 	rows, err := q.Query(ctx, `
-		select id::text, revision_id::text, actor_user_id::text, target::text, status::text, correlation_id,
-			created_at, claimed_at, started_at, finished_at, validation_output, apply_output, health_output, error_message
+		select id::text, revision_id::text, actor_user_id::text, target::text, status::text,
+			source::text, source_primary_id::text, source_node_id::text, source_revision_id::text,
+			snapshot_content_hash, snapshot_version, replication_version, leadership_generation,
+			correlation_id, created_at, claimed_at, started_at, finished_at,
+			validation_output, apply_output, health_output, error_message
 		from apply_jobs order by created_at desc
 	`)
 	if err != nil {
@@ -300,9 +306,17 @@ func getRevision(ctx context.Context, q querier, id string) (*RevisionRecord, er
 		snapshotRaw []byte
 	)
 	err := q.QueryRow(ctx, `
-		select id::text, revision_number, checksum, snapshot, actor_user_id::text, created_at, applied_at
+		select id::text, revision_number, checksum, snapshot, actor_user_id::text,
+			source::text, source_primary_id::text, source_node_id::text, source_revision_id::text,
+			snapshot_content_hash, snapshot_version, replication_version, leadership_generation,
+			created_at, applied_at
 		from config_revisions where id = $1
-	`, id).Scan(&rev.ID, &rev.RevisionNumber, &rev.Checksum, &snapshotRaw, &rev.ActorUserID, &rev.CreatedAt, &rev.AppliedAt)
+	`, id).Scan(
+		&rev.ID, &rev.RevisionNumber, &rev.Checksum, &snapshotRaw, &rev.ActorUserID,
+		&rev.Source, &rev.SourcePrimaryID, &rev.SourceNodeID, &rev.SourceRevisionID,
+		&rev.SnapshotContentHash, &rev.SnapshotVersion, &rev.ReplicationVersion,
+		&rev.LeadershipGeneration, &rev.CreatedAt, &rev.AppliedAt,
+	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}

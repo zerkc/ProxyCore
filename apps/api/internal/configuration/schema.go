@@ -181,6 +181,7 @@ func EnsureSchema(ctx context.Context, pool *pgxpool.Pool) error {
 		);`,
 		`create unique index if not exists applied_snapshots_content_hash_idx on applied_snapshots (content_hash);`,
 	}
+	statements = append(statements, phase2SchemaContract().Statements...)
 	for _, statement := range statements {
 		if _, err := pool.Exec(ctx, statement); err != nil {
 			return fmt.Errorf("ensure configuration schema: %w", err)

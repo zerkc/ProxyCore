@@ -120,6 +120,16 @@ async function executeDockerOperation(
       if (!(await container.inspect()).State?.Running) {
         throw new Error(`${request.service} container is not running`);
       }
+      if (request.service === "nginx") {
+        return {
+          ...(await probeNginxActiveConfig(
+            container,
+            candidateRoot,
+            request.candidatePath,
+          )),
+          revisionId: request.revisionId,
+        };
+      }
       return { status: "healthy" };
     case "rollback":
       if (request.service === "nginx") {
@@ -422,8 +432,98 @@ function writeTarOctal(
 export const NGINX_STABLE_CONFIG = "nginx-live.conf";
 export const NGINX_PREVIOUS_STABLE_CONFIG = "nginx-previous-live.conf";
 
+export type NginxActiveConfigReason =
+  | "baked-fallback"
+  | "missing-active-config"
+  | "missing-stable-config"
+  | "missing-candidate-config"
+  | "mismatched-config"
+  | "mismatched-candidate-config"
+  | "unmanaged-config"
+  | "invalid-active-config";
+
+export type NginxActiveConfigObservation =
+  | { status: "healthy" }
+  | { status: "drift"; reason: NginxActiveConfigReason };
+
+const NGINX_MANAGED_CONFIG_MARKER = "map $http_upgrade $connection_upgrade";
+const NGINX_BAKED_FALLBACK_MARKER = "return 503;";
+
 export function nginxLiveConfigPath(candidateRoot: string): string {
   return join(candidateRoot, NGINX_STABLE_CONFIG);
+}
+
+/**
+ * Classify the Nginx data plane against the persisted promoted configuration.
+ * The baked image fallback is valid Nginx, so it must be identified separately
+ * from process health before deciding whether reconciliation is needed.
+ */
+export function classifyNginxActiveConfig(
+  activeContents: Buffer | undefined,
+  stableContents: Buffer | undefined,
+  candidateContents?: Buffer,
+): NginxActiveConfigObservation {
+  if (!activeContents || activeContents.length === 0) {
+    return { status: "drift", reason: "missing-active-config" };
+  }
+
+  const activeText = activeContents.toString("utf8");
+  if (
+    activeText.includes(NGINX_BAKED_FALLBACK_MARKER) &&
+    !activeText.includes(NGINX_MANAGED_CONFIG_MARKER)
+  ) {
+    return { status: "drift", reason: "baked-fallback" };
+  }
+  if (!stableContents || stableContents.length === 0) {
+    return { status: "drift", reason: "missing-stable-config" };
+  }
+  const expectedContents =
+    arguments.length >= 3 ? candidateContents : stableContents;
+  if (!expectedContents || expectedContents.length === 0) {
+    return { status: "drift", reason: "missing-candidate-config" };
+  }
+  if (!activeContents.equals(stableContents)) {
+    return { status: "drift", reason: "mismatched-config" };
+  }
+  if (!activeContents.equals(expectedContents)) {
+    return { status: "drift", reason: "mismatched-candidate-config" };
+  }
+  if (!activeText.includes(NGINX_MANAGED_CONFIG_MARKER)) {
+    return { status: "drift", reason: "unmanaged-config" };
+  }
+  return { status: "healthy" };
+}
+
+async function probeNginxActiveConfig(
+  container: Docker.Container,
+  candidateRoot: string,
+  candidatePath: string,
+): Promise<NginxActiveConfigObservation> {
+  const activeContents = await readArchiveFile(
+    container,
+    "/etc/nginx/nginx.conf",
+  ).catch(() => undefined);
+  const stableContents = await readFileIfPresent(
+    nginxLiveConfigPath(candidateRoot),
+  );
+  const candidateContents = await readFileIfPresent(
+    join(candidatePath, "nginx.conf"),
+  );
+  const observation = classifyNginxActiveConfig(
+    activeContents,
+    stableContents,
+    candidateContents,
+  );
+  if (observation.status !== "healthy") {
+    return observation;
+  }
+
+  try {
+    await exec(container, ["nginx", "-t", "-c", "/etc/nginx/nginx.conf"]);
+  } catch {
+    return { status: "drift", reason: "invalid-active-config" };
+  }
+  return observation;
 }
 
 export function nginxPreviousStableConfigPath(candidateRoot: string): string {

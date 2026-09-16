@@ -423,8 +423,11 @@ func createApplyJobInTransaction(ctx context.Context, tx querier, actorUserID st
 	row := tx.QueryRow(ctx, `
 		insert into apply_jobs (id, revision_id, actor_user_id, target, status, correlation_id)
 		values ($1, $2, $3, 'combined', 'queued', $4)
-		returning id::text, revision_id::text, actor_user_id::text, target::text, status::text, correlation_id,
-			created_at, claimed_at, started_at, finished_at, validation_output, apply_output, health_output, error_message
+		returning id::text, revision_id::text, actor_user_id::text, target::text, status::text,
+			source::text, source_primary_id::text, source_node_id::text, source_revision_id::text,
+			snapshot_content_hash, snapshot_version, replication_version, leadership_generation,
+			correlation_id, created_at, claimed_at, started_at, finished_at,
+			validation_output, apply_output, health_output, error_message
 	`, jobID, revisionID, nullableString(actorUserID), newUUID())
 	job, err := scanJob(row)
 	if err != nil {
@@ -446,6 +449,26 @@ func nullableString(value string) any {
 		return nil
 	}
 	return value
+}
+
+// Phase2Transaction is the cross-process persistence port for enrollment and
+// synchronization. Implementations must execute every method inside the same
+// database transaction supplied by Phase2Store.WithTransaction.
+type Phase2Transaction interface {
+	LoadNodeState(ctx context.Context) (NodeStateRecord, error)
+	SaveNodeState(ctx context.Context, state NodeStateRecord) error
+	CreateEnrollmentAttempt(ctx context.Context, attempt EnrollmentAttemptRecord) error
+	TransitionEnrollmentAttempt(ctx context.Context, id string, from, to EnrollmentAttemptState) error
+	CreateSyncAttempt(ctx context.Context, attempt SyncAttemptRecord) error
+	RecordAppliedSnapshot(ctx context.Context, snapshot AppliedSnapshotRecord) error
+	RecordSnapshotAcknowledgement(ctx context.Context, ack SnapshotAcknowledgement) error
+	GetApplyJob(ctx context.Context, id string) (JobRecord, error)
+}
+
+// Phase2Store supplies a database transaction boundary. Row locks and unique
+// indexes, rather than process-local state, enforce cross-process invariants.
+type Phase2Store interface {
+	WithTransaction(ctx context.Context, fn func(Phase2Transaction) error) error
 }
 
 func marshalOrNull(value any) (any, error) {

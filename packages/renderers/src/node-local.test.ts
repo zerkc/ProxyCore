@@ -19,7 +19,6 @@ const minimalProxy: ProxySettings = {
 const dnsOnlyRecord: DnsRecord = {
   id: "rec-dns-only",
   name: "dns-only",
-  zoneName: "home.arpa",
   type: "A",
   value: "192.0.1.10",
   ttl: 300,
@@ -30,7 +29,6 @@ const dnsOnlyRecord: DnsRecord = {
 const proxiedRecord: DnsRecord = {
   id: "rec-proxied",
   name: "app",
-  zoneName: "home.arpa",
   type: "A",
   value: "192.0.1.20",
   ttl: 60,
@@ -42,7 +40,6 @@ const proxiedRecord: DnsRecord = {
 const proxiedCnameRecord: DnsRecord = {
   id: "rec-proxied-cname",
   name: "alias",
-  zoneName: "home.arpa",
   type: "CNAME",
   value: "origin.home.arpa",
   ttl: 60,

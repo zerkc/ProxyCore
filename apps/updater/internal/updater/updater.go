@@ -2,8 +2,9 @@
 //
 // The updater is intentionally not in charge of restarting itself — that is
 // handled by an external bootstrap (see scripts/updater-bootstrap.sh) because
-// a process cannot reliably replace its own running image. The updater only
-// owns the lifecycle of the api and worker services. After a successful
+// a process cannot reliably replace its own running image. The updater owns
+// the lifecycle of the services that carry application and data-plane recovery
+// behavior. After a successful
 // build/pull→migrate→restart→verify sequence it atomically writes a bootstrap
 // request to a shared volume so the sidecar can build/pull the new image and
 // recreate the updater container without a circular dependency.
@@ -49,7 +50,8 @@ type Options struct {
 	// compose` invocation so ${VAR} interpolation works inside the container.
 	EnvFile string
 	// Services is the list of services to build/pull and recreate during an
-	// update. The updater itself MUST NOT be in this list.
+	// update. The updater itself MUST NOT be in this list. Defaults include
+	// api, worker, control, and nginx because control/Nginx own recovery.
 	Services []string
 	// MigrateService is the name of the one-shot migration service defined
 	// in compose.yaml under profiles: [tools].
@@ -127,7 +129,7 @@ func New(opts Options) *Updater {
 		opts.ProjectName = "proxycore"
 	}
 	if len(opts.Services) == 0 {
-		opts.Services = []string{"api", "worker"}
+		opts.Services = []string{"api", "worker", "control", "nginx"}
 	}
 	if opts.MigrateService == "" {
 		opts.MigrateService = "migrate"

@@ -2,7 +2,12 @@ import { randomUUID } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { transitionJob, type ConfigurationSnapshot } from "@proxycore/domain";
-import type { JobRecord, JobStore, RevisionStore } from "@proxycore/db";
+import type {
+  JobRecord,
+  JobStore,
+  RevisionRecord,
+  RevisionStore,
+} from "@proxycore/db";
 import type {
   ControlRequest,
   ControlResponse,
@@ -28,6 +33,8 @@ export type CandidateRenderer = (
   | RenderedCandidate[]
   | Promise<RenderedCandidate | RenderedCandidate[]>;
 
+const NGINX_RECONCILIATION_CORRELATION = "reconcile-nginx:";
+
 export class ApplyOrchestrator {
   constructor(
     private readonly stores: {
@@ -38,6 +45,35 @@ export class ApplyOrchestrator {
       now?: () => Date;
     },
   ) {}
+
+  /**
+   * Reconcile one durable applied revision when the Nginx data plane has
+   * reverted to the valid baked fallback or lost its promoted configuration.
+   * The store atomically suppresses only an active duplicate; terminal repair
+   * jobs do not prevent a later drift event from being repaired.
+   */
+  async reconcileAppliedRevision(
+    revision: RevisionRecord,
+    render: CandidateRenderer,
+  ): Promise<JobRecord | undefined> {
+    if (!revision.appliedAt) return undefined;
+
+    const probe = await this.probeNginxActiveConfig(revision);
+    if (!nginxNeedsReconciliation(probe)) return undefined;
+
+    const correlationId = `${NGINX_RECONCILIATION_CORRELATION}${revision.id}`;
+    const claimedAt = this.now();
+    const repairJob = await this.stores.jobs.enqueueIfNotActive({
+      revisionId: revision.id,
+      target: "nginx",
+      status: "validating",
+      claimedAt,
+      startedAt: claimedAt,
+      correlationId,
+    });
+    if (!repairJob) return undefined;
+    return this.apply(repairJob.id, revision.snapshot, render);
+  }
 
   async apply(
     jobId: string,
@@ -110,7 +146,7 @@ export class ApplyOrchestrator {
         }
         const health = await this.request(candidate, job, "health");
         healthOutput[candidate.service] = health.output;
-        if (!health.ok) {
+        if (!health.ok || hasNginxDrift(health)) {
           const rollbackSucceeded = await this.rollback(promoted, job);
           if (rollbackSucceeded) {
             return await this.setStatus(job, "rolled-back", {
@@ -143,6 +179,23 @@ export class ApplyOrchestrator {
       }
       return await this.fail(job, errorMessage(error));
     }
+  }
+
+  private async probeNginxActiveConfig(
+    revision: RevisionRecord,
+  ): Promise<ControlResponse> {
+    return this.stores.control.execute({
+      requestId: randomUUID(),
+      operation: "health",
+      service: "nginx",
+      revisionId: revision.id,
+      checksum: revision.checksum,
+      candidatePath: join(
+        this.stores.candidateRoot ?? "/var/lib/proxycore/candidates",
+        revision.id,
+        "nginx",
+      ),
+    });
   }
 
   private async requireJob(jobId: string): Promise<JobRecord> {
@@ -210,13 +263,22 @@ export class ApplyOrchestrator {
   }
 }
 
+function hasNginxDrift(response: ControlResponse): boolean {
+  if (!response.output || typeof response.output !== "object") return false;
+  return (response.output as { status?: unknown }).status === "drift";
+}
+
+function nginxNeedsReconciliation(response: ControlResponse): boolean {
+  return response.ok && hasNginxDrift(response);
+}
+
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "Apply failed";
 }
 
 async function writeCandidate(
   candidate: RenderedCandidate,
-  candidateRoot = "/var/lib/proxycore",
+  candidateRoot = "/var/lib/proxycore/candidates",
 ): Promise<void> {
   if (!candidate.files) return;
   const normalizedRoot = candidateRoot.replace(/\/+$/, "");

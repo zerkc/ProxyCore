@@ -1,5 +1,5 @@
 change: primary-node-continuity
-status: implemented-phase-0-and-1
+status: archived-phase-0-and-1
 mode: hybrid
 delivery_strategy: exception-ok
 artifact_store: openspec
@@ -12,7 +12,7 @@ pre_resolved_decisions:
   certificate_renewal: primary-renews-node-retains-last-cert
   standalone_archive_retention_days: 30
   node_persistence: keep-postgresql
-current_phase: verify
+current_phase: archive
 completed_phases:
   - explore
   - propose
@@ -21,10 +21,9 @@ completed_phases:
   - tasks
   - apply-phase-0
   - apply-phase-1
-pending_phases:
   - verify
-  - sync
   - archive
+pending_phases: []
 artifacts:
   exploration: openspec/changes/primary-node-continuity/exploration.md
   proposal: openspec/changes/primary-node-continuity/proposal.md

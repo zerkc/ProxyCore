@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   assertCandidatePath,
+  classifyNginxActiveConfig,
   corednsLiveCorefilePath,
   extractFirstFileFromTar,
   findNewestLegacyNginxCandidate,
@@ -173,6 +174,63 @@ describe("Nginx stable-config persistence", () => {
     const info = await stat(candidateRoot);
     expect(info.isDirectory()).toBe(true);
   });
+});
+
+describe("Nginx active-config probe", () => {
+  const promoted = Buffer.from(
+    "events {}\nhttp {\n    map $http_upgrade $connection_upgrade { default upgrade; }\n}\n",
+  );
+  it("reports a matching promoted config as healthy", () => {
+    expect(classifyNginxActiveConfig(promoted, promoted)).toEqual({
+      status: "healthy",
+    });
+  });
+
+  it("reports the valid baked fallback as runtime drift", async () => {
+    const bakedFallback = await readFile(
+      join(process.cwd(), "infra", "nginx", "nginx.conf"),
+    );
+    expect(classifyNginxActiveConfig(bakedFallback, promoted)).toEqual({
+      status: "drift",
+      reason: "baked-fallback",
+    });
+  });
+
+  it("reports a missing current candidate as runtime drift", () => {
+    expect(classifyNginxActiveConfig(promoted, promoted, undefined)).toEqual({
+      status: "drift",
+      reason: "missing-candidate-config",
+    });
+  });
+
+  it("reports an active config from an older candidate as runtime drift", () => {
+    const older = Buffer.from(
+      "events {}\nhttp {\n    map $http_upgrade $connection_upgrade { default close; }\n}\n",
+    );
+    expect(classifyNginxActiveConfig(older, older, promoted)).toEqual({
+      status: "drift",
+      reason: "mismatched-candidate-config",
+    });
+  });
+
+  it.each([
+    ["missing active config", undefined, promoted, "missing-active-config"],
+    ["missing stable config", promoted, undefined, "missing-stable-config"],
+    [
+      "mismatched configs",
+      Buffer.from("different"),
+      promoted,
+      "mismatched-config",
+    ],
+  ] as const)(
+    "reports %s as runtime drift",
+    (_name, active, stable, reason) => {
+      expect(classifyNginxActiveConfig(active, stable)).toEqual({
+        status: "drift",
+        reason,
+      });
+    },
+  );
 });
 
 describe("Nginx legacy candidate discovery", () => {

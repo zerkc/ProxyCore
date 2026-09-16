@@ -160,6 +160,47 @@ func TestApplyHappyPath(t *testing.T) {
 	}
 }
 
+func TestApplyDefaultsIncludeControlAndNginxRecoveryOwners(t *testing.T) {
+	fc := &fakeCommander{}
+	u := New(Options{
+		Exec: fc.Exec,
+		HTTPGet: func(ctx context.Context, url string) (int, error) {
+			return 200, nil
+		},
+		Logger: &recordingLogger{},
+	})
+
+	status, err := u.Apply(context.Background(), "0.1.5")
+	if err != nil {
+		t.Fatalf("Apply returned error: %v", err)
+	}
+	if status.Status != "ok" {
+		t.Fatalf("status=%q want ok", status.Status)
+	}
+
+	fc.mu.Lock()
+	calls := append([]call(nil), fc.calls...)
+	fc.mu.Unlock()
+	for _, subcommand := range []string{"pull", "up"} {
+		var args []string
+		for _, c := range calls {
+			if c.Name == "docker" && containsArg(c.Args, subcommand) {
+				args = c.Args
+				break
+			}
+		}
+		if args == nil {
+			t.Fatalf("did not record docker compose %s", subcommand)
+		}
+		joined := strings.Join(args, " ")
+		for _, service := range []string{"api", "worker", "control", "nginx"} {
+			if !strings.Contains(joined, service) {
+				t.Errorf("compose %s args %q do not include service %q", subcommand, joined, service)
+			}
+		}
+	}
+}
+
 // bootstrapRequest mirrors the JSON written by the updater after a successful
 // apply. Defined here so the test can parse the request file without
 // importing the internal package layout.
@@ -760,6 +801,15 @@ func TestApplyConcurrentRunRejected(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("first Apply did not return after release")
 	}
+}
+
+func containsArg(args []string, want string) bool {
+	for _, arg := range args {
+		if arg == want {
+			return true
+		}
+	}
+	return false
 }
 
 func stepNames(steps []StepResult) []string {

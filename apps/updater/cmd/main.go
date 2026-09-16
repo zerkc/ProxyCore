@@ -152,7 +152,7 @@ func loadConfig() (*config, error) {
 	if s := strings.TrimSpace(os.Getenv("PROXYCORE_UPDATER_SERVICES")); s != "" {
 		cfg.Services = splitNonEmpty(s, ", ")
 	} else {
-		cfg.Services = []string{"api", "worker"}
+		cfg.Services = []string{"api", "worker", "control", "nginx"}
 	}
 	cfg.BootstrapRequestFile = os.Getenv("PROXYCORE_BOOTSTRAP_REQUEST_FILE")
 	cfg.SourceDir = strings.TrimSpace(os.Getenv("PROXYCORE_SOURCE_DIR"))

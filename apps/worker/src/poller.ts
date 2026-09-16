@@ -1,4 +1,9 @@
-import type { JobRecord, JobStore, RevisionStore } from "@proxycore/db";
+import type {
+  JobRecord,
+  JobStore,
+  RevisionRecord,
+  RevisionStore,
+} from "@proxycore/db";
 import { ApplyOrchestrator } from "./apply";
 import { renderJobCandidates, type WorkerRenderOptions } from "./render";
 
@@ -19,7 +24,19 @@ export async function pollOnce(
     options.now?.() ?? new Date(),
   );
   const job = await options.jobs.claimNext();
-  if (!job) return undefined;
+  if (!job) {
+    const jobs = await options.jobs.list();
+    if (jobs.some(isActiveJob)) return undefined;
+
+    const appliedRevision = await latestAppliedRevision(options.revisions, jobs);
+    if (!appliedRevision) return undefined;
+
+    return options.orchestrator.reconcileAppliedRevision(
+      appliedRevision,
+      async (snapshot, repairJob) =>
+        renderJobCandidates(snapshot, repairJob, options.renderOptions),
+    );
+  }
 
   const revision = await options.revisions.get(job.revisionId);
   if (!revision) {
@@ -109,6 +126,34 @@ export async function runWorkerLoop(options: WorkerLoopOptions): Promise<void> {
       await wait(intervalMs, signal);
     }
   }
+}
+
+function isActiveJob(job: JobRecord): boolean {
+  return (
+    job.status === "queued" ||
+    job.status === "validating" ||
+    job.status === "applying"
+  );
+}
+
+async function latestAppliedRevision(
+  revisions: RevisionStore,
+  jobs: JobRecord[],
+): Promise<RevisionRecord | undefined> {
+  const latest = await revisions.latest();
+  if (latest?.appliedAt) return latest;
+
+  const appliedRevisions = await Promise.all(
+    jobs
+      .filter((job) => job.status === "applied")
+      .map((job) => revisions.get(job.revisionId)),
+  );
+  return appliedRevisions
+    .filter((revision): revision is RevisionRecord => Boolean(revision?.appliedAt))
+    .sort(
+      (left, right) =>
+        (right.appliedAt?.getTime() ?? 0) - (left.appliedAt?.getTime() ?? 0),
+    )[0];
 }
 
 function wait(milliseconds: number, signal?: AbortSignal): Promise<void> {

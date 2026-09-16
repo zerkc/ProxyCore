@@ -29,6 +29,13 @@
       "when": 1786386400000,
       "tag": "0003_password_change_required",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1789107380950,
+      "tag": "0004_primary_node_continuity_phase_2",
+      "breakpoints": true
     }
   ]
 }

@@ -30,6 +30,54 @@ describe("in-memory persistence ports", () => {
     expect((await store.claimNext("coredns"))?.correlationId).toBe("corr-2");
   });
 
+  it("atomically suppresses active duplicates but permits later retries", async () => {
+    const store = new InMemoryJobStore();
+    const input = {
+      revisionId: "revision-1",
+      target: "nginx" as const,
+      correlationId: "reconcile-nginx:revision-1",
+    };
+
+    const [first, duplicate] = await Promise.all([
+      store.enqueueIfNotActive(input),
+      store.enqueueIfNotActive(input),
+    ]);
+    expect([first, duplicate].filter(Boolean)).toHaveLength(1);
+
+    const active = first ?? duplicate;
+    if (!active) throw new Error("expected one reconciliation job");
+    await store.update(active.id, { status: "failed" });
+    const retry = await store.enqueueIfNotActive(input);
+    expect(retry).toBeDefined();
+    expect(await store.enqueueIfNotActive(input)).toBeUndefined();
+
+    await store.update(retry!.id, { status: "applied" });
+    expect(await store.enqueueIfNotActive(input)).toBeDefined();
+  });
+
+  it("lets claimed ordinary work win over reconciliation reservation", async () => {
+    const store = new InMemoryJobStore();
+    await store.enqueue({
+      revisionId: "revision-ordinary",
+      target: "combined",
+      correlationId: "ordinary-1",
+    });
+    const ordinary = await store.claimNext();
+    expect(ordinary?.status).toBe("validating");
+
+    const repair = await store.enqueueIfNotActive({
+      revisionId: "revision-1",
+      target: "nginx",
+      status: "validating",
+      claimedAt: new Date(),
+      startedAt: new Date(),
+      correlationId: "reconcile-nginx:revision-1",
+    });
+
+    expect(repair).toBeUndefined();
+    expect(await store.list()).toHaveLength(1);
+  });
+
   it("requeues a claim whose lease expired", async () => {
     const store = new InMemoryJobStore();
     const job = await store.enqueue({

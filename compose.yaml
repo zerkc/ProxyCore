@@ -57,7 +57,7 @@ services:
 
   # Self-update orchestrator. Reaches the docker socket + the compose project
   # so it can build (local mode) or pull (registry mode), migrate, and restart
-  # api/worker. When the update succeeds
+  # the application and Nginx recovery owners. When the update succeeds
   # it writes a bootstrap request to the shared volume; the updater-bootstrap
   # sidecar (below) watches that file and replaces this container's image.
   # Talks to the api over the internal `control` network on PROXYCORE_UPDATER_ADDR
@@ -76,7 +76,7 @@ services:
       PROXYCORE_COMPOSE_FILE: ${PROXYCORE_HOST_HOME:-${PWD}}/compose.yaml
       PROXYCORE_ENV_FILE: ${PROXYCORE_HOST_HOME:-${PWD}}/.env
       PROXYCORE_COMPOSE_PROJECT: ${COMPOSE_PROJECT_NAME:-proxycore}
-      PROXYCORE_UPDATER_SERVICES: "api worker"
+      PROXYCORE_UPDATER_SERVICES: "api worker control nginx"
       PROXYCORE_MIGRATE_SERVICE: migrate
       PROXYCORE_HEALTH_URL: http://api:3000/api/health
       PROXYCORE_HEALTH_TIMEOUT: ${PROXYCORE_HEALTH_TIMEOUT:-90s}

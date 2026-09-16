@@ -9,31 +9,47 @@ import (
 
 // JobRecord is an apply job row.
 type JobRecord struct {
-	ID               string          `json:"id"`
-	RevisionID       string          `json:"revisionId"`
-	ActorUserID      *string         `json:"actorUserId,omitempty"`
-	Target           string          `json:"target"`
-	Status           string          `json:"status"`
-	CorrelationID    string          `json:"correlationId"`
-	CreatedAt        time.Time       `json:"createdAt"`
-	ClaimedAt        *time.Time      `json:"claimedAt,omitempty"`
-	StartedAt        *time.Time      `json:"startedAt,omitempty"`
-	FinishedAt       *time.Time      `json:"finishedAt,omitempty"`
-	ValidationOutput json.RawMessage `json:"validationOutput,omitempty"`
-	ApplyOutput      json.RawMessage `json:"applyOutput,omitempty"`
-	HealthOutput     json.RawMessage `json:"healthOutput,omitempty"`
-	ErrorMessage     *string         `json:"errorMessage,omitempty"`
+	ID                   string            `json:"id"`
+	RevisionID           string            `json:"revisionId"`
+	ActorUserID          *string           `json:"actorUserId,omitempty"`
+	Target               string            `json:"target"`
+	Status               string            `json:"status"`
+	Source               PersistenceSource `json:"source"`
+	SourcePrimaryID      *string           `json:"sourcePrimaryId,omitempty"`
+	SourceNodeID         *string           `json:"sourceNodeId,omitempty"`
+	SourceRevisionID     *string           `json:"sourceRevisionId,omitempty"`
+	SnapshotContentHash  *string           `json:"snapshotContentHash,omitempty"`
+	SnapshotVersion      *int              `json:"snapshotVersion,omitempty"`
+	ReplicationVersion   *int              `json:"replicationVersion,omitempty"`
+	LeadershipGeneration *int64            `json:"leadershipGeneration,omitempty"`
+	CorrelationID        string            `json:"correlationId"`
+	CreatedAt            time.Time         `json:"createdAt"`
+	ClaimedAt            *time.Time        `json:"claimedAt,omitempty"`
+	StartedAt            *time.Time        `json:"startedAt,omitempty"`
+	FinishedAt           *time.Time        `json:"finishedAt,omitempty"`
+	ValidationOutput     json.RawMessage   `json:"validationOutput,omitempty"`
+	ApplyOutput          json.RawMessage   `json:"applyOutput,omitempty"`
+	HealthOutput         json.RawMessage   `json:"healthOutput,omitempty"`
+	ErrorMessage         *string           `json:"errorMessage,omitempty"`
 }
 
 // RevisionRecord is a config revision row.
 type RevisionRecord struct {
-	ID             string     `json:"id"`
-	RevisionNumber int        `json:"revisionNumber"`
-	Checksum       string     `json:"checksum"`
-	Snapshot       any        `json:"snapshot"`
-	ActorUserID    *string    `json:"actorUserId,omitempty"`
-	CreatedAt      time.Time  `json:"createdAt"`
-	AppliedAt      *time.Time `json:"appliedAt,omitempty"`
+	ID                   string            `json:"id"`
+	RevisionNumber       int               `json:"revisionNumber"`
+	Checksum             string            `json:"checksum"`
+	Snapshot             any               `json:"snapshot"`
+	ActorUserID          *string           `json:"actorUserId,omitempty"`
+	Source               PersistenceSource `json:"source"`
+	SourcePrimaryID      *string           `json:"sourcePrimaryId,omitempty"`
+	SourceNodeID         *string           `json:"sourceNodeId,omitempty"`
+	SourceRevisionID     *string           `json:"sourceRevisionId,omitempty"`
+	SnapshotContentHash  *string           `json:"snapshotContentHash,omitempty"`
+	SnapshotVersion      *int              `json:"snapshotVersion,omitempty"`
+	ReplicationVersion   *int              `json:"replicationVersion,omitempty"`
+	LeadershipGeneration *int64            `json:"leadershipGeneration,omitempty"`
+	CreatedAt            time.Time         `json:"createdAt"`
+	AppliedAt            *time.Time        `json:"appliedAt,omitempty"`
 }
 
 // ApplyResult is the {revisionId, job} returned by an enqueue.

@@ -26,7 +26,6 @@ import {
   type ForwardingRule,
   type IngressAddresses,
   type InstallationSettings,
-  type JobStatus,
   type ResolverPool,
   type StreamRoute,
   type ZoneState,
@@ -38,21 +37,34 @@ export type RecordMutationInput = Omit<DnsRecordInput, "id" | "proxy"> & {
 };
 import type { ProxyCoreDatabase } from "./index";
 import {
+  appliedSnapshots,
   applyJobs,
   certificates,
   configRevisions,
   dnsRecords,
+  enrollmentAttempts,
+  nodeSnapshotAcks,
+  nodeState,
+  syncAttempts,
   installationSettings,
   providerConnections,
   streamRoutes,
   zones,
 } from "./schema";
 import type {
+  AppliedSnapshotRecord,
+  ContinuityPersistencePort,
+  ContinuityTransactionPort,
+  EnrollmentAttemptRecord,
+  JobEnqueueInput,
   JobRecord,
   JobStore,
   JobTarget,
+  NodeStateRecord,
   RevisionRecord,
   RevisionStore,
+  SnapshotAcknowledgement,
+  SyncAttemptRecord,
 } from "./ports";
 import { JOB_NOTIFICATION_CHANNEL } from "./notifications";
 import { PgSecretStore } from "./secret-store";
@@ -82,6 +94,46 @@ export async function notifyJob(
   await db.execute(
     sql`SELECT pg_notify(${JOB_NOTIFICATION_CHANNEL}, ${jobId})`,
   );
+}
+
+async function lockRevision(db: NotificationExecutor): Promise<void> {
+  await db.execute(sql`SELECT pg_advisory_xact_lock(${REVISION_LOCK_KEY})`);
+}
+
+// This primitive deliberately does not acquire the advisory lock. It is used
+// by both standalone locked operations and callers already inside that lock.
+async function insertJob(
+  db: Pick<ProxyCoreDatabase, "insert" | "execute">,
+  job: JobEnqueueInput,
+): Promise<JobRecord> {
+  const [row] = await db
+    .insert(applyJobs)
+    .values({
+      id: randomUUID(),
+      revisionId: job.revisionId,
+      actorUserId: job.actorUserId,
+      target: job.target,
+      status: job.status ?? "queued",
+      source: job.source ?? "ordinary",
+      sourcePrimaryId: job.sourcePrimaryId,
+      sourceNodeId: job.sourceNodeId,
+      sourceRevisionId: job.sourceRevisionId,
+      snapshotContentHash: job.snapshotContentHash,
+      snapshotVersion: job.snapshotVersion,
+      replicationVersion: job.replicationVersion,
+      leadershipGeneration: job.leadershipGeneration,
+      correlationId: job.correlationId,
+      validationOutput: job.validationOutput,
+      applyOutput: job.applyOutput,
+      healthOutput: job.healthOutput,
+      errorMessage: job.errorMessage,
+      claimedAt: job.claimedAt,
+      startedAt: job.startedAt,
+      finishedAt: job.finishedAt,
+    })
+    .returning();
+  await notifyJob(db, row.id);
+  return toJob(row);
 }
 
 export class PgRevisionStore implements RevisionStore {
@@ -115,6 +167,7 @@ export class PgRevisionStore implements RevisionStore {
         checksum,
         snapshot: normalized,
         actorUserId,
+        source: "ordinary",
       })
       .returning();
     return toRevision(row);
@@ -162,32 +215,32 @@ export class PgRevisionStore implements RevisionStore {
 export class PgJobStore implements JobStore {
   constructor(private readonly db: ProxyCoreDatabase) {}
 
-  async enqueue(
-    job: Omit<JobRecord, "id" | "status" | "createdAt"> & {
-      status?: JobStatus;
-    },
-  ): Promise<JobRecord> {
+  async enqueue(job: JobEnqueueInput): Promise<JobRecord> {
     return this.db.transaction(async (tx) => {
-      const [row] = await tx
-        .insert(applyJobs)
-        .values({
-          id: randomUUID(),
-          revisionId: job.revisionId,
-          actorUserId: job.actorUserId,
-          target: job.target,
-          status: job.status ?? "queued",
-          correlationId: job.correlationId,
-          validationOutput: job.validationOutput,
-          applyOutput: job.applyOutput,
-          healthOutput: job.healthOutput,
-          errorMessage: job.errorMessage,
-          claimedAt: job.claimedAt,
-          startedAt: job.startedAt,
-          finishedAt: job.finishedAt,
-        })
-        .returning();
-      await notifyJob(tx, row.id);
-      return toJob(row);
+      await lockRevision(tx);
+      return insertJob(tx, job);
+    });
+  }
+
+  async enqueueIfNotActive(
+    job: JobEnqueueInput,
+  ): Promise<JobRecord | undefined> {
+    return this.db.transaction(async (tx) => {
+      // Serialize the queue check with all ordinary enqueues and claimNext.
+      await lockRevision(tx);
+      const blocked = await tx
+        .select({ id: applyJobs.id })
+        .from(applyJobs)
+        .where(
+          or(
+            eq(applyJobs.status, "queued"),
+            eq(applyJobs.status, "validating"),
+            eq(applyJobs.status, "applying"),
+          ),
+        )
+        .limit(1);
+      if (blocked[0]) return undefined;
+      return insertJob(tx, job);
     });
   }
 
@@ -202,7 +255,7 @@ export class PgJobStore implements JobStore {
 
   async claimNext(target?: JobTarget): Promise<JobRecord | undefined> {
     return this.db.transaction(async (tx) => {
-      await tx.execute(sql`SELECT pg_advisory_xact_lock(${REVISION_LOCK_KEY})`);
+      await lockRevision(tx);
       const rows = await tx
         .select()
         .from(applyJobs)
@@ -282,6 +335,296 @@ export class PgJobStore implements JobStore {
       .orderBy(desc(applyJobs.createdAt));
     return rows.map(toJob);
   }
+}
+
+type ContinuityExecutor = Pick<
+  ProxyCoreDatabase,
+  "select" | "insert" | "update"
+>;
+
+export class PgContinuityPersistence implements ContinuityPersistencePort {
+  constructor(private readonly db: ProxyCoreDatabase) {}
+
+  async withTransaction<T>(
+    work: (tx: ContinuityTransactionPort) => Promise<T>,
+  ): Promise<T> {
+    return this.db.transaction((tx) =>
+      work(new PgContinuityTransaction(tx as unknown as ContinuityExecutor)),
+    );
+  }
+}
+
+class PgContinuityTransaction implements ContinuityTransactionPort {
+  constructor(private readonly db: ContinuityExecutor) {}
+
+  async getNodeState(): Promise<NodeStateRecord | undefined> {
+    const [row] = await this.db
+      .select()
+      .from(nodeState)
+      .where(eq(nodeState.id, INSTALLATION_ID))
+      .limit(1);
+    return row ? toNodeState(row) : undefined;
+  }
+
+  async saveNodeState(state: NodeStateRecord): Promise<void> {
+    await this.db
+      .insert(nodeState)
+      .values({
+        id: state.id,
+        enrolledAt: state.enrolledAt,
+        enrollmentPrimaryId: state.enrollmentPrimaryId,
+        lastSeenAt: state.lastSeenAt,
+        lastAppliedSnapshotId: state.lastAppliedSnapshotId,
+        enrollmentAttemptId: state.enrollmentAttemptId,
+        primaryUrl: state.primaryUrl,
+        primaryInstallationId: state.primaryInstallationId,
+        primaryTlsSpkiSha256: state.primaryTlsSpkiSha256,
+        credentialId: state.credentialId,
+        syncEnabled: state.syncEnabled,
+        lastAttemptAt: state.lastAttemptAt,
+        lastSuccessAt: state.lastSuccessAt,
+        consecutiveFailures: state.consecutiveFailures,
+        nextAttemptAt: state.nextAttemptAt,
+        lastErrorCode: state.lastErrorCode,
+        updatedAt: state.updatedAt,
+      })
+      .onConflictDoUpdate({
+        target: nodeState.id,
+        set: {
+          enrolledAt: state.enrolledAt,
+          enrollmentPrimaryId: state.enrollmentPrimaryId,
+          lastSeenAt: state.lastSeenAt,
+          lastAppliedSnapshotId: state.lastAppliedSnapshotId,
+          enrollmentAttemptId: state.enrollmentAttemptId,
+          primaryUrl: state.primaryUrl,
+          primaryInstallationId: state.primaryInstallationId,
+          primaryTlsSpkiSha256: state.primaryTlsSpkiSha256,
+          credentialId: state.credentialId,
+          syncEnabled: state.syncEnabled,
+          lastAttemptAt: state.lastAttemptAt,
+          lastSuccessAt: state.lastSuccessAt,
+          consecutiveFailures: state.consecutiveFailures,
+          nextAttemptAt: state.nextAttemptAt,
+          lastErrorCode: state.lastErrorCode,
+          updatedAt: state.updatedAt,
+        },
+      });
+  }
+
+  async createEnrollmentAttempt(
+    attempt: EnrollmentAttemptRecord,
+  ): Promise<void> {
+    if (!isEnrollmentAttemptState(attempt.state)) {
+      throw new Error(`invalid enrollment attempt state: ${attempt.state}`);
+    }
+    await this.db.insert(enrollmentAttempts).values({
+      id: attempt.id,
+      state: attempt.state,
+      primaryUrl: attempt.primaryUrl,
+      expectedPrimaryId: attempt.expectedPrimaryId,
+      verifiedPrimaryId: attempt.verifiedPrimaryId,
+      verifiedPrimaryNodeId: attempt.verifiedPrimaryNodeId,
+      verifiedLeadershipGeneration: attempt.verifiedLeadershipGeneration,
+      verifiedPrimaryTlsSpkiSha256: attempt.verifiedPrimaryTlsSpkiSha256,
+      verifiedPrimaryCaFingerprint: attempt.verifiedPrimaryCaFingerprint,
+      previewDigest: attempt.previewDigest,
+      localNodeIp: attempt.localNodeIp,
+      archiveId: attempt.archiveId,
+      ephemeralPrivateKeyWrapped: attempt.ephemeralPrivateKeyWrapped,
+      bootstrapPayload: attempt.bootstrapPayload
+        ? new TextDecoder().decode(attempt.bootstrapPayload)
+        : null,
+      nodeCredentialSecretId: attempt.nodeCredentialSecretId,
+      clusterKeyId: attempt.clusterKeyId,
+      initialSnapshotHash: attempt.initialSnapshotHash,
+      initialSnapshotRevisionId: attempt.initialSnapshotRevisionId,
+      initialApplyJobId: attempt.initialApplyJobId,
+      failureCode: attempt.failureCode,
+      confirmedAt: attempt.confirmedAt,
+      createdAt: attempt.createdAt,
+      updatedAt: attempt.updatedAt,
+    });
+  }
+
+  async getEnrollmentAttempt(
+    id: string,
+  ): Promise<EnrollmentAttemptRecord | undefined> {
+    const [row] = await this.db
+      .select()
+      .from(enrollmentAttempts)
+      .where(eq(enrollmentAttempts.id, id))
+      .limit(1);
+    return row ? toEnrollmentAttempt(row) : undefined;
+  }
+
+  async recordSyncAttempt(attempt: SyncAttemptRecord): Promise<void> {
+    await this.db.insert(syncAttempts).values({
+      id: attempt.id,
+      nodeId: attempt.nodeId,
+      trigger: attempt.trigger,
+      status: attempt.status,
+      sourcePrimaryId: attempt.sourcePrimaryId,
+      leadershipGeneration: attempt.leadershipGeneration,
+      snapshotVersion: attempt.snapshotVersion,
+      replicationVersion: attempt.replicationVersion,
+      contentHash: attempt.contentHash,
+      revisionId: attempt.revisionId,
+      applyJobId: attempt.applyJobId,
+      resultCode: attempt.resultCode,
+      startedAt: attempt.startedAt,
+      finishedAt: attempt.finishedAt,
+      createdAt: attempt.createdAt,
+      updatedAt: attempt.updatedAt,
+    });
+  }
+
+  async recordAppliedSnapshot(snapshot: AppliedSnapshotRecord): Promise<void> {
+    await this.db.insert(appliedSnapshots).values({
+      id: snapshot.id,
+      sourcePrimaryId: snapshot.sourcePrimaryId,
+      leadershipGeneration: snapshot.leadershipGeneration,
+      snapshotVersion: snapshot.snapshotVersion,
+      replicationVersion: snapshot.replicationVersion,
+      contentHash: snapshot.contentHash,
+      revisionId: snapshot.revisionId,
+      status: snapshot.status,
+      applyJobId: snapshot.applyJobId,
+      failureCode: snapshot.failureCode,
+      appliedAt: snapshot.appliedAt,
+      discardedAt: snapshot.discardedAt,
+    });
+  }
+
+  async recordSnapshotAcknowledgement(
+    ack: SnapshotAcknowledgement,
+  ): Promise<void> {
+    await this.db
+      .insert(nodeSnapshotAcks)
+      .values({
+        nodeId: ack.nodeId,
+        contentHash: ack.contentHash,
+        snapshotVersion: ack.snapshotVersion,
+        replicationVersion: ack.replicationVersion,
+        revisionId: ack.revisionId,
+        leadershipGeneration: ack.leadershipGeneration,
+        appliedAt: ack.appliedAt,
+        receivedAt: ack.receivedAt,
+      })
+      .onConflictDoUpdate({
+        target: [nodeSnapshotAcks.nodeId, nodeSnapshotAcks.contentHash],
+        set: {
+          snapshotVersion: ack.snapshotVersion,
+          replicationVersion: ack.replicationVersion,
+          revisionId: ack.revisionId,
+          leadershipGeneration: ack.leadershipGeneration,
+          appliedAt: ack.appliedAt,
+          receivedAt: ack.receivedAt,
+        },
+      });
+  }
+
+  async getSnapshotAcknowledgement(
+    nodeId: string,
+    contentHash: string,
+  ): Promise<SnapshotAcknowledgement | undefined> {
+    const [row] = await this.db
+      .select()
+      .from(nodeSnapshotAcks)
+      .where(
+        and(
+          eq(nodeSnapshotAcks.nodeId, nodeId),
+          eq(nodeSnapshotAcks.contentHash, contentHash),
+        ),
+      )
+      .limit(1);
+    return row ? toSnapshotAcknowledgement(row) : undefined;
+  }
+}
+
+function isEnrollmentAttemptState(
+  value: string,
+): value is EnrollmentAttemptRecord["state"] {
+  return [
+    "draft",
+    "verified",
+    "confirmed",
+    "exchanged",
+    "archived",
+    "initial-apply-pending",
+    "committed",
+    "cancelled",
+    "recoverable",
+    "failed",
+  ].includes(value);
+}
+
+function toNodeState(row: typeof nodeState.$inferSelect): NodeStateRecord {
+  return {
+    id: row.id,
+    enrolledAt: row.enrolledAt ?? undefined,
+    enrollmentPrimaryId: row.enrollmentPrimaryId ?? undefined,
+    lastSeenAt: row.lastSeenAt ?? undefined,
+    lastAppliedSnapshotId: row.lastAppliedSnapshotId ?? undefined,
+    enrollmentAttemptId: row.enrollmentAttemptId ?? undefined,
+    primaryUrl: row.primaryUrl ?? undefined,
+    primaryInstallationId: row.primaryInstallationId ?? undefined,
+    primaryTlsSpkiSha256: row.primaryTlsSpkiSha256 ?? undefined,
+    credentialId: row.credentialId ?? undefined,
+    syncEnabled: row.syncEnabled,
+    lastAttemptAt: row.lastAttemptAt ?? undefined,
+    lastSuccessAt: row.lastSuccessAt ?? undefined,
+    consecutiveFailures: row.consecutiveFailures,
+    nextAttemptAt: row.nextAttemptAt ?? undefined,
+    lastErrorCode: row.lastErrorCode ?? undefined,
+    updatedAt: row.updatedAt,
+  };
+}
+
+function toEnrollmentAttempt(
+  row: typeof enrollmentAttempts.$inferSelect,
+): EnrollmentAttemptRecord {
+  return {
+    id: row.id,
+    state: row.state,
+    primaryUrl: row.primaryUrl,
+    expectedPrimaryId: row.expectedPrimaryId ?? undefined,
+    verifiedPrimaryId: row.verifiedPrimaryId ?? undefined,
+    verifiedPrimaryNodeId: row.verifiedPrimaryNodeId ?? undefined,
+    verifiedLeadershipGeneration: row.verifiedLeadershipGeneration ?? undefined,
+    verifiedPrimaryTlsSpkiSha256: row.verifiedPrimaryTlsSpkiSha256 ?? undefined,
+    verifiedPrimaryCaFingerprint: row.verifiedPrimaryCaFingerprint ?? undefined,
+    previewDigest: row.previewDigest ?? undefined,
+    localNodeIp: row.localNodeIp,
+    archiveId: row.archiveId ?? undefined,
+    ephemeralPrivateKeyWrapped: row.ephemeralPrivateKeyWrapped,
+    bootstrapPayload: row.bootstrapPayload
+      ? new TextEncoder().encode(row.bootstrapPayload)
+      : undefined,
+    nodeCredentialSecretId: row.nodeCredentialSecretId ?? undefined,
+    clusterKeyId: row.clusterKeyId ?? undefined,
+    initialSnapshotHash: row.initialSnapshotHash ?? undefined,
+    initialSnapshotRevisionId: row.initialSnapshotRevisionId ?? undefined,
+    initialApplyJobId: row.initialApplyJobId ?? undefined,
+    failureCode: row.failureCode ?? undefined,
+    confirmedAt: row.confirmedAt ?? undefined,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  };
+}
+
+function toSnapshotAcknowledgement(
+  row: typeof nodeSnapshotAcks.$inferSelect,
+): SnapshotAcknowledgement {
+  return {
+    nodeId: row.nodeId,
+    contentHash: row.contentHash,
+    snapshotVersion: row.snapshotVersion,
+    replicationVersion: row.replicationVersion,
+    revisionId: row.revisionId,
+    leadershipGeneration: row.leadershipGeneration,
+    appliedAt: row.appliedAt,
+    receivedAt: row.receivedAt,
+  };
 }
 
 export class PgConfigurationStore {
@@ -815,7 +1158,7 @@ async function createApplyJobInTransaction(
   actorUserId: string,
 ): Promise<{ revisionId: string; job: JobRecord }> {
   await ensureSettings(tx);
-  await tx.execute(sql`SELECT pg_advisory_xact_lock(${REVISION_LOCK_KEY})`);
+  await lockRevision(tx);
   const settings = await tx
     .select()
     .from(installationSettings)
@@ -860,19 +1203,13 @@ async function createApplyJobInTransaction(
     .update(installationSettings)
     .set({ currentDesiredRevisionId: revisionId, updatedAt: new Date() })
     .where(eq(installationSettings.id, settings[0].id));
-  const [jobRow] = await tx
-    .insert(applyJobs)
-    .values({
-      id: randomUUID(),
-      revisionId,
-      actorUserId,
-      target: "combined",
-      status: "queued",
-      correlationId: randomUUID(),
-    })
-    .returning();
-  await notifyJob(tx, jobRow.id);
-  return { revisionId, job: toJob(jobRow) };
+  const job = await insertJob(tx, {
+    revisionId,
+    actorUserId,
+    target: "combined",
+    correlationId: randomUUID(),
+  });
+  return { revisionId, job };
 }
 
 async function ensureSettings(
@@ -1081,6 +1418,14 @@ function toRevision(row: typeof configRevisions.$inferSelect): RevisionRecord {
     checksum: row.checksum,
     snapshot: row.snapshot as ConfigurationSnapshot,
     actorUserId: row.actorUserId ?? undefined,
+    source: row.source,
+    sourcePrimaryId: row.sourcePrimaryId ?? undefined,
+    sourceNodeId: row.sourceNodeId ?? undefined,
+    sourceRevisionId: row.sourceRevisionId ?? undefined,
+    snapshotContentHash: row.snapshotContentHash ?? undefined,
+    snapshotVersion: row.snapshotVersion ?? undefined,
+    replicationVersion: row.replicationVersion ?? undefined,
+    leadershipGeneration: row.leadershipGeneration ?? undefined,
     createdAt: row.createdAt,
     appliedAt: row.appliedAt ?? undefined,
   };
@@ -1093,6 +1438,14 @@ function toJob(row: typeof applyJobs.$inferSelect): JobRecord {
     actorUserId: row.actorUserId ?? undefined,
     target: row.target,
     status: row.status,
+    source: row.source,
+    sourcePrimaryId: row.sourcePrimaryId ?? undefined,
+    sourceNodeId: row.sourceNodeId ?? undefined,
+    sourceRevisionId: row.sourceRevisionId ?? undefined,
+    snapshotContentHash: row.snapshotContentHash ?? undefined,
+    snapshotVersion: row.snapshotVersion ?? undefined,
+    replicationVersion: row.replicationVersion ?? undefined,
+    leadershipGeneration: row.leadershipGeneration ?? undefined,
     correlationId: row.correlationId,
     createdAt: row.createdAt,
     claimedAt: row.claimedAt ?? undefined,
