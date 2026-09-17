@@ -76,6 +76,12 @@ Deliver secure one-time enrollment that converts a standalone ProxyCore installa
     - Pure contract only: no handler, listener, TLS startup, trust bootstrap/export, UI, Compose, token/bootstrap grant, snapshot, redirect, or client transport changes.
     - Rollback boundary: the seven `apps/api/internal/enrollment/identity_proof*.go` files and this task evidence.
 - [ ] **PNE-2D — Proof-only HTTPS listener**: serve only the proof mux over TLS 1.3 on port 3443, reject redirects/downgrades, and keep ordinary HTTP routes unavailable.
+  - [x] **PNE-2D-A — Proof-only handler/mux**: enforce the exact POST route, bounded strict JSON, live provider signing, TLS/authority/SNI/SAN checks, non-leaking errors, and no-store proof responses. Excludes listener startup and real handshake coverage.
+    - Correction evidence: streamed unknown-length coverage first exposed only an overbroad test assertion; after allowing the required generic `identity proof request` message, the unchanged handler passed, so no production correction was made.
+    - Validation: streamed test passed; `cd apps/api && go test ./internal/enrollment ./internal/httpserver` (154 passed); `cd apps/api && go test ./...` (330 passed); handler `gofmt -d` clean; `git diff --check` passed.
+    - Honest count: 396 prior additions plus 28 test-only correction lines = 424 cumulative; the correction unit remains below 400 and PNE-2D-B is untouched.
+    - Rollback boundary: `apps/api/internal/httpserver/enrollment_identity.go`, its focused test, and this evidence only.
+  - [ ] **PNE-2D-B — TLS listener**: add the dedicated TLS 1.3 server helper, current certificate provider, safe timeouts, and real CA/leaf handshake harness.
 - [ ] **PNE-2E — TLS startup and trust UX**: wire startup/shutdown and Compose exposure; provide CA fingerprint display plus public CA export/import flows and restart-stability verification.
 - [ ] **PNE-3 — Sealed bootstrap grant**: implement ephemeral X25519/HKDF bootstrap sealing, node credential issuance, cluster-KEK transport, binding/AAD validation, exact idempotent retry, and redaction tests.
 - [ ] **PNE-4 — Initial snapshot publication**: authenticate current node credentials, publish only latest applied immutable state, enforce revocation, and reject an unready PRIMARY.
@@ -87,7 +93,7 @@ Deliver secure one-time enrollment that converts a standalone ProxyCore installa
 
 ## First Implementation Unit
 
-PNE-1 and PNE-2A are complete. PNE-2B is complete as the four file-disjoint units recorded above; continue with **PNE-2C** only. Keep implementation, tests, runtime evidence, and rollback boundary in the same work-unit commit. If the honest unit still exceeds 400 authored changed lines, report the smallest coherent count before implementation rather than compressing or omitting tests.
+PNE-1, PNE-2A, PNE-2B, and PNE-2C are complete as recorded above; continue with **PNE-2D-A** only. Keep implementation, tests, runtime evidence, and rollback boundary in the same work-unit commit. PNE-2D-B remains a separate follow-up after independent verification. If the honest unit still exceeds 400 authored changed lines, report the smallest coherent count before implementation rather than compressing or omitting tests.
 
 ## Verification Baseline
 
