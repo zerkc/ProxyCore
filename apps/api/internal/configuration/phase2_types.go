@@ -1,6 +1,94 @@
 package configuration
 
-import "time"
+import (
+	"fmt"
+	"net"
+	"sort"
+	"strings"
+	"time"
+)
+
+const (
+	MaxEnrollmentHostnames      = 32
+	MaxEnrollmentHostnameLength = 253
+)
+
+// EnrollmentHostnameConfig is the public, non-secret enrollment SAN
+// configuration. Configured is false when no exact SAN entries are stored.
+type EnrollmentHostnameConfig struct {
+	Configured bool     `json:"configured"`
+	Hostnames  []string `json:"hostnames"`
+}
+
+// NormalizeEnrollmentHostnames validates and canonicalizes exact DNS names and
+// IP literals. It never derives values from ingress, request hosts, or LAN
+// interfaces.
+func NormalizeEnrollmentHostnames(values []string) ([]string, error) {
+	if len(values) > MaxEnrollmentHostnames {
+		return nil, fmt.Errorf("at most %d enrollment hostnames are allowed", MaxEnrollmentHostnames)
+	}
+	seen := make(map[string]struct{}, len(values))
+	canonical := make([]string, 0, len(values))
+	for _, value := range values {
+		normalized, err := normalizeEnrollmentHostname(value)
+		if err != nil {
+			return nil, err
+		}
+		if _, exists := seen[normalized]; exists {
+			continue
+		}
+		seen[normalized] = struct{}{}
+		canonical = append(canonical, normalized)
+	}
+	sort.Strings(canonical)
+	return canonical, nil
+}
+
+func normalizeEnrollmentHostname(value string) (string, error) {
+	if value == "" || strings.TrimSpace(value) != value {
+		return "", fmt.Errorf("enrollment hostname must be an exact DNS name or IP literal")
+	}
+	if ip := net.ParseIP(value); ip != nil {
+		canonical := ip.String()
+		if len(canonical) > MaxEnrollmentHostnameLength {
+			return "", fmt.Errorf("enrollment hostname exceeds %d characters", MaxEnrollmentHostnameLength)
+		}
+		return canonical, nil
+	}
+
+	canonical := strings.ToLower(value)
+	canonical = strings.TrimSuffix(canonical, ".")
+	if canonical == "" || len(canonical) > MaxEnrollmentHostnameLength {
+		return "", fmt.Errorf("enrollment hostname must be 1-%d characters", MaxEnrollmentHostnameLength)
+	}
+	labels := strings.Split(canonical, ".")
+	if len(labels) == 4 && allNumericLabels(labels) {
+		return "", fmt.Errorf("invalid IP literal")
+	}
+	for _, label := range labels {
+		if label == "" || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return "", fmt.Errorf("invalid enrollment DNS name")
+		}
+		for i := 0; i < len(label); i++ {
+			char := label[i]
+			if (char < 'a' || char > 'z') && (char < '0' || char > '9') && char != '-' {
+				return "", fmt.Errorf("invalid enrollment DNS name")
+			}
+		}
+	}
+	return canonical, nil
+}
+
+func allNumericLabels(labels []string) bool {
+	for _, label := range labels {
+		for i := 0; i < len(label); i++ {
+			if label[i] < '0' || label[i] > '9' {
+				return false
+			}
+		}
+	}
+	return true
+}
 
 // PersistenceSource identifies who created a revision or apply job. It is
 // deliberately non-secret and is shared with the worker persistence contract.

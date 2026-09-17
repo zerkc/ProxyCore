@@ -122,6 +122,7 @@ export const installationSettings = pgTable("installation_settings", {
   ingressIpv6: text("ingress_ipv6"),
   defaultResolverPool: jsonb("default_resolver_pool").$type<unknown>(),
   forwardingRules: jsonb("forwarding_rules").$type<unknown>(),
+  enrollmentHostnames: jsonb("enrollment_hostnames").$type<string[]>(),
   retentionMaxAgeDays: integer("retention_max_age_days").notNull().default(7),
   retentionMaxSizeMb: integer("retention_max_size_mb").notNull().default(50),
   currentDesiredRevisionId: text("current_desired_revision_id"),
@@ -752,6 +753,7 @@ export const syncAttempts = pgTable(
 );
 
 export const phase2PersistenceContract = {
+  installationSettingsColumns: ["enrollment_hostnames"],
   tables: {
     enrollmentTokens: "enrollment_tokens",
     enrolledNodes: "enrolled_nodes",

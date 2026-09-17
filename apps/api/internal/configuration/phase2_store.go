@@ -3,6 +3,7 @@ package configuration
 import (
 	"context"
 	"crypto/subtle"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -24,6 +25,59 @@ type PgPhase2Store struct {
 
 func NewPhase2Store(pool *pgxpool.Pool) *PgPhase2Store {
 	return &PgPhase2Store{pool: pool}
+}
+
+// GetEnrollmentHostnames returns the durable exact SAN configuration without
+// exposing any certificate, CA, or private-key material.
+func (s *Store) GetEnrollmentHostnames(ctx context.Context) (EnrollmentHostnameConfig, error) {
+	if _, err := ensureSettings(ctx, s.pool); err != nil {
+		return EnrollmentHostnameConfig{}, err
+	}
+	var raw []byte
+	if err := s.pool.QueryRow(ctx,
+		`select enrollment_hostnames from installation_settings where id = $1`, installationID,
+	).Scan(&raw); err != nil {
+		return EnrollmentHostnameConfig{}, err
+	}
+	if len(raw) == 0 || string(raw) == "null" {
+		return EnrollmentHostnameConfig{Hostnames: []string{}}, nil
+	}
+	var hostnames []string
+	if err := json.Unmarshal(raw, &hostnames); err != nil {
+		return EnrollmentHostnameConfig{}, fmt.Errorf("read enrollment hostnames: %w", err)
+	}
+	canonical, err := NormalizeEnrollmentHostnames(hostnames)
+	if err != nil {
+		return EnrollmentHostnameConfig{}, fmt.Errorf("read enrollment hostnames: %w", err)
+	}
+	return EnrollmentHostnameConfig{Configured: len(canonical) > 0, Hostnames: canonical}, nil
+}
+
+// UpdateEnrollmentHostnames validates, canonicalizes, deduplicates, and
+// durably stores exact enrollment DNS names and IP literals.
+func (s *Store) UpdateEnrollmentHostnames(ctx context.Context, hostnames []string) (EnrollmentHostnameConfig, error) {
+	canonical, err := NormalizeEnrollmentHostnames(hostnames)
+	if err != nil {
+		return EnrollmentHostnameConfig{}, err
+	}
+	if _, err := ensureSettings(ctx, s.pool); err != nil {
+		return EnrollmentHostnameConfig{}, err
+	}
+	var payload any
+	if len(canonical) > 0 {
+		payload, err = json.Marshal(canonical)
+		if err != nil {
+			return EnrollmentHostnameConfig{}, err
+		}
+	}
+	if _, err := s.pool.Exec(ctx, `
+		update installation_settings
+		set enrollment_hostnames = $2, updated_at = now()
+		where id = $1
+	`, installationID, payload); err != nil {
+		return EnrollmentHostnameConfig{}, err
+	}
+	return EnrollmentHostnameConfig{Configured: len(canonical) > 0, Hostnames: canonical}, nil
 }
 
 func (s *PgPhase2Store) WithTransaction(ctx context.Context, fn func(Phase2Transaction) error) error {

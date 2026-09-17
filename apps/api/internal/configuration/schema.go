@@ -26,6 +26,7 @@ func EnsureSchema(ctx context.Context, pool *pgxpool.Pool) error {
 			ingress_ipv6 text,
 			default_resolver_pool jsonb,
 			forwarding_rules jsonb,
+			enrollment_hostnames jsonb,
 			retention_max_age_days integer not null default 7,
 			retention_max_size_mb integer not null default 50,
 			current_desired_revision_id text,

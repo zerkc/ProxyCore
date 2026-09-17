@@ -28,6 +28,9 @@ describe("phase 2 persistence contract", () => {
       "import",
       "sync",
     ]);
+    expect(phase2PersistenceContract.installationSettingsColumns).toEqual([
+      "enrollment_hostnames",
+    ]);
   });
 
   it("keeps the generated migration aligned with the contract", () => {
@@ -36,6 +39,10 @@ describe("phase 2 persistence contract", () => {
         "../migrations/0004_primary_node_continuity_phase_2.sql",
         import.meta.url,
       ),
+      "utf8",
+    );
+    const enrollmentMigration = readFileSync(
+      new URL("../migrations/0005_enrollment_hostnames.sql", import.meta.url),
       "utf8",
     );
 
@@ -47,6 +54,9 @@ describe("phase 2 persistence contract", () => {
     }
     for (const column of phase2PersistenceContract.attributionColumns) {
       expect(migration).toContain(`"${column}"`);
+    }
+    for (const column of phase2PersistenceContract.installationSettingsColumns) {
+      expect(enrollmentMigration).toContain(`"${column}"`);
     }
     expect(migration).toContain('"enrollment_attempts_one_active_idx"');
     expect(migration).toContain('"enrollment_attempts_state_check"');

@@ -17,6 +17,7 @@ func phase2SchemaContract() phase2SchemaDefinition {
 		`do $$ begin create type proxycore_sync_attempt_status as enum ('queued','running','current','applied','failed','pending-ack'); exception when duplicate_object then null; end $$;`,
 		`do $$ begin create type proxycore_persistence_source as enum ('ordinary','import','sync'); exception when duplicate_object then null; end $$;`,
 		`do $$ begin create type proxycore_applied_snapshot_status as enum ('pending','applied','rejected','rolled-back','archived'); exception when duplicate_object then null; end $$;`,
+		`alter table installation_settings add column if not exists enrollment_hostnames jsonb;`,
 
 		`create table if not exists standalone_archives (
 			id uuid primary key default gen_random_uuid(),
