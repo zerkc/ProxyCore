@@ -58,7 +58,23 @@ Deliver secure one-time enrollment that converts a standalone ProxyCore installa
     - Validation: `cd apps/api && go test ./internal/enrollment`; `cd apps/api && go test ./...`; `git diff --check` — all passed. No proof signing, listener, transport, trust bootstrap, or identity serialization was added.
     - Honest count: 234 authored lines across `url.go`, `url_test.go`, and this evidence (below the 400-line review budget); parent commit remains pending.
     - Rollback boundary: `apps/api/internal/enrollment/url.go`, `apps/api/internal/enrollment/url_test.go`, and this task evidence only.
-  - [ ] **PNE-2C2 — Identity proof signing and verification**: sign trusted primary identity with committed enrollment TLS material and expose pure tamper/expiry/binding verification; not started.
+  - [x] **PNE-2C2 — Identity proof signing and verification**: sign trusted primary identity with committed enrollment TLS material and expose pure tamper/expiry/binding verification.
+    - Corrective strict-TDD RED: added direct lower/higher/zero generation, self-invalid CA, fresh-provider, and strict-expiry tests before implementation; the initial focused run failed against the stale constructor/signature API.
+    - GREEN: provider-based signing and explicit CA self-signature validation passed the focused enrollment suite; TRIANGULATE covers all prior tamper, redaction, algorithm, role, expiry, and binding cases; REFACTOR preserved coverage.
+    - Formatted file map and counts:
+      - Unit A: `identity_proof.go` — 129 lines, public types, bounded request generation, and canonical framing.
+      - Unit B: `identity_proof_crypto.go` — 141 lines, RSA/certificate parsing, CA self-signature, pins, hostname, and framing helpers.
+      - Unit C: `identity_proof_signer.go` — 128 lines, fresh identity/material/time providers and leaf-only signing.
+      - Unit D: `identity_proof_verifier.go` — 113 lines, exact generation, time-window, binding, and detached verification.
+      - Unit E: `identity_proof_test.go` — 281 lines, preserved baseline round-trip/tamper/redaction coverage.
+      - Unit F: `identity_proof_signer_test.go` — 160 lines, provider refresh, self-invalid CA, and expiry-boundary coverage.
+      - Unit G: `identity_proof_verifier_test.go` — 18 lines, direct lower/higher/zero generation coverage.
+      - Unit H: task evidence — 18 changed lines.
+    - Dependency order: A → B → (C, D) → E → (F, G) → H; every unit is file-disjoint and below 400 changed lines.
+    - Formatted honest count: 988 changed lines total (970 formatted source lines plus 18 task-evidence changes), reported by unit rather than compressed.
+    - Validation: `cd apps/api && go test ./internal/enrollment` (77 passed); `cd apps/api && go test ./...` (303 passed); `gofmt -d apps/api/internal/enrollment/identity_proof*.go` clean; `git diff --check` passed.
+    - Pure contract only: no handler, listener, TLS startup, trust bootstrap/export, UI, Compose, token/bootstrap grant, snapshot, redirect, or client transport changes.
+    - Rollback boundary: the seven `apps/api/internal/enrollment/identity_proof*.go` files and this task evidence.
 - [ ] **PNE-2D — Proof-only HTTPS listener**: serve only the proof mux over TLS 1.3 on port 3443, reject redirects/downgrades, and keep ordinary HTTP routes unavailable.
 - [ ] **PNE-2E — TLS startup and trust UX**: wire startup/shutdown and Compose exposure; provide CA fingerprint display plus public CA export/import flows and restart-stability verification.
 - [ ] **PNE-3 — Sealed bootstrap grant**: implement ephemeral X25519/HKDF bootstrap sealing, node credential issuance, cluster-KEK transport, binding/AAD validation, exact idempotent retry, and redaction tests.
