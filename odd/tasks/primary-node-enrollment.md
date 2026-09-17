@@ -36,7 +36,15 @@ Deliver secure one-time enrollment that converts a standalone ProxyCore installa
   - Harness classification: the supplemental blank-PostgreSQL `PHASE2_DATABASE_URL` failure was setup-only because the prerequisite `users` relation was absent; the passing `DATABASE_URL` focused run is the candidate evidence.
   - Honest count: 712 product/test/store lines plus the 58-line task artifact = 770 total; the prior independent 389 + 55 = 444 count remains the pre-correction baseline. No <=400 claim is made.
   - No migration was required. Rollback covers `apps/api/internal/enrollment/`, the token methods/imports in `apps/api/internal/configuration/phase2_store.go`, and `apps/api/internal/identity/enrollment.go` plus its tests.
-- [ ] **PNE-2A — Enrollment address configuration**: persist exact DNS/IP SANs, add Owner-only API/UI configuration, validate canonical names, and prevent certificate issuance until configured.
+- [x] **PNE-2A — Enrollment address configuration**: persist exact DNS/IP SANs, add Owner-only API/UI configuration, validate canonical names, and prevent certificate issuance until configured.
+  - Added the authenticated Continuity route with Owner GET/PUT wiring, canonical response display, validation errors, and explicit TLS/token scope copy.
+  - Mounted component harness result: `bun test apps/ui/src/dashboard/ContinuityView.test.tsx apps/ui/src/dashboard/DashboardShell.test.tsx` — 8 passed, including 6 mounted ContinuityView cases.
+  - Strict TDD: RED captured the missing DOM test environment before harness adjustment; GREEN captured 8 focused passes; TRIANGULATE covers configured states, accessibility, validation, operator denial, and NODE/stale-primary read-only states.
+  - Validation: `bun run test` (29 files/171 tests), `bun run typecheck`, `bun run build:ui`, and `git diff --check` passed.
+  - UI-specific tsc baseline: 8 errors, including 3 candidate errors in `ContinuityView.test.tsx` and 5 pre-existing errors in four unrelated UI files.
+  - UI-specific tsc after correction: candidate errors are 0; the exact 5 unrelated pre-existing errors remain.
+  - Buildable split: unit 1 shared API/types = 38 authored additions; unit 2 component = 200; unit 3 route/nav/shell = 36; unit 4 mounted tests/evidence = 384; apply in order 1 → 2 → 3 → 4, each under 400.
+  - Rollback boundary: the UI/API helper/type/nav/route files and this task evidence; no certificate, token, listener, or deployment changes.
 - [ ] **PNE-2B — CA-backed enrollment material**: persist a dedicated enrollment leaf/key, preserve SPKI across renewal, fail closed on corrupt established material, and add the additive migration.
 - [ ] **PNE-2C — Identity-proof contract**: sign canonical attempt/nonce/URL/identity/generation/fingerprint proofs and verify tampering, expiry, roles, and hostname binding.
 - [ ] **PNE-2D — Proof-only HTTPS listener**: serve only the proof mux over TLS 1.3 on port 3443, reject redirects/downgrades, and keep ordinary HTTP routes unavailable.
