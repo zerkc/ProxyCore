@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/zerkc/ProxyCore/apps/api/internal/auth"
 	"github.com/zerkc/ProxyCore/apps/api/internal/configuration"
 	"github.com/zerkc/ProxyCore/apps/api/internal/domain"
 )
@@ -103,6 +104,54 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"settings": settings})
+}
+
+func (s *Server) handleGetEnrollmentHostnames(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireUser(w, r, auth.RoleOwner); !ok {
+		return
+	}
+	store, ok := s.configStore(w)
+	if !ok {
+		return
+	}
+	config, err := store.GetEnrollmentHostnames(r.Context())
+	if err != nil {
+		writeConfigError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, config)
+}
+
+func (s *Server) handlePutEnrollmentHostnames(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireUser(w, r, auth.RoleOwner); !ok {
+		return
+	}
+	store, ok := s.configStore(w)
+	if !ok {
+		return
+	}
+	body, ok := decodeJSONObject(w, r)
+	if !ok {
+		return
+	}
+	raw, exists := body["hostnames"]
+	if !exists {
+		writeConfigError(w, &httpError{status: http.StatusBadRequest, message: "hostnames are required"})
+		return
+	}
+	var hostnames []string
+	if raw != nil {
+		if err := decodeInto(raw, &hostnames); err != nil {
+			writeConfigError(w, &httpError{status: http.StatusBadRequest, message: "hostnames must be an array of strings"})
+			return
+		}
+	}
+	config, err := store.UpdateEnrollmentHostnames(r.Context(), hostnames)
+	if err != nil {
+		writeConfigError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, config)
 }
 
 func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {

@@ -215,7 +215,161 @@ func TestConfigurationMutationsBlockedForNonWritableIdentity(t *testing.T) {
 			if body["code"] != "TOPOLOGY_READ_ONLY" {
 				t.Fatalf("%s rejection=%v", role, body)
 			}
+
+			enrollment := doJSON(t, srv.Handler(), http.MethodPut, "/api/settings/enrollment-hostnames", map[string]any{
+				"hostnames": []string{"enroll.example.com"},
+			}, cookie)
+			if enrollment.Code != http.StatusForbidden {
+				t.Fatalf("%s enrollment hostnames status=%d body=%s", role, enrollment.Code, enrollment.Body.String())
+			}
+			var enrollmentBody map[string]any
+			if err := json.Unmarshal(enrollment.Body.Bytes(), &enrollmentBody); err != nil {
+				t.Fatalf("decode %s enrollment rejection: %v", role, err)
+			}
+			if enrollmentBody["code"] != "TOPOLOGY_READ_ONLY" {
+				t.Fatalf("%s enrollment rejection=%v", role, enrollmentBody)
+			}
 		})
+	}
+}
+
+func TestEnrollmentHostnamesOwnerAPI(t *testing.T) {
+	srv := newConfigTestServer(t)
+	cookie := loginOwner(t, srv)
+
+	get := doJSON(t, srv.Handler(), http.MethodGet, "/api/settings/enrollment-hostnames", nil, cookie)
+	if get.Code != http.StatusOK {
+		t.Fatalf("initial enrollment hostnames status=%d body=%s", get.Code, get.Body.String())
+	}
+	var initial struct {
+		Configured bool     `json:"configured"`
+		Hostnames  []string `json:"hostnames"`
+	}
+	if err := json.Unmarshal(get.Body.Bytes(), &initial); err != nil {
+		t.Fatalf("decode initial enrollment hostnames: %v", err)
+	}
+	if initial.Configured || len(initial.Hostnames) != 0 {
+		t.Fatalf("initial enrollment hostnames=%+v", initial)
+	}
+
+	invalid := doJSON(t, srv.Handler(), http.MethodPut, "/api/settings/enrollment-hostnames", map[string]any{
+		"hostnames": []string{"https://primary.example.com"},
+	}, cookie)
+	if invalid.Code != http.StatusBadRequest {
+		t.Fatalf("invalid enrollment hostnames status=%d body=%s", invalid.Code, invalid.Body.String())
+	}
+
+	put := doJSON(t, srv.Handler(), http.MethodPut, "/api/settings/enrollment-hostnames", map[string]any{
+		"hostnames": []string{
+			"Example.COM.",
+			"2001:0DB8:0:0:0:0:0:1",
+			"192.0.2.1",
+			"example.com",
+		},
+	}, cookie)
+	if put.Code != http.StatusOK {
+		t.Fatalf("put enrollment hostnames status=%d body=%s", put.Code, put.Body.String())
+	}
+	var saved struct {
+		Configured bool     `json:"configured"`
+		Hostnames  []string `json:"hostnames"`
+	}
+	if err := json.Unmarshal(put.Body.Bytes(), &saved); err != nil {
+		t.Fatalf("decode saved enrollment hostnames: %v", err)
+	}
+	want := []string{"192.0.2.1", "2001:db8::1", "example.com"}
+	if !saved.Configured || strings.Join(saved.Hostnames, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("saved enrollment hostnames=%+v, want configured %v", saved, want)
+	}
+
+	clear := doJSON(t, srv.Handler(), http.MethodPut, "/api/settings/enrollment-hostnames", map[string]any{
+		"hostnames": []string{},
+	}, cookie)
+	if clear.Code != http.StatusOK {
+		t.Fatalf("clear enrollment hostnames status=%d body=%s", clear.Code, clear.Body.String())
+	}
+	var cleared struct {
+		Configured bool     `json:"configured"`
+		Hostnames  []string `json:"hostnames"`
+	}
+	if err := json.Unmarshal(clear.Body.Bytes(), &cleared); err != nil {
+		t.Fatalf("decode cleared enrollment hostnames: %v", err)
+	}
+	if cleared.Configured || len(cleared.Hostnames) != 0 {
+		t.Fatalf("cleared enrollment hostnames=%+v", cleared)
+	}
+}
+
+func TestEnrollmentHostnamesOwnerOnly(t *testing.T) {
+	srv := newConfigTestServer(t)
+	ownerCookie := loginOwner(t, srv)
+	createOperator := doJSON(t, srv.Handler(), http.MethodPost, "/api/users", map[string]any{
+		"username": "operator",
+		"password": "correct horse battery staple",
+		"role":     "operator",
+	}, ownerCookie)
+	if createOperator.Code != http.StatusCreated {
+		t.Fatalf("create operator status=%d body=%s", createOperator.Code, createOperator.Body.String())
+	}
+	operatorCookie := loginUser(t, srv, "operator", "correct horse battery staple")
+
+	for _, method := range []string{http.MethodGet, http.MethodPut} {
+		body := any(nil)
+		if method == http.MethodPut {
+			body = map[string]any{"hostnames": []string{"enroll.example.com"}}
+		}
+		response := doJSON(t, srv.Handler(), method, "/api/settings/enrollment-hostnames", body, operatorCookie)
+		if response.Code != http.StatusForbidden {
+			t.Fatalf("operator %s status=%d body=%s", method, response.Code, response.Body.String())
+		}
+	}
+}
+
+func TestEnrollmentHostnamesReadsRemainAvailableForReadOnlyRoles(t *testing.T) {
+	cases := []struct {
+		role       domain.TopologyRole
+		hostnames  []string
+		configured bool
+	}{
+		{role: domain.TopologyRoleNode, hostnames: []string{"node.enroll.example"}, configured: true},
+		{role: domain.TopologyRoleStalePrimary, configured: false},
+	}
+	for _, tc := range cases {
+		t.Run(string(tc.role), func(t *testing.T) {
+			srv := newConfigTestServerForRoleWithEnrollment(t, tc.role, tc.hostnames)
+			cookie := loginOwner(t, srv)
+			response := doJSON(t, srv.Handler(), http.MethodGet, "/api/settings/enrollment-hostnames", nil, cookie)
+			if response.Code != http.StatusOK {
+				t.Fatalf("%s enrollment GET status=%d body=%s", tc.role, response.Code, response.Body.String())
+			}
+			var body struct {
+				Configured bool     `json:"configured"`
+				Hostnames  []string `json:"hostnames"`
+			}
+			if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+				t.Fatalf("decode %s enrollment GET: %v", tc.role, err)
+			}
+			if body.Configured != tc.configured {
+				t.Fatalf("%s configured=%v, want %v", tc.role, body.Configured, tc.configured)
+			}
+			if tc.configured && strings.Join(body.Hostnames, "\x00") != strings.Join(tc.hostnames, "\x00") {
+				t.Fatalf("%s hostnames=%v, want %v", tc.role, body.Hostnames, tc.hostnames)
+			}
+		})
+	}
+}
+
+func TestEnrollmentHostnamesRequireAuthentication(t *testing.T) {
+	srv := newConfigTestServer(t)
+	for _, method := range []string{http.MethodGet, http.MethodPut} {
+		body := any(nil)
+		if method == http.MethodPut {
+			body = map[string]any{"hostnames": []string{"enroll.example.com"}}
+		}
+		response := doJSON(t, srv.Handler(), method, "/api/settings/enrollment-hostnames", body, nil)
+		if response.Code != http.StatusUnauthorized {
+			t.Fatalf("unauthenticated %s status=%d body=%s", method, response.Code, response.Body.String())
+		}
 	}
 }
 
@@ -228,12 +382,17 @@ func loginOwner(t *testing.T, srv *httpserver.Server) *http.Cookie {
 	if bootstrap.Code != http.StatusCreated {
 		t.Fatalf("bootstrap status=%d body=%s", bootstrap.Code, bootstrap.Body.String())
 	}
+	return loginUser(t, srv, "owner", "correct horse battery staple")
+}
+
+func loginUser(t *testing.T, srv *httpserver.Server, username, password string) *http.Cookie {
+	t.Helper()
 	login := doJSON(t, srv.Handler(), http.MethodPost, "/api/auth/login", map[string]any{
-		"username": "owner",
-		"password": "correct horse battery staple",
+		"username": username,
+		"password": password,
 	}, nil)
 	if login.Code != http.StatusOK {
-		t.Fatalf("login status=%d body=%s", login.Code, login.Body.String())
+		t.Fatalf("login %s status=%d body=%s", username, login.Code, login.Body.String())
 	}
 	cookies := login.Result().Cookies()
 	if len(cookies) != 1 {
@@ -247,6 +406,10 @@ func newConfigTestServer(t *testing.T) *httpserver.Server {
 }
 
 func newConfigTestServerForRole(t *testing.T, role domain.TopologyRole) *httpserver.Server {
+	return newConfigTestServerForRoleWithEnrollment(t, role, nil)
+}
+
+func newConfigTestServerForRoleWithEnrollment(t *testing.T, role domain.TopologyRole, hostnames []string) *httpserver.Server {
 	t.Helper()
 	if testing.Short() {
 		t.Skip("skipping database-backed configuration handler tests in short mode")
@@ -300,6 +463,11 @@ func newConfigTestServerForRole(t *testing.T, role domain.TopologyRole) *httpser
 
 	authSvc := auth.NewService(authStore, auth.ServiceOptions{SessionTTL: time.Hour})
 	configStore := configuration.New(pool, "", domain.Ingress{})
+	if hostnames != nil {
+		if _, err := configStore.UpdateEnrollmentHostnames(ctx, hostnames); err != nil {
+			t.Fatalf("seed enrollment hostnames: %v", err)
+		}
+	}
 	identitySvc := identity.NewService(identity.NewPgStore(pool))
 	if _, _, err := identitySvc.EnsureBootstrapped(ctx); err != nil {
 		t.Fatalf("bootstrap identity: %v", err)
