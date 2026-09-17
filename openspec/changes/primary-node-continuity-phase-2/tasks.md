@@ -28,6 +28,17 @@ The native session setting `ask-on-risk` governs this plan; the historical `exce
 - REFACTOR evidence must preserve behavior, remove duplication, keep tests adjacent to the behavior, and rerun the focused commands.
 - Record exact commands, results, redacted failure codes, runtime scenario results, and changed-line counts in the apply/verify receipts. Never record token, credential, KEK, private-key, password-hash, snapshot-body, or plaintext-secret values.
 
+## Current bounded apply slice: PRIMARY/NODE continuity boundary
+
+This user-approved slice layers a small startup, API, and dashboard boundary on the completed additive persistence work. It does not complete Work Units 2–8: enrollment security, enrollment authority, synchronization, role selectors, service-level policy, renewal gating, and recovery remain deferred and unchecked below.
+
+- [x] **Startup continuity:** load a persisted valid non-standalone identity without treating it as bootstrap corruption, while still bootstrapping an absent singleton identity.
+- [x] **Redacted status:** expose the same non-secret identity fields from `/api/status` and `/api/ready` (installation/node IDs, role, both generations, stale-primary, writable).
+- [x] **HTTP-only write boundary:** reject authenticated ordinary non-GET HTTP mutations when the loaded identity is a NODE or stale-primary, while preserving bootstrap/login/logout/change-password and read endpoints; retain writable standalone behavior. This does not complete the later service-level mutation policy.
+- [x] **Continuity visibility:** extend dashboard status/context and the existing shell inspector with role, installation ID, node ID, generations, writable, and stale-primary state; add no role selector or enrollment controls.
+- [x] **Focused TDD evidence:** add startup, status, mutation-boundary, and inspector tests; record RED before implementation and GREEN after the bounded implementation.
+- [ ] **Deferred policy and lifecycle work:** do not claim service-level mutation policy, renewal gating, enrollment, synchronization, token exchange, enrollment commit/recovery, snapshot pull/apply/ack, scheduling, or revocation work complete.
+
 ## Phase 2 work units
 
 ### 1. Additive persistence and cross-process contracts

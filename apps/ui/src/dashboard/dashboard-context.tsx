@@ -11,13 +11,20 @@ import {
 import { useNavigate } from "react-router-dom";
 import { SESSION_USERNAME_KEY } from "../api";
 import type { EditableRecord } from "./RecordDialog";
-import type { JobRecord, StatusPayload, UpdatePayload, Zone } from "./types";
+import type {
+  JobRecord,
+  StatusPayload,
+  TopologyIdentity,
+  UpdatePayload,
+  Zone,
+} from "./types";
 import { selectRelevantFailedJob } from "./patch-bar-state";
 
 const UPDATE_POLL_INTERVAL_MS = 30 * 60 * 1000;
 
 type DashboardContextValue = {
   status?: StatusPayload;
+  identity?: TopologyIdentity;
   user: string;
   message: string;
   error: string;
@@ -86,6 +93,8 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     () => status?.zones.find((zone) => zone.id === selectedZone),
     [selectedZone, status?.zones],
   );
+
+  const identity = status?.identity;
 
   const inSync =
     !!status?.desiredRevision &&
@@ -374,6 +383,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
 
   const value: DashboardContextValue = {
     status,
+    identity,
     user,
     message,
     error,

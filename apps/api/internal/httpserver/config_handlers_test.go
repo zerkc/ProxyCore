@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/zerkc/ProxyCore/apps/api/internal/auth"
@@ -22,6 +23,7 @@ import (
 	"github.com/zerkc/ProxyCore/apps/api/internal/configuration"
 	"github.com/zerkc/ProxyCore/apps/api/internal/domain"
 	"github.com/zerkc/ProxyCore/apps/api/internal/httpserver"
+	"github.com/zerkc/ProxyCore/apps/api/internal/identity"
 )
 
 func TestConfigurationRoutesFlow(t *testing.T) {
@@ -152,9 +154,99 @@ func TestConfigurationRoutesFlow(t *testing.T) {
 	if status.Code != http.StatusOK {
 		t.Fatalf("status status=%d body=%s", status.Code, status.Body.String())
 	}
+	var statusBody struct {
+		Identity map[string]any `json:"identity"`
+	}
+	if err := json.Unmarshal(status.Body.Bytes(), &statusBody); err != nil {
+		t.Fatalf("decode status identity: %v", err)
+	}
+	for _, field := range []string{
+		"installationId",
+		"nodeId",
+		"role",
+		"leadershipGeneration",
+		"latestKnownGeneration",
+		"stalePrimary",
+		"writable",
+	} {
+		if _, ok := statusBody.Identity[field]; !ok {
+			t.Fatalf("status identity missing %q: %v", field, statusBody.Identity)
+		}
+	}
+	if statusBody.Identity["role"] != string(domain.TopologyRoleStandalone) || statusBody.Identity["writable"] != true {
+		t.Fatalf("unexpected standalone identity: %v", statusBody.Identity)
+	}
+	if _, ok := statusBody.Identity["clusterKeyId"]; ok {
+		t.Fatalf("status identity leaked cluster key id: %v", statusBody.Identity)
+	}
+}
+
+func TestStandaloneConfigurationMutationRemainsWritable(t *testing.T) {
+	srv := newConfigTestServer(t)
+	cookie := loginOwner(t, srv)
+
+	response := doJSON(t, srv.Handler(), http.MethodPut, "/api/settings", map[string]any{
+		"ingress": map[string]any{"ipv4": "192.168.1.10"},
+	}, cookie)
+	if response.Code != http.StatusOK {
+		t.Fatalf("standalone settings status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestConfigurationMutationsBlockedForNonWritableIdentity(t *testing.T) {
+	for _, role := range []domain.TopologyRole{
+		domain.TopologyRoleNode,
+		domain.TopologyRoleStalePrimary,
+	} {
+		t.Run(string(role), func(t *testing.T) {
+			srv := newConfigTestServerForRole(t, role)
+			cookie := loginOwner(t, srv)
+
+			response := doJSON(t, srv.Handler(), http.MethodPut, "/api/settings", map[string]any{
+				"ingress": map[string]any{"ipv4": "192.168.1.11"},
+			}, cookie)
+			if response.Code != http.StatusForbidden {
+				t.Fatalf("%s settings status=%d body=%s", role, response.Code, response.Body.String())
+			}
+			var body map[string]any
+			if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+				t.Fatalf("decode %s rejection: %v", role, err)
+			}
+			if body["code"] != "TOPOLOGY_READ_ONLY" {
+				t.Fatalf("%s rejection=%v", role, body)
+			}
+		})
+	}
+}
+
+func loginOwner(t *testing.T, srv *httpserver.Server) *http.Cookie {
+	t.Helper()
+	bootstrap := doJSON(t, srv.Handler(), http.MethodPost, "/api/auth/bootstrap", map[string]any{
+		"username": "owner",
+		"password": "correct horse battery staple",
+	}, nil)
+	if bootstrap.Code != http.StatusCreated {
+		t.Fatalf("bootstrap status=%d body=%s", bootstrap.Code, bootstrap.Body.String())
+	}
+	login := doJSON(t, srv.Handler(), http.MethodPost, "/api/auth/login", map[string]any{
+		"username": "owner",
+		"password": "correct horse battery staple",
+	}, nil)
+	if login.Code != http.StatusOK {
+		t.Fatalf("login status=%d body=%s", login.Code, login.Body.String())
+	}
+	cookies := login.Result().Cookies()
+	if len(cookies) != 1 {
+		t.Fatalf("login cookies=%v", cookies)
+	}
+	return cookies[0]
 }
 
 func newConfigTestServer(t *testing.T) *httpserver.Server {
+	return newConfigTestServerForRole(t, domain.TopologyRoleStandalone)
+}
+
+func newConfigTestServerForRole(t *testing.T, role domain.TopologyRole) *httpserver.Server {
 	t.Helper()
 	if testing.Short() {
 		t.Skip("skipping database-backed configuration handler tests in short mode")
@@ -206,15 +298,34 @@ func newConfigTestServer(t *testing.T) *httpserver.Server {
 		t.Fatalf("seed installation settings: %v", err)
 	}
 
-	svc := auth.NewService(authStore, auth.ServiceOptions{SessionTTL: time.Hour})
+	authSvc := auth.NewService(authStore, auth.ServiceOptions{SessionTTL: time.Hour})
 	configStore := configuration.New(pool, "", domain.Ingress{})
+	identitySvc := identity.NewService(identity.NewPgStore(pool))
+	if _, _, err := identitySvc.EnsureBootstrapped(ctx); err != nil {
+		t.Fatalf("bootstrap identity: %v", err)
+	}
+	if role != domain.TopologyRoleStandalone {
+		switch role {
+		case domain.TopologyRoleNode:
+			if _, err := identitySvc.TransitionTo(ctx, role); err != nil {
+				t.Fatalf("transition identity to node: %v", err)
+			}
+		case domain.TopologyRoleStalePrimary:
+			if _, err := identitySvc.RecordImportedSnapshot(ctx, uuid.New(), 2); err != nil {
+				t.Fatalf("mark identity stale: %v", err)
+			}
+		default:
+			t.Fatalf("unsupported test role %s", role)
+		}
+	}
 	return httpserver.New(config.Config{
 		UIDist:            t.TempDir(),
 		SessionCookieName: "proxycore_session",
 		SessionTTL:        time.Hour,
 	}, log.New(io.Discard, "", 0),
-		httpserver.WithAuthService(svc),
+		httpserver.WithAuthService(authSvc),
 		httpserver.WithConfigurationStore(configStore),
+		httpserver.WithIdentityService(identitySvc),
 	)
 }
 

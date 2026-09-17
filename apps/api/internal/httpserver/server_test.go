@@ -1,6 +1,7 @@
 package httpserver_test
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -8,8 +9,11 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/zerkc/ProxyCore/apps/api/internal/config"
+	"github.com/zerkc/ProxyCore/apps/api/internal/domain"
 	"github.com/zerkc/ProxyCore/apps/api/internal/httpserver"
+	"github.com/zerkc/ProxyCore/apps/api/internal/identity"
 )
 
 func TestHealth(t *testing.T) {
@@ -27,6 +31,90 @@ func TestHealth(t *testing.T) {
 	}
 	if body["ok"] != true {
 		t.Fatalf("body=%v", body)
+	}
+}
+
+type readyIdentityStore struct {
+	current identity.Identity
+}
+
+func (s *readyIdentityStore) Get(context.Context) (identity.Identity, error) {
+	return s.current, nil
+}
+
+func (s *readyIdentityStore) Ensure(context.Context, domain.InstallationID, domain.NodeID) (identity.Identity, bool, error) {
+	return s.current, false, nil
+}
+
+func (s *readyIdentityStore) UpdateRole(_ context.Context, role domain.TopologyRole) error {
+	s.current.Role = role
+	return nil
+}
+
+func (s *readyIdentityStore) UpdateLeadershipGeneration(_ context.Context, generation domain.LeadershipGeneration) error {
+	s.current.LeadershipGeneration = generation
+	if generation > s.current.LatestKnownGeneration {
+		s.current.LatestKnownGeneration = generation
+	}
+	return nil
+}
+
+func (s *readyIdentityStore) UpdateLatestKnownGeneration(_ context.Context, generation domain.LeadershipGeneration) error {
+	if generation > s.current.LatestKnownGeneration {
+		s.current.LatestKnownGeneration = generation
+	}
+	return nil
+}
+
+func (s *readyIdentityStore) UpdateClusterKeyID(_ context.Context, keyID *uuid.UUID) error {
+	s.current.ClusterKeyID = keyID
+	return nil
+}
+
+func TestReadyIdentityUsesRedactedTopologyFields(t *testing.T) {
+	store := &readyIdentityStore{current: identity.Identity{
+		InstallationID:        domain.NewInstallationID(),
+		NodeID:                domain.NewNodeID(),
+		Role:                  domain.TopologyRoleStalePrimary,
+		LeadershipGeneration:  3,
+		LatestKnownGeneration: 7,
+	}}
+	identityService := identity.NewService(store)
+	if _, err := identityService.Load(context.Background()); err != nil {
+		t.Fatalf("load identity: %v", err)
+	}
+
+	srv := httpserver.New(config.Config{UIDist: t.TempDir()}, nil, httpserver.WithIdentityService(identityService))
+	req := httptest.NewRequest(http.MethodGet, "/api/ready", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Identity map[string]any `json:"identity"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{
+		"installationId",
+		"nodeId",
+		"role",
+		"leadershipGeneration",
+		"latestKnownGeneration",
+		"stalePrimary",
+		"writable",
+	} {
+		if _, ok := body.Identity[field]; !ok {
+			t.Fatalf("identity missing %q: %v", field, body.Identity)
+		}
+	}
+	if body.Identity["role"] != string(domain.TopologyRoleStalePrimary) || body.Identity["writable"] != false {
+		t.Fatalf("unexpected identity=%v", body.Identity)
+	}
+	if _, ok := body.Identity["clusterKeyId"]; ok {
+		t.Fatalf("identity leaked cluster key id: %v", body.Identity)
 	}
 }
 

@@ -1,0 +1,121 @@
+package main
+
+import (
+	"context"
+	"testing"
+
+	"github.com/google/uuid"
+
+	"github.com/zerkc/ProxyCore/apps/api/internal/domain"
+	"github.com/zerkc/ProxyCore/apps/api/internal/identity"
+)
+
+type startupIdentityStore struct {
+	current identity.Identity
+	present bool
+}
+
+func (s *startupIdentityStore) Get(context.Context) (identity.Identity, error) {
+	if !s.present {
+		return identity.Identity{}, identity.ErrNotFound
+	}
+	return s.current, nil
+}
+
+func (s *startupIdentityStore) Ensure(_ context.Context, installationID domain.InstallationID, nodeID domain.NodeID) (identity.Identity, bool, error) {
+	if s.present {
+		return s.current, false, nil
+	}
+	s.current = identity.Identity{
+		InstallationID:        installationID,
+		NodeID:                nodeID,
+		Role:                  domain.TopologyRoleStandalone,
+		LeadershipGeneration:  1,
+		LatestKnownGeneration: 1,
+	}
+	s.present = true
+	return s.current, true, nil
+}
+
+func (s *startupIdentityStore) UpdateRole(_ context.Context, role domain.TopologyRole) error {
+	if !s.present {
+		return identity.ErrNotFound
+	}
+	s.current.Role = role
+	return nil
+}
+
+func (s *startupIdentityStore) UpdateLeadershipGeneration(_ context.Context, generation domain.LeadershipGeneration) error {
+	if !s.present {
+		return identity.ErrNotFound
+	}
+	s.current.LeadershipGeneration = generation
+	if generation > s.current.LatestKnownGeneration {
+		s.current.LatestKnownGeneration = generation
+	}
+	return nil
+}
+
+func (s *startupIdentityStore) UpdateLatestKnownGeneration(_ context.Context, generation domain.LeadershipGeneration) error {
+	if !s.present {
+		return identity.ErrNotFound
+	}
+	if generation > s.current.LatestKnownGeneration {
+		s.current.LatestKnownGeneration = generation
+	}
+	return nil
+}
+
+func (s *startupIdentityStore) UpdateClusterKeyID(_ context.Context, keyID *uuid.UUID) error {
+	if !s.present {
+		return identity.ErrNotFound
+	}
+	s.current.ClusterKeyID = keyID
+	return nil
+}
+
+func TestBootstrapIdentityAcceptsPersistedNonStandaloneIdentity(t *testing.T) {
+	persisted := identity.Identity{
+		InstallationID:        domain.NewInstallationID(),
+		NodeID:                domain.NewNodeID(),
+		Role:                  domain.TopologyRoleNode,
+		LeadershipGeneration:  4,
+		LatestKnownGeneration: 4,
+	}
+
+	service, loaded, created, err := bootstrapIdentity(context.Background(), &startupIdentityStore{
+		current: persisted,
+		present: true,
+	})
+	if err != nil {
+		t.Fatalf("bootstrapIdentity: %v", err)
+	}
+	if created {
+		t.Fatal("expected an existing identity to be loaded, not bootstrapped")
+	}
+	if loaded != persisted {
+		t.Fatalf("loaded identity=%+v want %+v", loaded, persisted)
+	}
+	if service.Current().Role != domain.TopologyRoleNode {
+		t.Fatalf("service role=%s want %s", service.Current().Role, domain.TopologyRoleNode)
+	}
+}
+
+func TestBootstrapIdentityCreatesMissingIdentity(t *testing.T) {
+	service, bootstrapped, created, err := bootstrapIdentity(context.Background(), &startupIdentityStore{})
+	if err != nil {
+		t.Fatalf("bootstrapIdentity: %v", err)
+	}
+	if !created {
+		t.Fatal("expected a missing identity to be bootstrapped")
+	}
+	if !bootstrapped.InstallationID.IsValid() || !bootstrapped.NodeID.IsValid() {
+		t.Fatalf("bootstrapped identity has invalid ids: %+v", bootstrapped)
+	}
+	if bootstrapped.Role != domain.TopologyRoleStandalone {
+		t.Fatalf("bootstrapped role=%s want %s", bootstrapped.Role, domain.TopologyRoleStandalone)
+	}
+	if service.Current() != bootstrapped {
+		t.Fatalf("service identity=%+v want %+v", service.Current(), bootstrapped)
+	}
+}

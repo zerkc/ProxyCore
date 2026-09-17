@@ -67,9 +67,7 @@ func WithDefaultIngress(ingress domain.Ingress) Option {
 
 // WithIdentityService wires the durable PRIMARY/NODE identity service into
 // the HTTP server. The service is exposed through identityService() so
-// handlers can gate writes on the local topology role. The startup-time
-// stale-primary guard lives in cmd/server/main.go; this option only stores
-// the reference for handler-level checks added in later phases.
+// handlers can gate ordinary writes and expose redacted topology status.
 func WithIdentityService(svc *identity.Service) Option {
 	return func(s *Server) {
 		s.identitySvc = svc
@@ -105,6 +103,29 @@ func (s *Server) Handler() http.Handler {
 // a server that is not yet bootstrapped against PostgreSQL.
 func (s *Server) identityService() *identity.Service {
 	return s.identitySvc
+}
+
+func (s *Server) publicIdentity() map[string]any {
+	svc := s.identityService()
+	if svc == nil {
+		return nil
+	}
+	current := svc.Current()
+	stalePrimary := svc.IsStalePrimary()
+	return map[string]any{
+		"installationId":        string(current.InstallationID),
+		"nodeId":                string(current.NodeID),
+		"role":                  string(current.Role),
+		"leadershipGeneration":  current.LeadershipGeneration,
+		"latestKnownGeneration": current.LatestKnownGeneration,
+		"stalePrimary":          stalePrimary,
+		"writable":              svc.IsWritable() && !stalePrimary,
+	}
+}
+
+func (s *Server) identityWritable() bool {
+	svc := s.identityService()
+	return svc != nil && svc.IsWritable() && !svc.IsStalePrimary()
 }
 
 func (s *Server) routes() {
@@ -162,17 +183,8 @@ func (s *Server) handleReady(w http.ResponseWriter, _ *http.Request) {
 		"service": "proxycore-api",
 		"version": version.Version,
 	}
-	if svc := s.identityService(); svc != nil {
-		current := svc.Current()
-		body["identity"] = map[string]any{
-			"installationId":       string(current.InstallationID),
-			"nodeId":               string(current.NodeID),
-			"role":                 string(current.Role),
-			"leadershipGeneration": current.LeadershipGeneration,
-			"latestKnownGeneration": current.LatestKnownGeneration,
-			"stalePrimary":         svc.IsStalePrimary(),
-			"writable":             svc.IsWritable(),
-		}
+	if s.identityService() != nil {
+		body["identity"] = s.publicIdentity()
 	}
 	writeJSON(w, http.StatusOK, body)
 }
@@ -289,6 +301,16 @@ func (s *Server) requireUser(w http.ResponseWriter, r *http.Request, roles ...au
 		writeConfigError(w, &httpError{status: http.StatusForbidden, message: "Permission denied"})
 		return auth.User{}, false
 	}
+	if s.isOrdinaryMutation(r) {
+		if s.identityService() != nil && !s.identityWritable() {
+			writeConfigError(w, &httpError{
+				status:  http.StatusForbidden,
+				message: "Configuration writes are disabled for this topology identity",
+				code:    "TOPOLOGY_READ_ONLY",
+			})
+			return auth.User{}, false
+		}
+	}
 	if s.config != nil {
 		if err := s.initializeIngressSideEffect(r, user); err != nil {
 			writeConfigError(w, err)
@@ -296,6 +318,15 @@ func (s *Server) requireUser(w http.ResponseWriter, r *http.Request, roles ...au
 		}
 	}
 	return user, true
+}
+
+func (s *Server) isOrdinaryMutation(r *http.Request) bool {
+	switch r.Method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		return false
+	default:
+		return true
+	}
 }
 
 func (s *Server) initializeIngressSideEffect(r *http.Request, user auth.User) error {

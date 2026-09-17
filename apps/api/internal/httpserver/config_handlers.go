@@ -14,6 +14,7 @@ import (
 type httpError struct {
 	status  int
 	message string
+	code    string
 }
 
 func (e *httpError) Error() string { return e.message }
@@ -21,10 +22,14 @@ func (e *httpError) Error() string { return e.message }
 // writeConfigError renders {error} with the appropriate status, matching Node.
 func writeConfigError(w http.ResponseWriter, err error) {
 	status := http.StatusBadRequest
+	body := map[string]any{"error": err.Error()}
 	if he, ok := err.(*httpError); ok {
 		status = he.status
+		if he.code != "" {
+			body["code"] = he.code
+		}
 	}
-	writeJSON(w, status, map[string]any{"error": err.Error()})
+	writeJSON(w, status, body)
 }
 
 func (s *Server) configStore(w http.ResponseWriter) (*configuration.Store, bool) {
@@ -58,6 +63,9 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"zones":        status.Zones,
 		"streams":      status.Streams,
 		"certificates": publicCerts,
+	}
+	if identity := s.publicIdentity(); identity != nil {
+		response["identity"] = identity
 	}
 	if status.DesiredRevision != nil {
 		response["desiredRevision"] = map[string]any{

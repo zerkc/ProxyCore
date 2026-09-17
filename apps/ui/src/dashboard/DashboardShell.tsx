@@ -6,8 +6,27 @@ import { RecordDialog } from "./RecordDialog";
 import { ZoneDialog } from "./dns/ZoneDialog";
 import { VersionStatus } from "./VersionStatus";
 import { deriveBarState } from "./patch-bar-state";
+import type { TopologyIdentity } from "./types";
 
 const NAVIGATION_STORAGE_KEY = "proxycore.navigation.collapsed";
+
+export function getTopologyInspectorRows(identity?: TopologyIdentity) {
+  if (!identity) return [];
+  return [
+    { label: "role", value: identity.role },
+    { label: "installation ID", value: identity.installationId },
+    { label: "node ID", value: identity.nodeId },
+    {
+      label: "generation",
+      value: `${identity.leadershipGeneration} / ${identity.latestKnownGeneration}`,
+    },
+    { label: "writable", value: identity.writable ? "yes" : "no" },
+    {
+      label: "stale primary",
+      value: identity.stalePrimary ? "yes" : "no",
+    },
+  ];
+}
 
 type DashboardNavIcon = (typeof dashboardNav)[number]["icon"];
 
@@ -108,6 +127,7 @@ export default function DashboardShell({ children }: { children: ReactNode }) {
   };
   const {
     status,
+    identity,
     user,
     message,
     error,
@@ -157,6 +177,7 @@ export default function DashboardShell({ children }: { children: ReactNode }) {
           : systemState.kind === "pending"
             ? "apply pending"
             : "live";
+  const topologyRows = getTopologyInspectorRows(identity);
 
   return (
     <main className="min-h-screen">
@@ -281,6 +302,28 @@ export default function DashboardShell({ children }: { children: ReactNode }) {
                 Apply status lives in the topbar.
               </p>
             </section>
+
+            {topologyRows.length ? (
+              <section
+                className="pc-inspector-section border-t border-line/80 px-4 py-5 md:px-5"
+                aria-label="Topology identity"
+              >
+                <p className="pc-eyebrow">topology</p>
+                <dl className="mt-4 space-y-2.5 font-mono text-xs">
+                  {topologyRows.map((row) => (
+                    <div
+                      key={row.label}
+                      className="flex items-baseline justify-between gap-4 border-b border-line/70 pb-2 last:border-b-0 last:pb-0"
+                    >
+                      <dt className="shrink-0 text-faint">{row.label}</dt>
+                      <dd className="min-w-0 break-all text-right text-mist">
+                        {row.value}
+                      </dd>
+                    </div>
+                  ))}
+                </dl>
+              </section>
+            ) : null}
 
             <section className="pc-inspector-section border-t border-line/80 px-4 py-5 md:px-5">
               {routeZone ? (

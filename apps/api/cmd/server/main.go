@@ -23,6 +23,15 @@ import (
 	"github.com/zerkc/ProxyCore/apps/api/internal/version"
 )
 
+func bootstrapIdentity(ctx context.Context, store identity.Store) (*identity.Service, identity.Identity, bool, error) {
+	service := identity.NewService(store)
+	current, created, err := service.EnsureBootstrapped(ctx)
+	if err != nil {
+		return nil, identity.Identity{}, false, err
+	}
+	return service, current, created, nil
+}
+
 func updaterClientFromConfig(cfg config.Config) httpserver.Option {
 	baseURL := strings.TrimRight(strings.TrimSpace(cfg.UpdaterURL), "/")
 	if baseURL == "" {
@@ -85,26 +94,19 @@ func main() {
 			httpserver.WithDefaultIngress(defaultIngress),
 		)
 
-		// Bootstrap the durable PRIMARY/NODE identity. The service is wired
-		// into the HTTP server so handlers can gate writes on the local
-		// topology role. The startup-time stale-primary guard logs a warning
-		// and leaves Phase 2/3 to enforce per-handler write rejection.
+		// Load the durable PRIMARY/NODE identity, bootstrapping only when the
+		// singleton row is absent. Persisted valid roles must survive restart;
+		// the HTTP server enforces their writable/read-only boundary.
 		identityStore := identity.NewPgStore(pool)
-		identitySvc := identity.NewService(identityStore)
 		identityCtx, identityCancel := context.WithTimeout(context.Background(), 10*time.Second)
-		identityResult, _, err := identitySvc.EnsureBootstrapped(identityCtx)
+		identitySvc, identityResult, _, err := bootstrapIdentity(identityCtx, identityStore)
 		identityCancel()
 		if err != nil {
 			logger.Fatalf("identity bootstrap: %v", err)
 		}
-		if identityResult.Role != domain.TopologyRoleStandalone {
-			// Bootstrap should always leave a fresh install as standalone;
-			// anything else signals a corrupted state that must not pass.
-			logger.Fatalf("identity bootstrap returned unexpected role %s", identityResult.Role)
-		}
 		options = append(options, httpserver.WithIdentityService(identitySvc))
 		logger.Printf(
-			"identity bootstrapped installation=%s node=%s role=%s generation=%d",
+			"identity ready installation=%s node=%s role=%s generation=%d",
 			identityResult.InstallationID,
 			identityResult.NodeID,
 			identityResult.Role,

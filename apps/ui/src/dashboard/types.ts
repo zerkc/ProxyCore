@@ -28,7 +28,25 @@ export type JobRecord = {
   errorMessage?: string | null;
 };
 
+export type TopologyRole =
+  | "standalone-primary"
+  | "primary"
+  | "primary-with-nodes"
+  | "node"
+  | "stale-primary";
+
+export type TopologyIdentity = {
+  installationId: string;
+  nodeId: string;
+  role: TopologyRole;
+  leadershipGeneration: number;
+  latestKnownGeneration: number;
+  stalePrimary: boolean;
+  writable: boolean;
+};
+
 export type StatusPayload = {
+  identity?: TopologyIdentity;
   settings: {
     ingress: { ipv4?: string; ipv6?: string };
     defaultPool?: {
