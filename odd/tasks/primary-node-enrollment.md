@@ -7,6 +7,9 @@ Deliver secure one-time enrollment that converts a standalone ProxyCore installa
 ## Product Decisions
 
 - ProxyCore provides integrated TLS for enrollment using its internal CA; the Owner explicitly confirms the PRIMARY fingerprint.
+- The Owner configures exact enrollment DNS names/IP addresses from the ProxyCore UI before certificate issuance; ProxyCore never guesses the host LAN address or reuses proxy ingress implicitly.
+- Initial CA trust supports both manual CA fingerprint entry and public CA certificate export/import.
+- Enrollment TLS is exposed directly on port 3443, separate from Nginx and the existing HTTP UI/API.
 - Enrollment tokens are never persisted on the NODE. The Owner must re-enter the token after reload or recovery.
 - A NODE relies only on replicated Owner credentials; it does not retain or create a separate local emergency Owner.
 - Creating the first enrollment token atomically transitions `standalone-primary` to `primary`; the first committed NODE transitions it to `primary-with-nodes`.
@@ -33,7 +36,11 @@ Deliver secure one-time enrollment that converts a standalone ProxyCore installa
   - Harness classification: the supplemental blank-PostgreSQL `PHASE2_DATABASE_URL` failure was setup-only because the prerequisite `users` relation was absent; the passing `DATABASE_URL` focused run is the candidate evidence.
   - Honest count: 712 product/test/store lines plus the 58-line task artifact = 770 total; the prior independent 389 + 55 = 444 count remains the pre-correction baseline. No <=400 claim is made.
   - No migration was required. Rollback covers `apps/api/internal/enrollment/`, the token methods/imports in `apps/api/internal/configuration/phase2_store.go`, and `apps/api/internal/identity/enrollment.go` plus its tests.
-- [ ] **PNE-2 — Integrated TLS identity proof**: expose enrollment HTTPS with internal-CA identity proof, fingerprint confirmation data, redirect rejection, and hostname/identity binding tests.
+- [ ] **PNE-2A — Enrollment address configuration**: persist exact DNS/IP SANs, add Owner-only API/UI configuration, validate canonical names, and prevent certificate issuance until configured.
+- [ ] **PNE-2B — CA-backed enrollment material**: persist a dedicated enrollment leaf/key, preserve SPKI across renewal, fail closed on corrupt established material, and add the additive migration.
+- [ ] **PNE-2C — Identity-proof contract**: sign canonical attempt/nonce/URL/identity/generation/fingerprint proofs and verify tampering, expiry, roles, and hostname binding.
+- [ ] **PNE-2D — Proof-only HTTPS listener**: serve only the proof mux over TLS 1.3 on port 3443, reject redirects/downgrades, and keep ordinary HTTP routes unavailable.
+- [ ] **PNE-2E — TLS startup and trust UX**: wire startup/shutdown and Compose exposure; provide CA fingerprint display plus public CA export/import flows and restart-stability verification.
 - [ ] **PNE-3 — Sealed bootstrap grant**: implement ephemeral X25519/HKDF bootstrap sealing, node credential issuance, cluster-KEK transport, binding/AAD validation, exact idempotent retry, and redaction tests.
 - [ ] **PNE-4 — Initial snapshot publication**: authenticate current node credentials, publish only latest applied immutable state, enforce revocation, and reject an unready PRIMARY.
 - [ ] **PNE-5 — Safe NODE conversion**: archive prior standalone state, preserve node-local overlay, create the sync revision/apply job, wait for exact terminal apply, and atomically commit NODE lineage/state.
@@ -44,7 +51,7 @@ Deliver secure one-time enrollment that converts a standalone ProxyCore installa
 
 ## First Implementation Unit
 
-Start with **PNE-1** only. Keep implementation, tests, runtime evidence, and rollback boundary in the same work-unit commit. If the honest unit still exceeds 400 authored changed lines, report the smallest coherent count before implementation rather than compressing or omitting tests.
+PNE-1 is complete as two buildable review units: **PNE-1A** token lifecycle/persistence (`1ceb36a`) and **PNE-1B** live PRIMARY activation/cache integration (`a02d843`). Continue with **PNE-2A** only. Keep implementation, tests, runtime evidence, and rollback boundary in the same work-unit commit. If the honest unit still exceeds 400 authored changed lines, report the smallest coherent count before implementation rather than compressing or omitting tests.
 
 ## Verification Baseline
 
