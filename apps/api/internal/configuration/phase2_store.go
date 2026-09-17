@@ -2,16 +2,22 @@ package configuration
 
 import (
 	"context"
+	"crypto/subtle"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/zerkc/ProxyCore/apps/api/internal/domain"
 )
 
 // PgPhase2Store is the PostgreSQL implementation of the continuity
 // transaction port. It intentionally exposes only typed operations; callers
 // cannot bypass the row-lock/compare-and-set boundary with arbitrary SQL.
+const EnrollmentTokenHashVersion = "sha256-v1"
+
 type PgPhase2Store struct {
 	pool *pgxpool.Pool
 }
@@ -32,8 +38,81 @@ func (s *PgPhase2Store) WithTransaction(ctx context.Context, fn func(Phase2Trans
 	return tx.Commit(ctx)
 }
 
+func (s *PgPhase2Store) tokenTransaction(ctx context.Context, fn func(*pgPhase2Transaction) error) error {
+	return s.WithTransaction(ctx, func(tx Phase2Transaction) error { return fn(tx.(*pgPhase2Transaction)) })
+}
+
+func (s *PgPhase2Store) CreateEnrollmentToken(ctx context.Context, id, selector, hash, version, ownerID string, createdAt, expiresAt time.Time) (domain.TopologyRole, error) {
+	var role domain.TopologyRole
+	err := s.WithTransaction(ctx, func(tx Phase2Transaction) error {
+		var err error
+		role, err = tx.(*pgPhase2Transaction).CreateEnrollmentToken(ctx, id, selector, hash, version, ownerID, createdAt, expiresAt)
+		return err
+	})
+	return role, err
+}
+func (s *PgPhase2Store) CheckEnrollmentToken(ctx context.Context, selector, hash string, now time.Time, consume bool) error {
+	return s.tokenTransaction(ctx, func(tx *pgPhase2Transaction) error { return tx.CheckEnrollmentToken(ctx, selector, hash, now, consume) })
+}
+func (s *PgPhase2Store) RevokeEnrollmentToken(ctx context.Context, id, ownerID string, now time.Time) error {
+	return s.tokenTransaction(ctx, func(tx *pgPhase2Transaction) error { return tx.RevokeEnrollmentToken(ctx, id, ownerID, now) })
+}
+
 type pgPhase2Transaction struct {
 	tx pgx.Tx
+}
+
+var errEnrollmentTokenDenied = errors.New("enrollment token denied")
+
+func (t *pgPhase2Transaction) CreateEnrollmentToken(ctx context.Context, id, selector, hash, version, ownerID string, createdAt, expiresAt time.Time) (domain.TopologyRole, error) {
+	if version != EnrollmentTokenHashVersion {
+		return "", errEnrollmentTokenDenied
+	}
+	var role string
+	err := t.tx.QueryRow(ctx, `with eligible as (
+		update installation_identity set role = case when role = 'standalone-primary' then 'primary' else role end, updated_at = $7
+		where id = $1 and role in ('standalone-primary', 'primary', 'primary-with-nodes')
+		and leadership_generation >= latest_known_generation returning role
+	), inserted as (
+		insert into enrollment_tokens (id, token_selector, token_hash, hash_version, created_by_user_id, created_at, expires_at)
+		select $2, $3, $4, $5, $6, $7, $8 from eligible returning 1
+	) select role::text from eligible cross join inserted`, installationID, id, selector, hash, version, ownerID, createdAt, expiresAt).Scan(&role)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", errEnrollmentTokenDenied
+	}
+	return domain.TopologyRole(role), err
+}
+
+func (t *pgPhase2Transaction) CheckEnrollmentToken(ctx context.Context, selector, hash string, now time.Time, consume bool) error {
+	var id, storedHash, version string
+	var expiresAt time.Time
+	var consumedAt, revokedAt *time.Time
+	if err := t.tx.QueryRow(ctx, `select id::text, token_hash, hash_version, expires_at, consumed_at, revoked_at from enrollment_tokens where token_selector = $1 for update`, selector).Scan(&id, &storedHash, &version, &expiresAt, &consumedAt, &revokedAt); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return errEnrollmentTokenDenied
+		}
+		return err
+	}
+	hashMatches := subtle.ConstantTimeCompare([]byte(storedHash), []byte(hash)) == 1
+	if version != EnrollmentTokenHashVersion || !hashMatches || !expiresAt.After(now) || consumedAt != nil || revokedAt != nil {
+		return errEnrollmentTokenDenied
+	}
+	if !consume {
+		return nil
+	}
+	result, err := t.tx.Exec(ctx, `update enrollment_tokens set consumed_at = $2 where id = $1 and consumed_at is null`, id, now)
+	if err != nil {
+		return err
+	}
+	if result.RowsAffected() != 1 {
+		return errEnrollmentTokenDenied
+	}
+	return nil
+}
+
+func (t *pgPhase2Transaction) RevokeEnrollmentToken(ctx context.Context, id, ownerID string, now time.Time) error {
+	_, err := t.tx.Exec(ctx, `update enrollment_tokens set revoked_at = coalesce(revoked_at, $3) where id = $1 and created_by_user_id = $2`, id, ownerID, now)
+	return err
 }
 
 func (t *pgPhase2Transaction) LoadNodeState(ctx context.Context) (NodeStateRecord, error) {
