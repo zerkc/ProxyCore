@@ -1,4 +1,16 @@
+import type { EnrollmentHostnameConfig } from "./dashboard/types";
+
 export const SESSION_USERNAME_KEY = "proxycore_username";
+
+export class ApiError extends Error {
+  constructor(
+    public readonly status: number,
+    message: string,
+  ) {
+    super(message);
+    this.name = "ApiError";
+  }
+}
 
 export type PublicUser = {
   id: string;
@@ -24,7 +36,27 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
     error?: string;
   } & T;
   if (!response.ok) {
-    throw new Error(body.error ?? `Request failed (${response.status})`);
+    throw new ApiError(
+      response.status,
+      body.error ?? `Request failed (${response.status})`,
+    );
   }
   return body;
+}
+
+export function getEnrollmentHostnames() {
+  return api<EnrollmentHostnameConfig>(
+    "/api/settings/enrollment-hostnames",
+    { cache: "no-store" },
+  );
+}
+
+export function updateEnrollmentHostnames(hostnames: string[]) {
+  return api<EnrollmentHostnameConfig>(
+    "/api/settings/enrollment-hostnames",
+    {
+      method: "PUT",
+      body: JSON.stringify({ hostnames }),
+    },
+  );
 }

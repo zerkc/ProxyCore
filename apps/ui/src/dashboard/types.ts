@@ -28,6 +28,11 @@ export type JobRecord = {
   errorMessage?: string | null;
 };
 
+export type EnrollmentHostnameConfig = {
+  configured: boolean;
+  hostnames: string[];
+};
+
 export type TopologyRole =
   | "standalone-primary"
   | "primary"
