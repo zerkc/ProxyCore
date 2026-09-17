@@ -13,6 +13,7 @@ func TestPhase2SchemaContractCoversAdditivePersistence(t *testing.T) {
 	contract := phase2SchemaContract()
 
 	for _, table := range []string{
+		"internal_ca_enrollment_state",
 		"enrollment_tokens",
 		"enrolled_nodes",
 		"node_credentials",
@@ -28,6 +29,9 @@ func TestPhase2SchemaContractCoversAdditivePersistence(t *testing.T) {
 	}
 
 	for _, column := range []string{
+		"established_at",
+		"enrollment_certificate_pem",
+		"enrollment_key_secret_id",
 		"enrollment_attempt_id",
 		"primary_url",
 		"primary_installation_id",
@@ -103,6 +107,13 @@ func TestEnsureSchemaIsIdempotentAgainstMigratedPostgres(t *testing.T) {
 	if err := EnsureSchema(ctx, pool); err != nil {
 		t.Fatalf("second EnsureSchema: %v", err)
 	}
+	var enrollmentFKs int
+	if err := pool.QueryRow(ctx, `select count(*) from pg_constraint where conrelid = 'internal_ca'::regclass and conname in ('internal_ca_enrollment_key_secret_id_fkey', 'internal_ca_enrollment_key_secret_id_secrets_id_fk')`).Scan(&enrollmentFKs); err != nil {
+		t.Fatalf("query enrollment FK shape: %v", err)
+	}
+	if enrollmentFKs != 1 {
+		t.Fatalf("expected one enrollment key FK, got %d", enrollmentFKs)
+	}
 
 	var legacyHash string
 	if err := pool.QueryRow(ctx, `
@@ -121,13 +132,13 @@ func TestEnsureSchemaIsIdempotentAgainstMigratedPostgres(t *testing.T) {
 	if err := pool.QueryRow(ctx, `
 		select count(*) from information_schema.tables
 		where table_schema = 'public' and table_name in (
-			'enrollment_tokens', 'enrolled_nodes', 'node_credentials', 'enrollment_grants',
+			'internal_ca_enrollment_state', 'enrollment_tokens', 'enrolled_nodes', 'node_credentials', 'enrollment_grants',
 			'node_snapshot_acks', 'enrollment_attempts', 'sync_attempts', 'standalone_archives'
 		)
 	`).Scan(&tableCount); err != nil {
 		t.Fatalf("query phase 2 tables: %v", err)
 	}
-	if tableCount != 8 {
+	if tableCount != 9 {
 		t.Fatalf("expected all phase 2 tables, got %d", tableCount)
 	}
 

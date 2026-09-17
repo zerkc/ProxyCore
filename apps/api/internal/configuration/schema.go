@@ -94,6 +94,8 @@ func EnsureSchema(ctx context.Context, pool *pgxpool.Pool) error {
 			id text primary key,
 			certificate_pem text not null,
 			key_secret_id uuid not null references secrets(id),
+			enrollment_certificate_pem text,
+			enrollment_key_secret_id uuid,
 			created_at timestamptz not null default now(),
 			updated_at timestamptz not null default now()
 		);`,

@@ -45,7 +45,12 @@ Deliver secure one-time enrollment that converts a standalone ProxyCore installa
   - UI-specific tsc after correction: candidate errors are 0; the exact 5 unrelated pre-existing errors remain.
   - Buildable split: unit 1 shared API/types = 38 authored additions; unit 2 component = 200; unit 3 route/nav/shell = 36; unit 4 mounted tests/evidence = 384; apply in order 1 → 2 → 3 → 4, each under 400.
   - Rollback boundary: the UI/API helper/type/nav/route files and this task evidence; no certificate, token, listener, or deployment changes.
-- [ ] **PNE-2B — CA-backed enrollment material**: persist a dedicated enrollment leaf/key, preserve SPKI across renewal, fail closed on corrupt established material, and add the additive migration.
+- [x] **PNE-2B — CA-backed enrollment material**: persist a dedicated enrollment leaf/key, preserve SPKI across renewal, fail closed on corrupt established material, and add the additive migration. Focused tests and disposable PostgreSQL 17 migration/runtime verification passed.
+  - File-disjoint review units and authored additions: A `apps/api/internal/acme/*` = 52; B `apps/api/internal/configuration/internal_ca.go` = 255; C `apps/api/internal/configuration/internal_ca_test.go` = 237; D schema/migration/task evidence = 76; aggregate = 620; each unit is below 400.
+  - TDD evidence: RED `cd apps/api && go test ./...` (225 passed, 3 failed) plus `bun test packages/db/src/phase2-schema.test.ts` (1 passed, 1 failed); GREEN final Go (228 passed) and Drizzle (2 passed); TRIANGULATE/REFACTOR used PostgreSQL 17 runtime, `gofmt`, and final focused checks.
+  - Exact validation: `cd apps/api && go test ./...`; `cd apps/api && go test ./internal/acme ./internal/configuration ./internal/secrets`; `bun test packages/db/src/phase2-schema.test.ts`; `bun run typecheck`; `git diff --check` — all final checks passed (228, 29, 2, typecheck, and diff check).
+  - Runtime evidence: `master_key=$(openssl rand -base64 32 | tr -d '\n')`; `docker run --name proxycore-pne2b-pg17-final -e POSTGRES_USER=proxycore -e POSTGRES_PASSWORD=proxycore -e POSTGRES_DB=proxycore -p 55436:5432 -d postgres:17`; `DATABASE_URL="postgres://proxycore:proxycore@127.0.0.1:55436/proxycore" PROXYCORE_MASTER_KEY_BASE64="$master_key" bun run db:migrate`; `cd apps/api && DATABASE_URL="postgres://proxycore:proxycore@127.0.0.1:55436/proxycore" PHASE2_DATABASE_URL="postgres://proxycore:proxycore@127.0.0.1:55436/proxycore" PROXYCORE_MASTER_KEY_BASE64="$master_key" go test ./internal/configuration ./internal/secrets`; `docker rm -f proxycore-pne2b-pg17-final`; PostgreSQL-backed configuration/fail-closed/concurrency tests passed with a valid ephemeral master key.
+  - Rollback boundary is limited to the allowlisted PNE-2B files and additive identity schema; no listener, proof routes, token/bootstrap, UI, Compose, or Nginx changes. Next unit: PNE-2C identity-proof contract.
 - [ ] **PNE-2C — Identity-proof contract**: sign canonical attempt/nonce/URL/identity/generation/fingerprint proofs and verify tampering, expiry, roles, and hostname binding.
 - [ ] **PNE-2D — Proof-only HTTPS listener**: serve only the proof mux over TLS 1.3 on port 3443, reject redirects/downgrades, and keep ordinary HTTP routes unavailable.
 - [ ] **PNE-2E — TLS startup and trust UX**: wire startup/shutdown and Compose exposure; provide CA fingerprint display plus public CA export/import flows and restart-stability verification.
@@ -59,7 +64,7 @@ Deliver secure one-time enrollment that converts a standalone ProxyCore installa
 
 ## First Implementation Unit
 
-PNE-1 is complete as two buildable review units: **PNE-1A** token lifecycle/persistence (`1ceb36a`) and **PNE-1B** live PRIMARY activation/cache integration (`a02d843`). Continue with **PNE-2A** only. Keep implementation, tests, runtime evidence, and rollback boundary in the same work-unit commit. If the honest unit still exceeds 400 authored changed lines, report the smallest coherent count before implementation rather than compressing or omitting tests.
+PNE-1 and PNE-2A are complete. PNE-2B is complete as the four file-disjoint units recorded above; continue with **PNE-2C** only. Keep implementation, tests, runtime evidence, and rollback boundary in the same work-unit commit. If the honest unit still exceeds 400 authored changed lines, report the smallest coherent count before implementation rather than compressing or omitting tests.
 
 ## Verification Baseline
 

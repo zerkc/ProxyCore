@@ -45,7 +45,15 @@ describe("phase 2 persistence contract", () => {
       new URL("../migrations/0005_enrollment_hostnames.sql", import.meta.url),
       "utf8",
     );
+    const tlsIdentityMigration = readFileSync(
+      new URL("../migrations/0006_enrollment_tls_identity.sql", import.meta.url),
+      "utf8",
+    );
 
+    expect(tlsIdentityMigration).toContain(
+      `CREATE TABLE IF NOT EXISTS "${phase2PersistenceContract.internalCaEnrollmentState}"`,
+    );
+    expect(tlsIdentityMigration).toContain('"established_at"');
     for (const table of Object.values(phase2PersistenceContract.tables)) {
       expect(migration).toContain(`CREATE TABLE "${table}"`);
     }
@@ -58,6 +66,12 @@ describe("phase 2 persistence contract", () => {
     for (const column of phase2PersistenceContract.installationSettingsColumns) {
       expect(enrollmentMigration).toContain(`"${column}"`);
     }
+    for (const column of phase2PersistenceContract.internalCaColumns) {
+      expect(tlsIdentityMigration).toContain(`"${column}"`);
+    }
+    expect(tlsIdentityMigration).toContain(
+      '"internal_ca_enrollment_key_secret_id_secrets_id_fk"',
+    );
     expect(migration).toContain('"enrollment_attempts_one_active_idx"');
     expect(migration).toContain('"enrollment_attempts_state_check"');
     expect(migration).toContain('"sync_attempts_trigger_check"');

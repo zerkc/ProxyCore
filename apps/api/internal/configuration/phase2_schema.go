@@ -18,6 +18,13 @@ func phase2SchemaContract() phase2SchemaDefinition {
 		`do $$ begin create type proxycore_persistence_source as enum ('ordinary','import','sync'); exception when duplicate_object then null; end $$;`,
 		`do $$ begin create type proxycore_applied_snapshot_status as enum ('pending','applied','rejected','rolled-back','archived'); exception when duplicate_object then null; end $$;`,
 		`alter table installation_settings add column if not exists enrollment_hostnames jsonb;`,
+		`alter table internal_ca add column if not exists enrollment_certificate_pem text;`,
+		`alter table internal_ca add column if not exists enrollment_key_secret_id uuid;`,
+		`do $$ begin alter table internal_ca add constraint internal_ca_enrollment_key_secret_id_secrets_id_fk foreign key (enrollment_key_secret_id) references secrets(id); exception when duplicate_object then null; end $$;`,
+		`create table if not exists internal_ca_enrollment_state (
+			id text primary key,
+			established_at timestamptz not null
+		);`,
 
 		`create table if not exists standalone_archives (
 			id uuid primary key default gen_random_uuid(),

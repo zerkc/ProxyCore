@@ -276,8 +276,17 @@ export const internalCa = pgTable("internal_ca", {
   keySecretId: uuid("key_secret_id")
     .notNull()
     .references(() => secrets.id),
+  enrollmentCertificatePem: text("enrollment_certificate_pem"),
+  enrollmentKeySecretId: uuid("enrollment_key_secret_id").references(
+    () => secrets.id,
+  ),
   createdAt: createdAt(),
   updatedAt: updatedAt(),
+});
+
+export const internalCaEnrollmentState = pgTable("internal_ca_enrollment_state", {
+  id: text("id").primaryKey(),
+  establishedAt: timestamp("established_at", { withTimezone: true }).notNull(),
 });
 
 export const certificates = pgTable("certificates", {
@@ -754,6 +763,8 @@ export const syncAttempts = pgTable(
 
 export const phase2PersistenceContract = {
   installationSettingsColumns: ["enrollment_hostnames"],
+  internalCaColumns: ["enrollment_certificate_pem", "enrollment_key_secret_id"],
+  internalCaEnrollmentState: "internal_ca_enrollment_state",
   tables: {
     enrollmentTokens: "enrollment_tokens",
     enrolledNodes: "enrolled_nodes",
@@ -814,6 +825,7 @@ export const schema = {
   streamRoutes,
   secrets,
   internalCa,
+  internalCaEnrollmentState,
   certificates,
   providerConnections,
   configRevisions,
