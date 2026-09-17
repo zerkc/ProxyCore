@@ -10,6 +10,7 @@ import (
 	"errors"
 	"math/big"
 	"net"
+	"strings"
 	"time"
 )
 
@@ -62,6 +63,10 @@ func CreateInternalCA(validityDays int) (Material, error) {
 
 // IssueSignedByCA issues a leaf certificate signed by the ProxyCore internal CA.
 func IssueSignedByCA(hostnames []string, validityDays int, caCertPEM, caKeyPEM string) (Material, error) {
+	return IssueSignedByCAWithKey(hostnames, validityDays, caCertPEM, caKeyPEM, "")
+}
+
+func IssueSignedByCAWithKey(hostnames []string, validityDays int, caCertPEM, caKeyPEM, leafKeyPEM string) (Material, error) {
 	names, err := normalizeHostnames(hostnames)
 	if err != nil {
 		return Material{}, err
@@ -74,15 +79,27 @@ func IssueSignedByCA(hostnames []string, validityDays int, caCertPEM, caKeyPEM s
 		return Material{}, err
 	}
 
-	now := time.Now()
+	now := time.Now().UTC()
 	expiresAt := now.Add(time.Duration(validityDays) * 24 * time.Hour)
 	if expiresAt.After(caCert.NotAfter) {
 		expiresAt = caCert.NotAfter
 	}
 
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		return Material{}, err
+	var key crypto.Signer
+	var keyPEM string
+	if leafKeyPEM == "" {
+		generated, err := rsa.GenerateKey(rand.Reader, 2048)
+		if err != nil {
+			return Material{}, err
+		}
+		key = generated
+		keyPEM = string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: pkcs8(generated)}))
+	} else {
+		key, err = parsePrivateKey(leafKeyPEM)
+		if err != nil {
+			return Material{}, errors.New("enrollment leaf private key PEM is invalid")
+		}
+		keyPEM = strings.TrimSpace(leafKeyPEM) + "\n"
 	}
 	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
 	if err != nil {
@@ -105,15 +122,14 @@ func IssueSignedByCA(hostnames []string, validityDays int, caCertPEM, caKeyPEM s
 			template.DNSNames = append(template.DNSNames, name)
 		}
 	}
-	der, err := x509.CreateCertificate(rand.Reader, &template, caCert, &key.PublicKey, caKey)
+	der, err := x509.CreateCertificate(rand.Reader, &template, caCert, key.Public(), caKey)
 	if err != nil {
 		return Material{}, err
 	}
 	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
-	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: pkcs8(key)})
 	return Material{
 		CertificatePEM: string(certPEM),
-		PrivateKeyPEM:  string(keyPEM),
+		PrivateKeyPEM:  keyPEM,
 		ExpiresAt:      expiresAt,
 	}, nil
 }
@@ -124,11 +140,12 @@ func parseCAMaterial(caCertPEM, caKeyPEM string) (*x509.Certificate, crypto.Sign
 		return nil, nil, errors.New("internal CA certificate PEM is invalid")
 	}
 	caCert, err := x509.ParseCertificate(block.Bytes)
-	if err != nil {
+	if err != nil || !caCert.IsCA || caCert.KeyUsage&x509.KeyUsageCertSign == 0 {
 		return nil, nil, errors.New("internal CA certificate PEM is invalid")
 	}
-	if !caCert.IsCA {
-		return nil, nil, errors.New("internal CA certificate is not a CA")
+	now := time.Now()
+	if now.Before(caCert.NotBefore) || !caCert.NotAfter.After(now) {
+		return nil, nil, errors.New("internal CA certificate is expired or not yet valid")
 	}
 	caKey, err := parsePrivateKey(caKeyPEM)
 	if err != nil {
@@ -137,5 +154,13 @@ func parseCAMaterial(caCertPEM, caKeyPEM string) (*x509.Certificate, crypto.Sign
 	if !publicKeysMatch(caCert.PublicKey, caKey) {
 		return nil, nil, errors.New("internal CA certificate and private key do not match")
 	}
+	if err := caCert.CheckSignatureFrom(caCert); err != nil {
+		return nil, nil, errors.New("internal CA certificate signature is invalid")
+	}
 	return caCert, caKey, nil
+}
+
+func ValidateInternalCAMaterial(caCertPEM, caKeyPEM string) error {
+	_, _, err := parseCAMaterial(caCertPEM, caKeyPEM)
+	return err
 }

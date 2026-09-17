@@ -49,3 +49,20 @@ func TestIssueSignedByCARejectsBadCA(t *testing.T) {
 		t.Fatal("expected error for invalid CA material")
 	}
 }
+
+func TestValidateInternalCAMaterialRejectsTamperedSignature(t *testing.T) {
+	ca, err := CreateInternalCA(3650)
+	if err != nil {
+		t.Fatalf("CreateInternalCA: %v", err)
+	}
+	block, _ := pem.Decode([]byte(ca.CertificatePEM))
+	der := append([]byte(nil), block.Bytes...)
+	der[len(der)-1] ^= 1
+	if _, err := x509.ParseCertificate(der); err != nil {
+		t.Fatalf("tampered certificate became syntactically invalid: %v", err)
+	}
+	tampered := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	if err := ValidateInternalCAMaterial(string(tampered), ca.PrivateKeyPEM); err == nil {
+		t.Fatal("accepted an internal CA with a tampered signature")
+	}
+}
