@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import { Navigate, Route, Routes, useParams } from "react-router-dom";
 import { CertificatesView } from "./dashboard/CertificatesView";
+import { ContinuityView } from "./dashboard/ContinuityView";
 import { DashboardProvider, useDashboard } from "./dashboard/dashboard-context";
 import DashboardShell from "./dashboard/DashboardShell";
 import { DnsZonesView } from "./dashboard/dns/DnsZonesView";
@@ -37,6 +38,7 @@ function DashboardRoutes() {
             path="certificates"
             element={<DashboardCertificatesPage />}
           />
+          <Route path="continuity" element={<DashboardContinuityPage />} />
           <Route path="ingress" element={<IngressView />} />
           <Route path="streams" element={<DashboardStreamsPage />} />
           <Route path="*" element={<Navigate to="/dashboard" replace />} />
@@ -95,6 +97,11 @@ function DashboardCertificatesPage() {
       onError={setError}
     />
   );
+}
+
+function DashboardContinuityPage() {
+  const { identity } = useDashboard();
+  return <ContinuityView identity={identity} />;
 }
 
 function DashboardStreamsPage() {

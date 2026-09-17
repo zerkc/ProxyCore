@@ -1,5 +1,19 @@
 import { describe, expect, it } from "vitest";
 import { getTopologyInspectorRows } from "./DashboardShell";
+import { dashboardNav, resolveDashboardNav } from "./nav";
+
+describe("dashboard continuity navigation", () => {
+  it("routes authenticated dashboard navigation to Continuity", () => {
+    expect(dashboardNav).toContainEqual({
+      href: "/dashboard/continuity",
+      id: "continuity",
+      label: "continuity",
+      title: "enrollment hostnames",
+      icon: "continuity",
+    });
+    expect(resolveDashboardNav("/dashboard/continuity").id).toBe("continuity");
+  });
+});
 
 describe("topology inspector identity", () => {
   it("surfaces redacted role, identifiers, generations, and write state", () => {

@@ -21,6 +21,13 @@ export const dashboardNav = [
     icon: "certificates",
   },
   {
+    href: "/dashboard/continuity",
+    id: "continuity",
+    label: "continuity",
+    title: "enrollment hostnames",
+    icon: "continuity",
+  },
+  {
     href: "/dashboard/ingress",
     id: "ingress",
     label: "ingress",

@@ -75,6 +75,14 @@ function NavIcon({ icon }: { icon: DashboardNavIcon }) {
         </>
       );
       break;
+    case "continuity":
+      glyph = (
+        <>
+          <path d="M8.5 12.5 12 9a3.5 3.5 0 0 1 5 5l-2 2a3.5 3.5 0 0 1-5 0" />
+          <path d="m15.5 11.5-3.5 3a3.5 3.5 0 0 1-5-5l2-2a3.5 3.5 0 0 1 5 0" />
+        </>
+      );
+      break;
     case "ingress":
       glyph = (
         <>
