@@ -144,6 +144,12 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("PUT /api/settings", s.handlePutSettings)
 	s.mux.HandleFunc("GET /api/settings/enrollment-hostnames", s.handleGetEnrollmentHostnames)
 	s.mux.HandleFunc("PUT /api/settings/enrollment-hostnames", s.handlePutEnrollmentHostnames)
+	s.mux.HandleFunc("GET "+EnrollmentTrustPath, s.handleGetEnrollmentTrust)
+	s.mux.HandleFunc("GET "+EnrollmentTrustCAPEMPath, s.handleDownloadEnrollmentCA)
+	// Keep the transitional settings namespace available while topology routes
+	// become the canonical enrollment trust API.
+	s.mux.HandleFunc("GET "+enrollmentTrustSettingsAliasPath, s.handleGetEnrollmentTrust)
+	s.mux.HandleFunc("GET "+enrollmentTrustSettingsAliasCAPEM, s.handleDownloadEnrollmentCA)
 	s.mux.HandleFunc("POST /api/apply", s.handleApply)
 	s.mux.HandleFunc("GET /api/users", s.handleListUsers)
 	s.mux.HandleFunc("POST /api/users", s.handleCreateUser)
@@ -247,7 +253,9 @@ func (s *Server) handleAuthChangePassword(w http.ResponseWriter, r *http.Request
 		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "error": "auth is not configured", "code": "AUTH_UNAVAILABLE"})
 		return
 	}
-	var input struct { Password string `json:"password"` }
+	var input struct {
+		Password string `json:"password"`
+	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&input); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid JSON body", "code": "INVALID_REQUEST"})
 		return
@@ -286,21 +294,8 @@ func (s *Server) handleAuthLogout(w http.ResponseWriter, r *http.Request) {
 // requireUser authenticates the caller, enforces roles, and performs the
 // ingress-initialization side effect (matching the Node requireUser).
 func (s *Server) requireUser(w http.ResponseWriter, r *http.Request, roles ...auth.Role) (auth.User, bool) {
-	if s.auth == nil {
-		writeConfigError(w, &httpError{status: http.StatusServiceUnavailable, message: "auth is not configured"})
-		return auth.User{}, false
-	}
-	user, err := s.auth.Authenticate(r.Context(), s.tokenFromRequest(r))
-	if err != nil {
-		writeConfigError(w, &httpError{status: http.StatusUnauthorized, message: "Authentication required"})
-		return auth.User{}, false
-	}
-	if user.PasswordChangeRequired {
-		writeJSON(w, http.StatusForbidden, map[string]any{"ok": false, "error": "Password change required", "code": "PASSWORD_CHANGE_REQUIRED"})
-		return auth.User{}, false
-	}
-	if len(roles) > 0 && !roleAllowed(user.Role, roles) {
-		writeConfigError(w, &httpError{status: http.StatusForbidden, message: "Permission denied"})
+	user, ok := s.requireAuthenticatedUser(w, r, roles...)
+	if !ok {
 		return auth.User{}, false
 	}
 	if s.isOrdinaryMutation(r) {
@@ -318,6 +313,74 @@ func (s *Server) requireUser(w http.ResponseWriter, r *http.Request, roles ...au
 			writeConfigError(w, err)
 			return auth.User{}, false
 		}
+	}
+	return user, true
+}
+
+// requireUserReadOnly authenticates and authorizes a read without running the
+// ordinary ingress initialization hook. Certificate/trust reads must not
+// create or update configuration state as a GET side effect.
+func (s *Server) requireUserReadOnly(w http.ResponseWriter, r *http.Request, roles ...auth.Role) (auth.User, bool) {
+	return s.requireAuthenticatedUser(w, r, roles...)
+}
+
+// requireEnrollmentTrustUser authenticates an Owner and checks the live,
+// cached topology identity without invoking any writable identity operation or
+// configuration side effect.
+func (s *Server) requireEnrollmentTrustUser(w http.ResponseWriter, r *http.Request) bool {
+	if _, ok := s.requireUserReadOnly(w, r, auth.RoleOwner); !ok {
+		return false
+	}
+	current, loaded := s.currentIdentityReadOnly()
+	if !loaded || !enrollmentTrustIdentityEligible(current) {
+		writeConfigError(w, &httpError{status: http.StatusForbidden, message: "Permission denied"})
+		return false
+	}
+	return true
+}
+
+func (s *Server) currentIdentityReadOnly() (current identity.Identity, loaded bool) {
+	service := s.identityService()
+	if service == nil {
+		return identity.Identity{}, false
+	}
+	defer func() {
+		if recover() != nil {
+			current, loaded = identity.Identity{}, false
+		}
+	}()
+	return service.Current(), true
+}
+
+func enrollmentTrustIdentityEligible(current identity.Identity) bool {
+	if current.IsStalePrimary() {
+		return false
+	}
+	switch current.Role {
+	case domain.TopologyRoleStandalone, domain.TopologyRolePrimary, domain.TopologyRolePrimaryWithNodes:
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *Server) requireAuthenticatedUser(w http.ResponseWriter, r *http.Request, roles ...auth.Role) (auth.User, bool) {
+	if s.auth == nil {
+		writeConfigError(w, &httpError{status: http.StatusServiceUnavailable, message: "auth is not configured"})
+		return auth.User{}, false
+	}
+	user, err := s.auth.Authenticate(r.Context(), s.tokenFromRequest(r))
+	if err != nil {
+		writeConfigError(w, &httpError{status: http.StatusUnauthorized, message: "Authentication required"})
+		return auth.User{}, false
+	}
+	if user.PasswordChangeRequired {
+		writeJSON(w, http.StatusForbidden, map[string]any{"ok": false, "error": "Password change required", "code": "PASSWORD_CHANGE_REQUIRED"})
+		return auth.User{}, false
+	}
+	if len(roles) > 0 && !roleAllowed(user.Role, roles) {
+		writeConfigError(w, &httpError{status: http.StatusForbidden, message: "Permission denied"})
+		return auth.User{}, false
 	}
 	return user, true
 }
