@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/zerkc/ProxyCore/apps/api/internal/cluster"
 	"github.com/zerkc/ProxyCore/apps/api/internal/domain"
 )
 
@@ -20,11 +21,20 @@ import (
 const EnrollmentTokenHashVersion = "sha256-v1"
 
 type PgPhase2Store struct {
-	pool *pgxpool.Pool
+	pool            *pgxpool.Pool
+	clusterKeyStore cluster.KeyStore
 }
 
 func NewPhase2Store(pool *pgxpool.Pool) *PgPhase2Store {
 	return &PgPhase2Store{pool: pool}
+}
+
+func NewPhase2StoreWithClusterKeyStore(pool *pgxpool.Pool, keyStore cluster.KeyStore) *PgPhase2Store {
+	return &PgPhase2Store{pool: pool, clusterKeyStore: keyStore}
+}
+
+func NewPhase2StoreWithMasterKey(pool *pgxpool.Pool, masterKeyBase64 string) *PgPhase2Store {
+	return NewPhase2StoreWithClusterKeyStore(pool, cluster.NewStore(masterKeyBase64))
 }
 
 // GetEnrollmentHostnames returns the durable exact SAN configuration without
@@ -86,7 +96,22 @@ func (s *PgPhase2Store) WithTransaction(ctx context.Context, fn func(Phase2Trans
 		return err
 	}
 	defer tx.Rollback(ctx)
-	if err := fn(&pgPhase2Transaction{tx: tx}); err != nil {
+	if err := fn(&pgPhase2Transaction{tx: tx, clusterKeyStore: s.clusterKeyStore}); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func (s *PgPhase2Store) WithPrimaryGrant(ctx context.Context, fn func(PrimaryGrantTransaction) error) error {
+	if s == nil || s.pool == nil || fn == nil {
+		return ErrEnrollmentGrantStore
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if err := fn(&pgPhase2Transaction{tx: tx, clusterKeyStore: s.clusterKeyStore}); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
@@ -113,7 +138,8 @@ func (s *PgPhase2Store) RevokeEnrollmentToken(ctx context.Context, id, ownerID s
 }
 
 type pgPhase2Transaction struct {
-	tx pgx.Tx
+	tx              pgx.Tx
+	clusterKeyStore cluster.KeyStore
 }
 
 var errEnrollmentTokenDenied = errors.New("enrollment token denied")
