@@ -2,6 +2,9 @@ package main
 
 import (
 	"context"
+	"errors"
+	"net"
+	"net/http"
 	"testing"
 
 	"github.com/google/uuid"
@@ -72,6 +75,27 @@ func (s *startupIdentityStore) UpdateClusterKeyID(_ context.Context, keyID *uuid
 	}
 	s.current.ClusterKeyID = keyID
 	return nil
+}
+
+func TestIsNormalRuntimeCloseClassifiesExpectedStops(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "nil", want: true},
+		{name: "context canceled", err: context.Canceled, want: true},
+		{name: "http closed", err: http.ErrServerClosed, want: true},
+		{name: "network closed", err: net.ErrClosed, want: true},
+		{name: "unexpected", err: errors.New("unexpected server failure"), want: false},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isNormalRuntimeClose(tt.err); got != tt.want {
+				t.Fatalf("isNormalRuntimeClose(%v)=%t, want %t", tt.err, got, tt.want)
+			}
+		})
+	}
 }
 
 func TestBootstrapIdentityAcceptsPersistedNonStandaloneIdentity(t *testing.T) {
