@@ -50,6 +50,13 @@
       "when": 1789300000000,
       "tag": "0006_enrollment_tls_identity",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1789400000000,
+      "tag": "0007_enrollment_grant_preview_digest",
+      "breakpoints": true
     }
   ]
 }

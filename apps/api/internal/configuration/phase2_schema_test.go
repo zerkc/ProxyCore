@@ -6,7 +6,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/zerkc/ProxyCore/apps/api/internal/auth"
 )
 
 func TestPhase2SchemaContractCoversAdditivePersistence(t *testing.T) {
@@ -43,6 +47,7 @@ func TestPhase2SchemaContractCoversAdditivePersistence(t *testing.T) {
 		"consecutive_failures",
 		"next_attempt_at",
 		"last_error_code",
+		"verified_preview_digest",
 		"source",
 		"source_primary_id",
 		"source_node_id",
@@ -64,6 +69,9 @@ func TestPhase2SchemaContractCoversAdditivePersistence(t *testing.T) {
 	if !containsSQLText(contract.Statements, "enrollment_attempts_state_check") {
 		t.Fatal("phase 2 schema must check enrollment attempt states")
 	}
+	if !containsSQLText(contract.Statements, "alter table enrollment_grants add column if not exists verified_preview_digest") {
+		t.Fatal("phase 2 schema must upgrade existing grants with the verified preview digest")
+	}
 	if !containsSQLText(contract.Statements, "sync_attempts_trigger_check") {
 		t.Fatal("phase 2 schema must check sync triggers")
 	}
@@ -75,6 +83,31 @@ func TestPhase2SchemaContractCoversAdditivePersistence(t *testing.T) {
 	}
 }
 
+func TestPhase2SchemaKeepsPrimaryAttemptIDsCrossInstallation(t *testing.T) {
+	contract := phase2SchemaContract()
+	for _, table := range []string{"enrollment_tokens", "enrollment_grants", "enrolled_nodes"} {
+		for _, statement := range contract.Statements {
+			lower := strings.ToLower(statement)
+			if strings.Contains(lower, "create table if not exists "+table) &&
+				strings.Contains(lower, "references enrollment_attempts") {
+				t.Fatalf("%s still references node-local enrollment_attempts: %q", table, statement)
+			}
+		}
+	}
+	for _, constraint := range []string{
+		"enrollment_tokens_consumed_by_attempt_id_enrollment_attempts_id_fk",
+		"enrollment_tokens_consumed_by_attempt_id_fkey",
+		"enrollment_grants_attempt_id_enrollment_attempts_id_fk",
+		"enrollment_grants_attempt_id_fkey",
+		"enrolled_nodes_created_by_attempt_id_enrollment_attempts_id_fk",
+		"enrolled_nodes_created_by_attempt_id_fkey",
+	} {
+		if !containsSQLText(contract.Statements, "drop constraint if exists "+constraint) {
+			t.Fatalf("missing idempotent legacy constraint drop %q", constraint)
+		}
+	}
+}
+
 func TestPhase2SchemaContractIsIdempotentAndNonDestructive(t *testing.T) {
 	contract := phase2SchemaContract()
 	for _, statement := range contract.Statements {
@@ -82,8 +115,9 @@ func TestPhase2SchemaContractIsIdempotentAndNonDestructive(t *testing.T) {
 			!strings.Contains(strings.ToLower(statement), "alter") {
 			t.Errorf("phase 2 schema statement is not additive: %q", statement)
 		}
-		if strings.Contains(strings.ToLower(statement), "drop ") ||
-			strings.Contains(strings.ToLower(statement), "truncate ") {
+		lower := strings.ToLower(statement)
+		if (strings.Contains(lower, "drop ") && !strings.Contains(lower, "drop constraint if exists")) ||
+			strings.Contains(lower, "truncate ") {
 			t.Errorf("phase 2 schema statement is destructive: %q", statement)
 		}
 	}
@@ -95,17 +129,83 @@ func TestEnsureSchemaIsIdempotentAgainstMigratedPostgres(t *testing.T) {
 		t.Skip("PHASE2_DATABASE_URL is not configured")
 	}
 	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, databaseURL)
+	admin, err := pgxpool.New(ctx, databaseURL)
 	if err != nil {
-		t.Fatalf("connect: %v", err)
+		t.Fatalf("connect admin: %v", err)
 	}
-	defer pool.Close()
-
+	schema := "phase2_schema_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+	ident := pgx.Identifier{schema}.Sanitize()
+	if _, err := admin.Exec(ctx, "create schema "+ident); err != nil {
+		admin.Close()
+		t.Fatalf("create isolated schema: %v", err)
+	}
+	cfg, err := pgxpool.ParseConfig(databaseURL)
+	if err != nil {
+		admin.Close()
+		t.Fatalf("parse database config: %v", err)
+	}
+	if cfg.ConnConfig.RuntimeParams == nil {
+		cfg.ConnConfig.RuntimeParams = map[string]string{}
+	}
+	cfg.ConnConfig.RuntimeParams["search_path"] = schema
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		admin.Close()
+		t.Fatalf("connect isolated schema: %v", err)
+	}
+	t.Cleanup(func() {
+		pool.Close()
+		_, _ = admin.Exec(context.Background(), "drop schema if exists "+ident+" cascade")
+		admin.Close()
+	})
+	if err := auth.NewPostgresStore(pool).EnsureSchema(ctx); err != nil {
+		t.Fatalf("ensure auth schema: %v", err)
+	}
 	if err := EnsureSchema(ctx, pool); err != nil {
 		t.Fatalf("first EnsureSchema: %v", err)
 	}
+	for _, statement := range []string{
+		`alter table enrollment_tokens add constraint enrollment_tokens_consumed_by_attempt_id_fkey foreign key (consumed_by_attempt_id) references enrollment_attempts(id)`,
+		`alter table enrollment_grants add constraint enrollment_grants_attempt_id_fkey foreign key (attempt_id) references enrollment_attempts(id)`,
+		`alter table enrolled_nodes add constraint enrolled_nodes_created_by_attempt_id_fkey foreign key (created_by_attempt_id) references enrollment_attempts(id)`,
+	} {
+		if _, err := pool.Exec(ctx, statement); err != nil {
+			t.Fatalf("simulate legacy cross-install FK: %v", err)
+		}
+	}
+	if _, err := pool.Exec(ctx, `alter table enrollment_grants drop column verified_preview_digest`); err != nil {
+		t.Fatalf("simulate pre-0007 schema: %v", err)
+	}
+	if err := EnsureSchema(ctx, pool); err != nil {
+		t.Fatalf("upgrade EnsureSchema: %v", err)
+	}
 	if err := EnsureSchema(ctx, pool); err != nil {
 		t.Fatalf("second EnsureSchema: %v", err)
+	}
+	var previewDigestColumn string
+	if err := pool.QueryRow(ctx, `
+		select is_nullable from information_schema.columns
+		where table_schema = current_schema() and table_name = 'enrollment_grants'
+		  and column_name = 'verified_preview_digest'
+	`).Scan(&previewDigestColumn); err != nil {
+		t.Fatalf("read upgraded preview digest column: %v", err)
+	}
+	if previewDigestColumn != "YES" {
+		t.Fatalf("upgraded preview digest nullability = %q, want YES for legacy rows", previewDigestColumn)
+	}
+	var legacyFKCount int
+	if err := pool.QueryRow(ctx, `
+		select count(*) from pg_constraint
+		where conname in (
+			'enrollment_tokens_consumed_by_attempt_id_fkey',
+			'enrollment_grants_attempt_id_fkey',
+			'enrolled_nodes_created_by_attempt_id_fkey'
+		)
+	`).Scan(&legacyFKCount); err != nil {
+		t.Fatalf("read legacy cross-install FKs: %v", err)
+	}
+	if legacyFKCount != 0 {
+		t.Fatalf("legacy cross-install FKs remaining = %d", legacyFKCount)
 	}
 	var enrollmentFKs int
 	if err := pool.QueryRow(ctx, `select count(*) from pg_constraint where conrelid = 'internal_ca'::regclass and conname in ('internal_ca_enrollment_key_secret_id_fkey', 'internal_ca_enrollment_key_secret_id_secrets_id_fk')`).Scan(&enrollmentFKs); err != nil {
@@ -131,7 +231,7 @@ func TestEnsureSchemaIsIdempotentAgainstMigratedPostgres(t *testing.T) {
 	var tableCount int
 	if err := pool.QueryRow(ctx, `
 		select count(*) from information_schema.tables
-		where table_schema = 'public' and table_name in (
+		where table_schema = current_schema() and table_name in (
 			'internal_ca_enrollment_state', 'enrollment_tokens', 'enrolled_nodes', 'node_credentials', 'enrollment_grants',
 			'node_snapshot_acks', 'enrollment_attempts', 'sync_attempts', 'standalone_archives'
 		)
@@ -154,7 +254,7 @@ func TestEnsureSchemaIsIdempotentAgainstMigratedPostgres(t *testing.T) {
 		var present bool
 		if err := pool.QueryRow(ctx, `
 			select exists (
-				select 1 from pg_indexes where schemaname = 'public' and indexname = $1
+				select 1 from pg_indexes where schemaname = current_schema() and indexname = $1
 			)
 		`, indexName).Scan(&present); err != nil {
 			t.Fatalf("query index %s: %v", indexName, err)

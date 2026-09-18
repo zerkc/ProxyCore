@@ -70,6 +70,21 @@ export type EnrollmentAttemptRecord = {
   updatedAt: Date;
 };
 
+export type EnrollmentGrantRecord = {
+  attemptId: string;
+  tokenId: string;
+  installationId: string;
+  nodeId: string;
+  primaryId: string;
+  primaryGeneration: number;
+  verifiedPreviewDigest?: string;
+  nodeEphemeralPublicKey: string;
+  sealedBootstrapPayload: string;
+  payloadHash: string;
+  createdAt: Date;
+  expiresAt: Date;
+};
+
 export type SyncAttemptRecord = {
   id: string;
   nodeId: string;
@@ -122,6 +137,8 @@ export interface ContinuityTransactionPort {
   getEnrollmentAttempt(
     id: string,
   ): Promise<EnrollmentAttemptRecord | undefined>;
+  createEnrollmentGrant(grant: EnrollmentGrantRecord): Promise<void>;
+  getEnrollmentGrant(id: string): Promise<EnrollmentGrantRecord | undefined>;
   recordSyncAttempt(attempt: SyncAttemptRecord): Promise<void>;
   recordAppliedSnapshot(snapshot: AppliedSnapshotRecord): Promise<void>;
   recordSnapshotAcknowledgement(ack: SnapshotAcknowledgement): Promise<void>;
@@ -143,6 +160,7 @@ export class InMemoryContinuityPersistence implements ContinuityPersistencePort 
     string,
     EnrollmentAttemptRecord
   >();
+  private readonly enrollmentGrants = new Map<string, EnrollmentGrantRecord>();
   private readonly syncAttempts = new Map<string, SyncAttemptRecord>();
   private readonly appliedSnapshots = new Map<string, AppliedSnapshotRecord>();
   private readonly acknowledgements = new Map<
@@ -165,6 +183,10 @@ export class InMemoryContinuityPersistence implements ContinuityPersistencePort 
         this.enrollmentAttempts.set(attempt.id, { ...attempt });
       },
       getEnrollmentAttempt: async (id) => this.enrollmentAttempts.get(id),
+      createEnrollmentGrant: async (grant) => {
+        this.enrollmentGrants.set(grant.attemptId, { ...grant });
+      },
+      getEnrollmentGrant: async (id) => this.enrollmentGrants.get(id),
       recordSyncAttempt: async (attempt) => {
         this.syncAttempts.set(attempt.id, { ...attempt });
       },

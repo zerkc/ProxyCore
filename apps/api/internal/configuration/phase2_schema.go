@@ -82,7 +82,7 @@ func phase2SchemaContract() phase2SchemaDefinition {
 			created_at timestamptz not null default now(),
 			expires_at timestamptz not null,
 			consumed_at timestamptz,
-			consumed_by_attempt_id uuid references enrollment_attempts(id),
+			consumed_by_attempt_id uuid,
 			revoked_at timestamptz,
 			constraint enrollment_tokens_expiry_check check (expires_at > created_at)
 		);`,
@@ -107,19 +107,20 @@ func phase2SchemaContract() phase2SchemaDefinition {
 			credential_id uuid not null references node_credentials(id),
 			enrolled_at timestamptz not null default now(),
 			revoked_at timestamptz,
-			created_by_attempt_id uuid not null references enrollment_attempts(id),
+			created_by_attempt_id uuid not null,
 			constraint enrolled_nodes_attempt_unique unique (created_by_attempt_id)
 		);`,
 		`create unique index if not exists enrolled_nodes_installation_idx on enrolled_nodes (installation_id);`,
 		`create unique index if not exists enrolled_nodes_credential_idx on enrolled_nodes (credential_id);`,
 
 		`create table if not exists enrollment_grants (
-			attempt_id uuid primary key references enrollment_attempts(id),
+			attempt_id uuid primary key,
 			token_id uuid not null unique references enrollment_tokens(id),
 			installation_id uuid not null,
 			node_id uuid not null,
 			primary_id uuid not null,
 			primary_generation bigint not null,
+			verified_preview_digest text,
 			node_ephemeral_public_key text not null,
 			sealed_bootstrap_payload text not null,
 			payload_hash text not null,
@@ -127,6 +128,13 @@ func phase2SchemaContract() phase2SchemaDefinition {
 			expires_at timestamptz not null,
 			constraint enrollment_grants_expiry_check check (expires_at > created_at)
 		);`,
+		`alter table enrollment_grants add column if not exists verified_preview_digest text;`,
+		`alter table enrollment_tokens drop constraint if exists enrollment_tokens_consumed_by_attempt_id_enrollment_attempts_id_fk;`,
+		`alter table enrollment_tokens drop constraint if exists enrollment_tokens_consumed_by_attempt_id_fkey;`,
+		`alter table enrollment_grants drop constraint if exists enrollment_grants_attempt_id_enrollment_attempts_id_fk;`,
+		`alter table enrollment_grants drop constraint if exists enrollment_grants_attempt_id_fkey;`,
+		`alter table enrolled_nodes drop constraint if exists enrolled_nodes_created_by_attempt_id_enrollment_attempts_id_fk;`,
+		`alter table enrolled_nodes drop constraint if exists enrolled_nodes_created_by_attempt_id_fkey;`,
 
 		`create table if not exists node_snapshot_acks (
 			node_id uuid not null references enrolled_nodes(node_id),

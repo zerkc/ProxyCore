@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   InMemoryContinuityPersistence,
   type EnrollmentAttemptRecord,
+  type EnrollmentGrantRecord,
   type SnapshotAcknowledgement,
 } from "./ports";
 
@@ -17,6 +18,20 @@ describe("phase 2 persistence ports", () => {
       createdAt: new Date("2026-01-01T00:00:00Z"),
       updatedAt: new Date("2026-01-01T00:00:00Z"),
     };
+    const grant: EnrollmentGrantRecord = {
+      attemptId: "attempt-1",
+      tokenId: "token-1",
+      installationId: "00000000-0000-4000-8000-000000000010",
+      nodeId: "00000000-0000-4000-8000-000000000011",
+      primaryId: "00000000-0000-4000-8000-000000000012",
+      primaryGeneration: 3,
+      nodeEphemeralPublicKey: '{"version":2,"publicKey":"key"}',
+      verifiedPreviewDigest: "11".repeat(32),
+      sealedBootstrapPayload: "sealed-envelope",
+      payloadHash: "22".repeat(32),
+      createdAt: new Date("2026-01-01T00:00:00Z"),
+      expiresAt: new Date("2026-01-01T00:15:00Z"),
+    };
     const acknowledgement: SnapshotAcknowledgement = {
       nodeId: "00000000-0000-4000-8000-000000000001",
       contentHash: "hash-47",
@@ -30,6 +45,7 @@ describe("phase 2 persistence ports", () => {
 
     await store.withTransaction(async (tx) => {
       await tx.createEnrollmentAttempt(attempt);
+      await tx.createEnrollmentGrant(grant);
       await tx.recordSnapshotAcknowledgement(acknowledgement);
     });
 
@@ -39,6 +55,7 @@ describe("phase 2 persistence ports", () => {
         state: "confirmed",
         primaryUrl: "https://primary.example",
       });
+      expect(await tx.getEnrollmentGrant("attempt-1")).toMatchObject(grant);
       expect(
         await tx.getSnapshotAcknowledgement(
           acknowledgement.nodeId,

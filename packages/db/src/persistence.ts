@@ -43,6 +43,7 @@ import {
   configRevisions,
   dnsRecords,
   enrollmentAttempts,
+  enrollmentGrants,
   nodeSnapshotAcks,
   nodeState,
   syncAttempts,
@@ -56,6 +57,7 @@ import type {
   ContinuityPersistencePort,
   ContinuityTransactionPort,
   EnrollmentAttemptRecord,
+  EnrollmentGrantRecord,
   JobEnqueueInput,
   JobRecord,
   JobStore,
@@ -457,6 +459,36 @@ class PgContinuityTransaction implements ContinuityTransactionPort {
     return row ? toEnrollmentAttempt(row) : undefined;
   }
 
+  async createEnrollmentGrant(
+    grant: EnrollmentGrantRecord,
+  ): Promise<void> {
+    await this.db.insert(enrollmentGrants).values({
+      attemptId: grant.attemptId,
+      tokenId: grant.tokenId,
+      installationId: grant.installationId,
+      nodeId: grant.nodeId,
+      primaryId: grant.primaryId,
+      primaryGeneration: grant.primaryGeneration,
+      verifiedPreviewDigest: grant.verifiedPreviewDigest,
+      nodeEphemeralPublicKey: grant.nodeEphemeralPublicKey,
+      sealedBootstrapPayload: grant.sealedBootstrapPayload,
+      payloadHash: grant.payloadHash,
+      createdAt: grant.createdAt,
+      expiresAt: grant.expiresAt,
+    });
+  }
+
+  async getEnrollmentGrant(
+    id: string,
+  ): Promise<EnrollmentGrantRecord | undefined> {
+    const [row] = await this.db
+      .select()
+      .from(enrollmentGrants)
+      .where(eq(enrollmentGrants.attemptId, id))
+      .limit(1);
+    return row ? toEnrollmentGrant(row) : undefined;
+  }
+
   async recordSyncAttempt(attempt: SyncAttemptRecord): Promise<void> {
     await this.db.insert(syncAttempts).values({
       id: attempt.id,
@@ -609,6 +641,25 @@ function toEnrollmentAttempt(
     confirmedAt: row.confirmedAt ?? undefined,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
+  };
+}
+
+function toEnrollmentGrant(
+  row: typeof enrollmentGrants.$inferSelect,
+): EnrollmentGrantRecord {
+  return {
+    attemptId: row.attemptId,
+    tokenId: row.tokenId,
+    installationId: row.installationId,
+    nodeId: row.nodeId,
+    primaryId: row.primaryId,
+    primaryGeneration: row.primaryGeneration,
+    verifiedPreviewDigest: row.verifiedPreviewDigest ?? undefined,
+    nodeEphemeralPublicKey: row.nodeEphemeralPublicKey,
+    sealedBootstrapPayload: row.sealedBootstrapPayload,
+    payloadHash: row.payloadHash,
+    createdAt: row.createdAt,
+    expiresAt: row.expiresAt,
   };
 }
 

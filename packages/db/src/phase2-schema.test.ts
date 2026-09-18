@@ -31,6 +31,14 @@ describe("phase 2 persistence contract", () => {
     expect(phase2PersistenceContract.installationSettingsColumns).toEqual([
       "enrollment_hostnames",
     ]);
+    expect(phase2PersistenceContract.enrollmentGrantColumns).toEqual([
+      "verified_preview_digest",
+    ]);
+    expect(phase2PersistenceContract.crossInstallationAttemptColumns).toEqual([
+      "enrollment_tokens.consumed_by_attempt_id",
+      "enrollment_grants.attempt_id",
+      "enrolled_nodes.created_by_attempt_id",
+    ]);
   });
 
   it("keeps the generated migration aligned with the contract", () => {
@@ -49,7 +57,36 @@ describe("phase 2 persistence contract", () => {
       new URL("../migrations/0006_enrollment_tls_identity.sql", import.meta.url),
       "utf8",
     );
+    const grantDigestMigration = readFileSync(
+      new URL(
+        "../migrations/0007_enrollment_grant_preview_digest.sql",
+        import.meta.url,
+      ),
+      "utf8",
+    );
+    const journal = JSON.parse(
+      readFileSync(new URL("../migrations/meta/_journal.json", import.meta.url), "utf8"),
+    ) as { entries: Array<{ idx: number; tag: string }> };
 
+    expect(journal.entries.at(-1)).toMatchObject({
+      idx: 7,
+      tag: "0007_enrollment_grant_preview_digest",
+    });
+    expect(grantDigestMigration).toContain(
+      'ALTER TABLE "enrollment_grants" ADD COLUMN IF NOT EXISTS "verified_preview_digest" text',
+    );
+    for (const constraint of [
+      '"enrollment_tokens_consumed_by_attempt_id_enrollment_attempts_id_fk"',
+      '"enrollment_tokens_consumed_by_attempt_id_fkey"',
+      '"enrollment_grants_attempt_id_enrollment_attempts_id_fk"',
+      '"enrollment_grants_attempt_id_fkey"',
+      '"enrolled_nodes_created_by_attempt_id_enrollment_attempts_id_fk"',
+      '"enrolled_nodes_created_by_attempt_id_fkey"',
+    ]) {
+      expect(grantDigestMigration).toContain(
+        `DROP CONSTRAINT IF EXISTS ${constraint}`,
+      );
+    }
     expect(tlsIdentityMigration).toContain(
       `CREATE TABLE IF NOT EXISTS "${phase2PersistenceContract.internalCaEnrollmentState}"`,
     );

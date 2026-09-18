@@ -607,9 +607,7 @@ export const enrollmentTokens = pgTable(
     createdAt: createdAt(),
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
     consumedAt: timestamp("consumed_at", { withTimezone: true }),
-    consumedByAttemptId: uuid("consumed_by_attempt_id").references(
-      () => enrollmentAttempts.id,
-    ),
+    consumedByAttemptId: uuid("consumed_by_attempt_id"),
     revokedAt: timestamp("revoked_at", { withTimezone: true }),
   },
   (table) => ({
@@ -655,9 +653,7 @@ export const enrolledNodes = pgTable(
       .notNull()
       .defaultNow(),
     revokedAt: timestamp("revoked_at", { withTimezone: true }),
-    createdByAttemptId: uuid("created_by_attempt_id")
-      .notNull()
-      .references(() => enrollmentAttempts.id),
+    createdByAttemptId: uuid("created_by_attempt_id").notNull(),
   },
   (table) => ({
     installationIndex: uniqueIndex("enrolled_nodes_installation_idx").on(
@@ -675,9 +671,7 @@ export const enrolledNodes = pgTable(
 export const enrollmentGrants = pgTable(
   "enrollment_grants",
   {
-    attemptId: uuid("attempt_id")
-      .primaryKey()
-      .references(() => enrollmentAttempts.id),
+    attemptId: uuid("attempt_id").primaryKey(),
     tokenId: uuid("token_id")
       .notNull()
       .unique()
@@ -688,6 +682,7 @@ export const enrollmentGrants = pgTable(
     primaryGeneration: bigintColumn("primary_generation", {
       mode: "number",
     }).notNull(),
+    verifiedPreviewDigest: text("verified_preview_digest"),
     nodeEphemeralPublicKey: text("node_ephemeral_public_key").notNull(),
     sealedBootstrapPayload: text("sealed_bootstrap_payload").notNull(),
     payloadHash: text("payload_hash").notNull(),
@@ -765,6 +760,12 @@ export const phase2PersistenceContract = {
   installationSettingsColumns: ["enrollment_hostnames"],
   internalCaColumns: ["enrollment_certificate_pem", "enrollment_key_secret_id"],
   internalCaEnrollmentState: "internal_ca_enrollment_state",
+  enrollmentGrantColumns: ["verified_preview_digest"],
+  crossInstallationAttemptColumns: [
+    "enrollment_tokens.consumed_by_attempt_id",
+    "enrollment_grants.attempt_id",
+    "enrolled_nodes.created_by_attempt_id",
+  ],
   tables: {
     enrollmentTokens: "enrollment_tokens",
     enrolledNodes: "enrolled_nodes",
