@@ -5,6 +5,7 @@ import {
   getEnrollmentHostnames,
   updateEnrollmentHostnames,
 } from "../api";
+import { EnrollmentTrustPanel } from "./EnrollmentTrustPanel";
 import type { EnrollmentHostnameConfig, TopologyIdentity } from "./types";
 
 export function canEditEnrollmentHostnames(identity?: TopologyIdentity) {
@@ -27,18 +28,25 @@ export function ContinuityView({ identity }: { identity?: TopologyIdentity }) {
   const editable = canEditEnrollmentHostnames(identity) && !accessDenied;
 
   useEffect(() => {
+    const controller = new AbortController();
     let cancelled = false;
+    setLoading(true);
+    setConfig(undefined);
+    setHostnames("");
+    setAccessDenied(false);
+    setError("");
+    setSaved(false);
 
     async function load() {
       try {
-        const loaded = await getEnrollmentHostnames();
+        const loaded = await getEnrollmentHostnames(controller.signal);
         if (cancelled) return;
         setConfig(loaded);
         setHostnames(enrollmentHostnameText(loaded));
         setAccessDenied(false);
         setError("");
       } catch (caught) {
-        if (cancelled) return;
+        if (cancelled || controller.signal.aborted) return;
         if (caught instanceof ApiError && caught.status === 401) {
           navigate("/login");
           return;
@@ -57,8 +65,18 @@ export function ContinuityView({ identity }: { identity?: TopologyIdentity }) {
     void load();
     return () => {
       cancelled = true;
+      controller.abort();
     };
-  }, [navigate]);
+  }, [
+    navigate,
+    identity?.installationId,
+    identity?.nodeId,
+    identity?.role,
+    identity?.leadershipGeneration,
+    identity?.latestKnownGeneration,
+    identity?.stalePrimary,
+    identity?.writable,
+  ]);
 
   async function save(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -173,6 +191,8 @@ export function ContinuityView({ identity }: { identity?: TopologyIdentity }) {
           {error || "Enrollment hostnames could not be loaded"}
         </p>
       )}
+
+      <EnrollmentTrustPanel identity={identity} />
     </div>
   );
 }
