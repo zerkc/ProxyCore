@@ -3,8 +3,10 @@ package identity
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -340,4 +342,199 @@ func TestServiceCurrentPanicsBeforeBootstrap(t *testing.T) {
 		}
 	}()
 	_ = svc.Current()
+}
+
+func TestServiceAutomaticRenewalLeaseAllowsOnlyCurrentWritableIdentity(t *testing.T) {
+	cases := []struct {
+		name string
+		id   Identity
+		want bool
+	}{
+		{name: "standalone", id: Identity{Role: domain.TopologyRoleStandalone, LeadershipGeneration: 1, LatestKnownGeneration: 1}, want: true},
+		{name: "primary", id: Identity{Role: domain.TopologyRolePrimary, LeadershipGeneration: 1, LatestKnownGeneration: 1}, want: true},
+		{name: "primary with nodes", id: Identity{Role: domain.TopologyRolePrimaryWithNodes, LeadershipGeneration: 1, LatestKnownGeneration: 1}, want: true},
+		{name: "node", id: Identity{Role: domain.TopologyRoleNode, LeadershipGeneration: 1, LatestKnownGeneration: 1}},
+		{name: "stale role", id: Identity{Role: domain.TopologyRoleStalePrimary, LeadershipGeneration: 1, LatestKnownGeneration: 1}},
+		{name: "stale generation", id: Identity{Role: domain.TopologyRolePrimary, LeadershipGeneration: 1, LatestKnownGeneration: 2}},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			store := newFakeStore()
+			store.seed(test.id)
+			svc := NewService(store)
+			if _, err := svc.Load(context.Background()); err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			calls := 0
+			err := svc.WithAutomaticRenewalLease(context.Background(), func(context.Context) error {
+				calls++
+				return nil
+			})
+			if test.want {
+				if err != nil || calls != 1 {
+					t.Fatalf("lease err=%v calls=%d, want one callback", err, calls)
+				}
+				return
+			}
+			if !errors.Is(err, ErrAutomaticRenewalNotPermitted) || calls != 0 {
+				t.Fatalf("forbidden lease err=%v calls=%d", err, calls)
+			}
+		})
+	}
+}
+
+func TestServiceAutomaticRenewalLeaseFailsClosedWhenUnloadedOrCanceled(t *testing.T) {
+	unloaded := NewService(newFakeStore())
+	calls := 0
+	err := unloaded.WithAutomaticRenewalLease(context.Background(), func(context.Context) error {
+		calls++
+		return nil
+	})
+	if !errors.Is(err, ErrIdentityNotLoaded) || calls != 0 {
+		t.Fatalf("unloaded lease err=%v calls=%d", err, calls)
+	}
+
+	service := NewService(newFakeStore())
+	if _, _, err := service.EnsureBootstrapped(context.Background()); err != nil {
+		t.Fatalf("EnsureBootstrapped: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err = service.WithAutomaticRenewalLease(ctx, func(context.Context) error {
+		calls++
+		return nil
+	})
+	if !errors.Is(err, context.Canceled) || calls != 0 {
+		t.Fatalf("canceled lease err=%v calls=%d", err, calls)
+	}
+}
+
+func TestServiceAutomaticRenewalLeasePropagatesCancellationToCallback(t *testing.T) {
+	service := NewService(newFakeStore())
+	if _, _, err := service.EnsureBootstrapped(context.Background()); err != nil {
+		t.Fatalf("EnsureBootstrapped: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	callbackStarted := make(chan struct{})
+	leaseDone := make(chan error, 1)
+	go func() {
+		leaseDone <- service.WithAutomaticRenewalLease(ctx, func(workCtx context.Context) error {
+			close(callbackStarted)
+			<-workCtx.Done()
+			return workCtx.Err()
+		})
+	}()
+	select {
+	case <-callbackStarted:
+	case <-time.After(time.Second):
+		t.Fatal("automatic renewal callback did not start")
+	}
+	cancel()
+	if err := <-leaseDone; !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled renewal lease err=%v", err)
+	}
+	if _, err := service.TransitionTo(context.Background(), domain.TopologyRoleNode); err != nil {
+		t.Fatalf("TransitionTo after canceled lease: %v", err)
+	}
+}
+
+func TestServiceAutomaticRenewalLeaseRecoversCallbackPanicAndReleasesLock(t *testing.T) {
+	store := newFakeStore()
+	service := NewService(store)
+	if _, _, err := service.EnsureBootstrapped(context.Background()); err != nil {
+		t.Fatalf("EnsureBootstrapped: %v", err)
+	}
+	panicSecret := "panic-private-key-secret"
+	err := service.WithAutomaticRenewalLease(context.Background(), func(context.Context) error {
+		panic(panicSecret)
+	})
+	if !errors.Is(err, ErrAutomaticRenewalCallbackPanic) || strings.Contains(err.Error(), panicSecret) {
+		t.Fatalf("panic lease err=%v, want stable redacted sentinel", err)
+	}
+	transitionDone := make(chan error, 1)
+	go func() {
+		_, transitionErr := service.TransitionTo(context.Background(), domain.TopologyRoleNode)
+		transitionDone <- transitionErr
+	}()
+	select {
+	case transitionErr := <-transitionDone:
+		if transitionErr != nil {
+			t.Fatalf("TransitionTo node: %v", transitionErr)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("role transition blocked after recovered callback panic")
+	}
+	store.mu.Lock()
+	durableRole := store.current.Role
+	store.mu.Unlock()
+	if durableRole != domain.TopologyRoleNode || service.Current().Role != domain.TopologyRoleNode {
+		t.Fatalf("post-panic roles durable=%s cached=%s", durableRole, service.Current().Role)
+	}
+}
+
+func TestServiceAutomaticRenewalLeaseBlocksRoleTransitionUntilCallbackReturns(t *testing.T) {
+	store := newFakeStore()
+	service := NewService(store)
+	if _, _, err := service.EnsureBootstrapped(context.Background()); err != nil {
+		t.Fatalf("EnsureBootstrapped: %v", err)
+	}
+	callbackStarted := make(chan struct{})
+	releaseCallback := make(chan struct{})
+	transitionInvoked := make(chan struct{})
+	leaseDone := make(chan error, 1)
+	go func() {
+		leaseDone <- service.WithAutomaticRenewalLease(context.Background(), func(ctx context.Context) error {
+			close(callbackStarted)
+			select {
+			case <-releaseCallback:
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		})
+	}()
+	select {
+	case <-callbackStarted:
+	case <-time.After(time.Second):
+		t.Fatal("automatic renewal callback did not start")
+	}
+
+	transitionDone := make(chan error, 1)
+	go func() {
+		close(transitionInvoked)
+		_, err := service.TransitionTo(context.Background(), domain.TopologyRoleNode)
+		transitionDone <- err
+	}()
+	select {
+	case <-transitionInvoked:
+	case <-time.After(time.Second):
+		t.Fatal("role transition was not invoked")
+	}
+	select {
+	case err := <-transitionDone:
+		t.Fatalf("role transition completed while renewal callback was active: %v", err)
+	case <-time.After(25 * time.Millisecond):
+	}
+
+	close(releaseCallback)
+	if err := <-leaseDone; err != nil {
+		t.Fatalf("renewal lease: %v", err)
+	}
+	if err := <-transitionDone; err != nil {
+		t.Fatalf("TransitionTo node: %v", err)
+	}
+	store.mu.Lock()
+	durableRole := store.current.Role
+	store.mu.Unlock()
+	if durableRole != domain.TopologyRoleNode || service.Current().Role != domain.TopologyRoleNode {
+		t.Fatalf("post-transition roles durable=%s cached=%s", durableRole, service.Current().Role)
+	}
+	calls := 0
+	err := service.WithAutomaticRenewalLease(context.Background(), func(context.Context) error {
+		calls++
+		return nil
+	})
+	if !errors.Is(err, ErrAutomaticRenewalNotPermitted) || calls != 0 {
+		t.Fatalf("post-transition lease err=%v calls=%d", err, calls)
+	}
 }

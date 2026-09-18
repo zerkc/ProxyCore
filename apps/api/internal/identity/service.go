@@ -20,15 +20,27 @@ var ErrAlreadyBootstrapped = errors.New("installation identity already bootstrap
 // requested transition is not allowed by the topology state machine.
 var ErrInvalidTransition = errors.New("invalid topology role transition")
 
+// ErrAutomaticRenewalNotPermitted is returned when the loaded identity is not
+// an eligible writable standalone or PRIMARY role for automatic renewal.
+var ErrAutomaticRenewalNotPermitted = errors.New("automatic renewal is not permitted")
+
+// ErrAutomaticRenewalCallbackRequired is returned when no renewal work is
+// supplied to the identity lease.
+var ErrAutomaticRenewalCallbackRequired = errors.New("automatic renewal callback is required")
+
+// ErrAutomaticRenewalCallbackPanic is returned when the renewal callback
+// panics. The panic value is intentionally never exposed.
+var ErrAutomaticRenewalCallbackPanic = errors.New("automatic renewal callback failed")
+
 // Service is the in-memory identity coordinator. It loads the persisted
 // identity at startup, caches it for cheap reads, and persists changes
 // through the underlying Store.
 type Service struct {
 	store Store
 
-	mu       sync.RWMutex
-	cached   Identity
-	loaded   bool
+	mu     sync.RWMutex
+	cached Identity
+	loaded bool
 }
 
 // NewService constructs a Service over the given Store. The identity is not
@@ -95,6 +107,58 @@ func (s *Service) Current() Identity {
 	return s.cached
 }
 
+// WithAutomaticRenewalLease validates the live cached identity and runs one
+// renewal operation while holding the identity read lock. Role transitions
+// acquire the write side of this lock, so they cannot complete during the
+// callback and the next work item observes the new role. The callback MUST NOT
+// call identity mutation methods such as TransitionTo or ActivateEnrollment;
+// reentrant write acquisition is unsupported. The callback must honor ctx.
+func (s *Service) WithAutomaticRenewalLease(ctx context.Context, work func(context.Context) error) error {
+	if s == nil || ctx == nil {
+		return ErrIdentityNotLoaded
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if work == nil {
+		return ErrAutomaticRenewalCallbackRequired
+	}
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if !s.loaded {
+		return ErrIdentityNotLoaded
+	}
+	if !eligibleForAutomaticRenewal(s.cached) {
+		return ErrAutomaticRenewalNotPermitted
+	}
+	return runAutomaticRenewalCallback(work, ctx)
+}
+
+func runAutomaticRenewalCallback(work func(context.Context) error, ctx context.Context) (err error) {
+	defer func() {
+		if recover() != nil {
+			err = ErrAutomaticRenewalCallbackPanic
+		}
+	}()
+	return work(ctx)
+}
+
+func eligibleForAutomaticRenewal(current Identity) bool {
+	if current.IsStalePrimary() || !current.IsWritable() {
+		return false
+	}
+	switch current.Role {
+	case domain.TopologyRoleStandalone, domain.TopologyRolePrimary, domain.TopologyRolePrimaryWithNodes:
+		return true
+	default:
+		return false
+	}
+}
+
 // IsStalePrimary reports whether the cached identity is in the stale-primary
 // guarded state. A stale-primary must keep serving its last valid local data
 // plane but MUST block ordinary configuration writes.
@@ -115,19 +179,16 @@ func (s *Service) TransitionTo(ctx context.Context, role domain.TopologyRole) (I
 		return Identity{}, errors.New("invalid role: " + string(role))
 	}
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	from := s.cached.Role
-	s.mu.Unlock()
 	if !isAllowedTransition(from, role) {
 		return Identity{}, fmt.Errorf("%w: %s -> %s", ErrInvalidTransition, from, role)
 	}
 	if err := s.store.UpdateRole(ctx, role); err != nil {
 		return Identity{}, err
 	}
-	s.mu.Lock()
 	s.cached.Role = role
-	id := s.cached
-	s.mu.Unlock()
-	return id, nil
+	return s.cached, nil
 }
 
 // RecordImportedSnapshot records that a snapshot with the given source
@@ -139,17 +200,15 @@ func (s *Service) TransitionTo(ctx context.Context, role domain.TopologyRole) (I
 // leadership generation, the service moves the local installation into
 // stale-primary guarded state; the operator must explicitly recover.
 func (s *Service) RecordImportedSnapshot(ctx context.Context, sourcePrimary uuid.UUID, observedGeneration domain.LeadershipGeneration) (Identity, error) {
-	s.mu.RLock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	previouslyKnown := s.cached.LatestKnownGeneration
 	ownGeneration := s.cached.LeadershipGeneration
 	role := s.cached.Role
-	s.mu.RUnlock()
 
 	if err := s.store.UpdateLatestKnownGeneration(ctx, observedGeneration); err != nil {
 		return Identity{}, err
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	if observedGeneration > s.cached.LatestKnownGeneration {
 		s.cached.LatestKnownGeneration = observedGeneration
 	}
@@ -174,9 +233,9 @@ func (s *Service) RecordImportedSnapshot(ctx context.Context, sourcePrimary uuid
 // promotion workflow; this method is the contract-level entry point used by
 // Phase 0/1 tests and is intentionally minimal.
 func (s *Service) PromoteToPrimary(ctx context.Context) (Identity, error) {
-	s.mu.RLock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	current := s.cached
-	s.mu.RUnlock()
 	if current.Role != domain.TopologyRoleNode &&
 		current.Role != domain.TopologyRoleStalePrimary &&
 		current.Role != domain.TopologyRoleStandalone {
@@ -189,15 +248,12 @@ func (s *Service) PromoteToPrimary(ctx context.Context) (Identity, error) {
 	if err := s.store.UpdateRole(ctx, domain.TopologyRolePrimary); err != nil {
 		return Identity{}, err
 	}
-	s.mu.Lock()
 	s.cached.Role = domain.TopologyRolePrimary
 	s.cached.LeadershipGeneration = next
 	if next > s.cached.LatestKnownGeneration {
 		s.cached.LatestKnownGeneration = next
 	}
-	id := s.cached
-	s.mu.Unlock()
-	return id, nil
+	return s.cached, nil
 }
 
 // isAllowedTransition encodes the Phase 0/1 transition matrix. The full
