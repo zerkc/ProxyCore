@@ -22,15 +22,16 @@ import (
 )
 
 type Server struct {
-	cfg            config.Config
-	mux            *http.ServeMux
-	log            *log.Logger
-	auth           *auth.Service
-	config         *configuration.Store
-	updates        *update.Checker
-	defaultIngress domain.Ingress
-	updaterClient  UpdaterClient
-	identitySvc    *identity.Service
+	cfg              config.Config
+	mux              *http.ServeMux
+	log              *log.Logger
+	auth             *auth.Service
+	config           *configuration.Store
+	updates          *update.Checker
+	defaultIngress   domain.Ingress
+	updaterClient    UpdaterClient
+	identitySvc      *identity.Service
+	enrollmentTokens EnrollmentTokenAuthority
 }
 
 type Option func(*Server)
@@ -71,6 +72,12 @@ func WithDefaultIngress(ingress domain.Ingress) Option {
 func WithIdentityService(svc *identity.Service) Option {
 	return func(s *Server) {
 		s.identitySvc = svc
+	}
+}
+
+func WithEnrollmentTokenAuthority(authority EnrollmentTokenAuthority) Option {
+	return func(s *Server) {
+		s.enrollmentTokens = authority
 	}
 }
 
@@ -150,6 +157,9 @@ func (s *Server) routes() {
 	// become the canonical enrollment trust API.
 	s.mux.HandleFunc("GET "+enrollmentTrustSettingsAliasPath, s.handleGetEnrollmentTrust)
 	s.mux.HandleFunc("GET "+enrollmentTrustSettingsAliasCAPEM, s.handleDownloadEnrollmentCA)
+	s.mux.HandleFunc("POST "+EnrollmentTokensPath, s.handleCreateEnrollmentToken)
+	s.mux.HandleFunc("GET "+EnrollmentTokensPath, s.handleListEnrollmentTokens)
+	s.mux.HandleFunc("POST "+EnrollmentTokensPath+"/{id}/revoke", s.handleRevokeEnrollmentToken)
 	s.mux.HandleFunc("POST /api/apply", s.handleApply)
 	s.mux.HandleFunc("GET /api/users", s.handleListUsers)
 	s.mux.HandleFunc("POST /api/users", s.handleCreateUser)

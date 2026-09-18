@@ -3,14 +3,19 @@ package main
 import (
 	"context"
 	"errors"
+	"io"
+	"log"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/google/uuid"
 
 	"github.com/zerkc/ProxyCore/apps/api/internal/configuration"
 	"github.com/zerkc/ProxyCore/apps/api/internal/domain"
+	"github.com/zerkc/ProxyCore/apps/api/internal/enrollment"
+	"github.com/zerkc/ProxyCore/apps/api/internal/httpserver"
 	"github.com/zerkc/ProxyCore/apps/api/internal/identity"
 )
 
@@ -190,6 +195,30 @@ func TestNodeConverterFlagIsExplicitAndOffByDefault(t *testing.T) {
 	}
 	if nodeConverterEnabled([]string{"--enable-node-converter=false"}) {
 		t.Fatal("false node converter flag enabled conversion")
+	}
+}
+
+func TestEnrollmentWorkflowTLSListenerFactoryWiresWorkflowMux(t *testing.T) {
+	workflow := httpserver.EnrollmentWorkflowHandlerOptions{Cache: enrollment.NewDraftCache(enrollment.DraftCacheOptions{})}
+	factory := newEnrollmentWorkflowTLSListenerFactory(runtimeTestIdentity{}, workflow, log.New(io.Discard, "", 0))
+	var gotHandler http.Handler
+	factory.listen = func(string, string) (net.Listener, error) {
+		return runtimeTestNetListener{}, nil
+	}
+	factory.newServer = func(_ net.Listener, handler http.Handler, _ *enrollment.TLSCertificateProvider) (enrollment.EnrollmentTLSListener, error) {
+		gotHandler = handler
+		return runtimeTestListener{}, nil
+	}
+	if _, err := factory.Listen(context.Background(), "127.0.0.1:0", &enrollment.TLSCertificateProvider{}); err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	if gotHandler == nil {
+		t.Fatal("workflow factory did not construct a handler")
+	}
+	recorder := httptest.NewRecorder()
+	gotHandler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/health", nil))
+	if recorder.Code != http.StatusNotFound {
+		t.Fatalf("ordinary route status=%d, want %d", recorder.Code, http.StatusNotFound)
 	}
 }
 

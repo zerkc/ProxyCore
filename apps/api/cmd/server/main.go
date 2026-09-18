@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -95,9 +97,12 @@ func runServerWithNodeConverter(ctx context.Context, cfg config.Config, logger *
 	}
 
 	var pool *pgxpool.Pool
+	var phase2Store *configuration.PgPhase2Store
 	var configStore *configuration.Store
 	var identitySvc *identity.Service
 	var identityResult identity.Identity
+	var nodeConverter *enrollment.NodeConverter
+	var tokenAuthority httpserver.EnrollmentTokenAuthority
 	options := []httpserver.Option{
 		httpserver.WithUpdateChecker(update.NewChecker(update.CheckerOptions{
 			CurrentVersion: version.Version,
@@ -157,7 +162,15 @@ func runServerWithNodeConverter(ctx context.Context, cfg config.Config, logger *
 			identityResult.Role,
 			identityResult.LeadershipGeneration,
 		)
-		if converter := buildNodeConverter(enableNodeConverter, configStore, identitySvc, logger); converter != nil {
+		phase2Store = configuration.NewPhase2StoreWithMasterKey(pool, cfg.MasterKeyBase64)
+		tokenAuthority = httpserver.NewEnrollmentTokenAuthority(phase2Store, identitySvc, httpserver.EnrollmentTokenAuthorityOptions{
+			List: func(ctx context.Context, ownerID string) ([]httpserver.EnrollmentTokenRecord, error) {
+				return listEnrollmentTokens(ctx, pool, ownerID)
+			},
+		})
+		options = append(options, httpserver.WithEnrollmentTokenAuthority(tokenAuthority))
+		nodeConverter = buildNodeConverter(enableNodeConverter, configStore, identitySvc, logger)
+		if nodeConverter != nil {
 			logger.Printf("node converter ready for role=%s", identityResult.Role)
 		}
 	}
@@ -168,10 +181,22 @@ func runServerWithNodeConverter(ctx context.Context, cfg config.Config, logger *
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
+	draftCache := enrollment.NewDraftCache(enrollment.DraftCacheOptions{})
 	var supervisor *enrollment.EnrollmentTLSSupervisor
 	if configStore != nil && identitySvc != nil {
+		workflow := httpserver.EnrollmentWorkflowHandlerOptions{
+			Cache:     draftCache,
+			Converter: nodeConverter,
+			Identity:  localEnrollmentIdentityProvider(identitySvc),
+			LocalIngress: func(context.Context) (domain.Ingress, error) {
+				return domain.Ingress{IPv4: cfg.ProxyIngressIPv4, IPv6: cfg.ProxyIngressIPv6}, nil
+			},
+		}
+		if tokenAuthority != nil {
+			workflow.VerifyToken = tokenAuthority.Verify
+		}
 		var err error
-		supervisor, err = buildEnrollmentTLSSupervisor(cfg, identitySvc, configStore, logger)
+		supervisor, err = newEnrollmentWorkflowTLSSupervisor(cfg, identitySvc, configStore, workflow, logger)
 		if err != nil {
 			logEnrollmentTLSFailure(logger, "supervisor unavailable")
 			supervisor = nil
@@ -193,7 +218,6 @@ func runServerWithNodeConverter(ctx context.Context, cfg config.Config, logger *
 				IdentityLease:          identitySvc,
 			}, cfg.CertRenewalInterval)
 		})
-		phase2Store := configuration.NewPhase2StoreWithMasterKey(pool, cfg.MasterKeyBase64)
 		publicationProducer := syncpublication.NewCanonicalSnapshotProducer(phase2Store, syncpublication.CanonicalSnapshotProducerOptions{
 			OnError: func(error) {
 				logger.Printf("canonical snapshot publication reconciliation unavailable")
@@ -455,4 +479,147 @@ func nodeConverterRoleEligible(service *identity.Service) (eligible bool) {
 	}()
 	current := service.Current()
 	return current.Role == domain.TopologyRoleStandalone || current.Role == domain.TopologyRolePrimary
+}
+
+func localEnrollmentIdentityProvider(service *identity.Service) func(context.Context) (httpserver.EnrollmentLocalIdentity, error) {
+	return func(ctx context.Context) (local httpserver.EnrollmentLocalIdentity, err error) {
+		if service == nil || ctx == nil {
+			return httpserver.EnrollmentLocalIdentity{}, httpserver.ErrEnrollmentWorkflowUnavailable
+		}
+		if err := ctx.Err(); err != nil {
+			return httpserver.EnrollmentLocalIdentity{}, err
+		}
+		defer func() {
+			if recover() != nil {
+				local, err = httpserver.EnrollmentLocalIdentity{}, httpserver.ErrEnrollmentWorkflowUnavailable
+			}
+		}()
+		current := service.Current()
+		local = httpserver.EnrollmentLocalIdentity{
+			InstallationID:       current.InstallationID,
+			NodeID:               current.NodeID,
+			Role:                 current.Role,
+			LeadershipGeneration: current.LeadershipGeneration,
+		}
+		if current.ClusterKeyID != nil {
+			local.ClusterKeyID = current.ClusterKeyID.String()
+		}
+		return local, nil
+	}
+}
+
+type enrollmentWorkflowTLSListenerFactory struct {
+	identity  enrollment.EnrollmentTLSIdentityCurrent
+	workflow  httpserver.EnrollmentWorkflowHandlerOptions
+	logger    *log.Logger
+	listen    func(string, string) (net.Listener, error)
+	newServer func(net.Listener, http.Handler, *enrollment.TLSCertificateProvider) (enrollment.EnrollmentTLSListener, error)
+	now       func() time.Time
+}
+
+func newEnrollmentWorkflowTLSListenerFactory(identityCurrent enrollment.EnrollmentTLSIdentityCurrent, workflow httpserver.EnrollmentWorkflowHandlerOptions, logger *log.Logger) *enrollmentWorkflowTLSListenerFactory {
+	return &enrollmentWorkflowTLSListenerFactory{
+		identity: identityCurrent,
+		workflow: workflow,
+		logger:   logger,
+		listen:   net.Listen,
+		now:      time.Now,
+		newServer: func(listener net.Listener, handler http.Handler, provider *enrollment.TLSCertificateProvider) (enrollment.EnrollmentTLSListener, error) {
+			return enrollment.NewEnrollmentTLSServer(listener, handler, provider)
+		},
+	}
+}
+
+func (f *enrollmentWorkflowTLSListenerFactory) Listen(ctx context.Context, address string, provider *enrollment.TLSCertificateProvider) (enrollment.EnrollmentTLSListener, error) {
+	if f == nil || f.identity == nil || f.listen == nil || f.newServer == nil || provider == nil || strings.TrimSpace(address) == "" {
+		return nil, enrollment.ErrEnrollmentTLSBind
+	}
+	if ctx == nil {
+		return nil, errEnrollmentTLSRuntimeUnavailable
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	listener, err := f.listen("tcp", address)
+	if err != nil {
+		logEnrollmentTLSFailure(f.logger, "listener bind failed")
+		return nil, enrollment.ErrEnrollmentTLSBind
+	}
+	if err := ctx.Err(); err != nil {
+		_ = listener.Close()
+		return nil, err
+	}
+	now := f.now
+	if now == nil {
+		now = time.Now
+	}
+	signer, err := enrollment.NewIdentityProofSigner(enrollment.IdentityProofSignerOptions{
+		Identity: f.identity.Current,
+		Material: provider.Material,
+		Now:      now,
+	})
+	if err != nil {
+		_ = listener.Close()
+		logEnrollmentTLSFailure(f.logger, "identity proof signer unavailable")
+		return nil, enrollment.ErrEnrollmentTLSBind
+	}
+	handler := httpserver.NewEnrollmentIdentityMux(httpserver.EnrollmentIdentityHandlerOptions{
+		Signer: signer,
+		Certificate: func(ctx context.Context) (*x509.Certificate, error) {
+			return provider.Certificate(ctx)
+		},
+		Workflow: &f.workflow,
+	})
+	server, err := f.newServer(listener, handler, provider)
+	if err != nil || server == nil {
+		_ = listener.Close()
+		logEnrollmentTLSFailure(f.logger, "TLS server construction failed")
+		return nil, enrollment.ErrEnrollmentTLSBind
+	}
+	return server, nil
+}
+
+func newEnrollmentWorkflowTLSSupervisor(cfg config.Config, identityService *identity.Service, configStore *configuration.Store, workflow httpserver.EnrollmentWorkflowHandlerOptions, logger *log.Logger) (*enrollment.EnrollmentTLSSupervisor, error) {
+	identityCurrent := &enrollmentTLSIdentityAdapter{service: identityService, logger: logger}
+	configurationStore := &enrollmentTLSConfigurationAdapter{store: configStore, logger: logger}
+	factory := newEnrollmentWorkflowTLSListenerFactory(identityCurrent, workflow, logger)
+	return enrollment.NewEnrollmentTLSSupervisor(enrollment.EnrollmentTLSSupervisorOptions{
+		Identity:        identityCurrent,
+		Configuration:   configurationStore,
+		ListenerFactory: factory,
+		Address:         cfg.EnrollmentTLSAddr,
+	})
+}
+
+func listEnrollmentTokens(ctx context.Context, pool *pgxpool.Pool, ownerID string) ([]httpserver.EnrollmentTokenRecord, error) {
+	if pool == nil || ctx == nil || strings.TrimSpace(ownerID) == "" {
+		return nil, errors.New("enrollment token list unavailable")
+	}
+	rows, err := pool.Query(ctx, `
+		select t.id::text, t.token_selector, t.created_at, t.expires_at,
+			t.consumed_at, t.revoked_at, count(g.attempt_id), max(g.created_at)
+		from enrollment_tokens t
+		left join enrollment_grants g on g.token_id = t.id
+		where t.created_by_user_id = $1
+		group by t.id, t.token_selector, t.created_at, t.expires_at, t.consumed_at, t.revoked_at
+		order by t.created_at desc, t.id desc
+	`, ownerID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make([]httpserver.EnrollmentTokenRecord, 0)
+	for rows.Next() {
+		var record httpserver.EnrollmentTokenRecord
+		var attempts int64
+		if err := rows.Scan(&record.ID, &record.Selector, &record.CreatedAt, &record.ExpiresAt, &record.ConsumedAt, &record.RevokedAt, &attempts, &record.LastAttemptAt); err != nil {
+			return nil, err
+		}
+		if attempts > int64(^uint(0)>>1) {
+			return nil, errors.New("enrollment token attempt count overflow")
+		}
+		record.AttemptCount = int(attempts)
+		result = append(result, record)
+	}
+	return result, rows.Err()
 }

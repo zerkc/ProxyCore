@@ -10,7 +10,9 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
+	"github.com/zerkc/ProxyCore/apps/api/internal/domain"
 	"github.com/zerkc/ProxyCore/apps/api/internal/enrollment"
 )
 
@@ -22,22 +24,110 @@ const (
 // IdentityProofCertificateProvider returns the current leaf certificate without its private key.
 type IdentityProofCertificateProvider func(context.Context) (*x509.Certificate, error)
 
+// EnrollmentLocalIdentity is the minimal local authority needed to render a
+// preview and to supply NodeConverter. It excludes all credential material.
+type EnrollmentLocalIdentity struct {
+	InstallationID       domain.InstallationID
+	NodeID               domain.NodeID
+	Role                 domain.TopologyRole
+	LeadershipGeneration domain.LeadershipGeneration
+	ClusterKeyID         string
+}
+
+type EnrollmentWorkflowHandlerOptions struct {
+	Cache            *enrollment.DraftCache
+	VerifyToken      func(context.Context, string) error
+	FetchSnapshot    EnrollmentSnapshotFetcher
+	Validator        EnrollmentSnapshotValidator
+	Identity         func(context.Context) (EnrollmentLocalIdentity, error)
+	LocalIngress     func(context.Context) (domain.Ingress, error)
+	Converter        *enrollment.NodeConverter
+	ArchiveTTL       time.Duration
+	ApplyWaitTimeout time.Duration
+}
+
+type enrollmentDraftRequest struct {
+	Token      string `json:"token"`
+	PrimaryURL string `json:"primaryURL"`
+}
+
+type enrollmentPreviewRequest struct {
+	DraftID          string          `json:"draftId"`
+	RequestedNodeID  string          `json:"requestedNodeID,omitempty"`
+	RequestedIngress *domain.Ingress `json:"requestedIngress,omitempty"`
+}
+
+type enrollmentConfirmRequest struct {
+	DraftID string `json:"draftId"`
+}
+
+type enrollmentRecoverRequest struct {
+	Token string `json:"token,omitempty"`
+}
+
+type enrollmentPreviewResponse struct {
+	DraftID          string                      `json:"draftId"`
+	EnvelopePreview  enrollmentEnvelopePreview   `json:"envelopePreview"`
+	NodeLocalOverlay enrollment.NodeLocalOverlay `json:"nodeLocalOverlay"`
+	ExpiresAt        time.Time                   `json:"expiresAt"`
+}
+
+type enrollmentEnvelopePreview struct {
+	SourcePrimaryID    string              `json:"sourcePrimaryId"`
+	SnapshotVersion    uint32              `json:"snapshotVersion"`
+	ReplicationVersion uint32              `json:"replicationVersion"`
+	Ingress            domain.Ingress      `json:"ingress"`
+	NodeID             string              `json:"nodeId"`
+	Role               domain.TopologyRole `json:"role"`
+	Generation         uint64              `json:"generation"`
+	ClusterKeyID       string              `json:"clusterKeyId,omitempty"`
+	ContentHash        string              `json:"contentHash"`
+}
+
+type enrollmentConfirmResponse struct {
+	Role         domain.TopologyRole `json:"role"`
+	Generation   uint64              `json:"generation"`
+	NodeID       string              `json:"nodeId"`
+	ClusterKeyID string              `json:"clusterKeyId,omitempty"`
+	ArchiveID    string              `json:"archiveId"`
+	ApplyJobID   string              `json:"applyJobId"`
+}
+
 type EnrollmentIdentityHandlerOptions struct {
 	Signer      *enrollment.IdentityProofSigner
 	Certificate IdentityProofCertificateProvider
+	Workflow    *EnrollmentWorkflowHandlerOptions
 }
 
 type enrollmentIdentityHandler struct {
 	signer      *enrollment.IdentityProofSigner
 	certificate IdentityProofCertificateProvider
+	workflow    *enrollmentWorkflowHandler
 }
 
-// NewEnrollmentIdentityMux returns a dedicated handler for the proof endpoint only.
+// NewEnrollmentIdentityMux returns the dedicated TLS enrollment mux. It serves
+// the identity proof and, when configured, the redacted NODE workflow routes.
 func NewEnrollmentIdentityMux(opts EnrollmentIdentityHandlerOptions) http.Handler {
-	return &enrollmentIdentityHandler{signer: opts.Signer, certificate: opts.Certificate}
+	return &enrollmentIdentityHandler{
+		signer: opts.Signer, certificate: opts.Certificate,
+		workflow: func() *enrollmentWorkflowHandler {
+			if opts.Workflow == nil {
+				return nil
+			}
+			return newEnrollmentWorkflowHandler(*opts.Workflow, opts.Certificate)
+		}(),
+	}
 }
 
 func (h *enrollmentIdentityHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.URL != nil && isEnrollmentWorkflowPath(r.URL.Path) {
+		if h.workflow == nil {
+			writeIdentityProofError(w, http.StatusServiceUnavailable, "enrollment workflow unavailable")
+			return
+		}
+		h.workflow.ServeHTTP(w, r)
+		return
+	}
 	if r.URL == nil || r.URL.Path != EnrollmentIdentityProofPath || r.URL.RawPath != "" || r.URL.RawQuery != "" || r.URL.ForceQuery {
 		writeIdentityProofError(w, http.StatusNotFound, "not found")
 		return
@@ -102,6 +192,15 @@ func decodeIdentityProofRequest(w http.ResponseWriter, r *http.Request) (enrollm
 		return enrollment.IdentityProofRequest{}, false
 	}
 	return request, true
+}
+
+func isEnrollmentWorkflowPath(path string) bool {
+	switch path {
+	case EnrollmentDraftPath, EnrollmentPreviewPath, EnrollmentConfirmPath, EnrollmentRecoverPath:
+		return true
+	default:
+		return false
+	}
 }
 
 func identityProofSNIMatches(host, serverName string) bool {
