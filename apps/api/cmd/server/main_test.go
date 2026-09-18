@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/zerkc/ProxyCore/apps/api/internal/configuration"
 	"github.com/zerkc/ProxyCore/apps/api/internal/domain"
 	"github.com/zerkc/ProxyCore/apps/api/internal/identity"
 )
@@ -141,5 +142,38 @@ func TestBootstrapIdentityCreatesMissingIdentity(t *testing.T) {
 	}
 	if service.Current() != bootstrapped {
 		t.Fatalf("service identity=%+v want %+v", service.Current(), bootstrapped)
+	}
+}
+
+func TestRenewalIdentityProviderFailsClosedWhenServiceIsUnloaded(t *testing.T) {
+	provider := renewalIdentityProvider(identity.NewService(&startupIdentityStore{}))
+	current, loaded, err := provider(context.Background())
+	if err != nil || loaded || current != (identity.Identity{}) {
+		t.Fatalf("unloaded provider current=%+v loaded=%t err=%v", current, loaded, err)
+	}
+}
+
+func TestRenewalIdentityProviderTracksLiveServiceRole(t *testing.T) {
+	service, current, _, err := bootstrapIdentity(context.Background(), &startupIdentityStore{})
+	if err != nil {
+		t.Fatalf("bootstrapIdentity: %v", err)
+	}
+	provider := renewalIdentityProvider(service)
+	loaded, ok, err := provider(context.Background())
+	if err != nil || !ok || loaded != current {
+		t.Fatalf("initial provider current=%+v loaded=%t err=%v", loaded, ok, err)
+	}
+	if status := configuration.CheckRenewalPolicy(context.Background(), provider); !status.Allowed {
+		t.Fatalf("standalone renewal policy status=%+v", status)
+	}
+	if _, err := service.TransitionTo(context.Background(), domain.TopologyRoleNode); err != nil {
+		t.Fatalf("TransitionTo node: %v", err)
+	}
+	loaded, ok, err = provider(context.Background())
+	if err != nil || !ok || loaded.Role != domain.TopologyRoleNode {
+		t.Fatalf("live provider current=%+v loaded=%t err=%v", loaded, ok, err)
+	}
+	if status := configuration.CheckRenewalPolicy(context.Background(), provider); status.Allowed {
+		t.Fatalf("node renewal policy unexpectedly allowed: %+v", status)
 	}
 }

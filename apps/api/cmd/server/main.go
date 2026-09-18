@@ -35,6 +35,25 @@ func bootstrapIdentity(ctx context.Context, store identity.Store) (*identity.Ser
 	return service, current, created, nil
 }
 
+func renewalIdentityProvider(service *identity.Service) configuration.RenewalIdentityProvider {
+	return func(ctx context.Context) (current identity.Identity, loaded bool, err error) {
+		if service == nil || ctx == nil {
+			return identity.Identity{}, false, context.Canceled
+		}
+		if err := ctx.Err(); err != nil {
+			return identity.Identity{}, false, err
+		}
+		// Service.Current intentionally panics before startup loading. The
+		// renewal worker must fail closed rather than let that invariant escape.
+		defer func() {
+			if recover() != nil {
+				current, loaded, err = identity.Identity{}, false, nil
+			}
+		}()
+		return service.Current(), true, nil
+	}
+}
+
 func updaterClientFromConfig(cfg config.Config) httpserver.Option {
 	baseURL := strings.TrimRight(strings.TrimSpace(cfg.UpdaterURL), "/")
 	if baseURL == "" {
@@ -152,11 +171,16 @@ func runServer(ctx context.Context, cfg config.Config, logger *log.Logger) error
 	workers := make([]func(context.Context), 0, 2)
 	if configStore != nil {
 		workers = append(workers, func(workerCtx context.Context) {
+			// Ordinary renewal is gated by the live identity on every cycle and
+			// work item. Enrollment TLS material remains supervisor-owned and is
+			// refreshed atomically by the supervisor above.
 			configuration.RunRenewalLoop(workerCtx, configStore, configuration.RenewalOptions{
 				StagingDirectoryURL:    cfg.ACMEDirectoryURL,
 				ProductionDirectoryURL: cfg.ACMEProductionDirectoryURL,
 				Email:                  cfg.AcmeEmail,
 				Log:                    logger,
+				Identity:               renewalIdentityProvider(identitySvc),
+				IdentityLease:          identitySvc,
 			}, cfg.CertRenewalInterval)
 		})
 	}
