@@ -9,6 +9,7 @@ Deliver secure one-time enrollment that converts a standalone ProxyCore installa
 - ProxyCore provides integrated TLS for enrollment using its internal CA; the Owner explicitly confirms the PRIMARY fingerprint.
 - The Owner configures exact enrollment DNS names/IP addresses from the ProxyCore UI before certificate issuance; ProxyCore never guesses the host LAN address or reuses proxy ingress implicitly.
 - Initial CA trust supports both manual CA fingerprint entry and public CA certificate export/import.
+- Trust UX sequencing: the PRIMARY displays/exports its CA trust material now; NODE trust entry/import is deferred to preview.
 - Enrollment TLS is exposed directly on port 3443, separate from Nginx and the existing HTTP UI/API.
 - Enrollment tokens are never persisted on the NODE. The Owner must re-enter the token after reload or recovery.
 - A NODE relies only on replicated Owner credentials; it does not retain or create a separate local emergency Owner.
@@ -95,6 +96,17 @@ Deliver secure one-time enrollment that converts a standalone ProxyCore installa
       - Validation: focused enrollment/httpserver (188 passed), enrollment race suite (111 passed), `go test ./...` (364 passed), required gofmt and `git diff --check` all clean.
       - Rollback boundary: `apps/api/internal/enrollment/tls_listener.go`, `tls_listener_test.go`, `tls_listener_handshake_test.go`, and this task evidence only; no startup, Compose, UI, CA export, token, bootstrap, or snapshot transport changes.
 - [ ] **PNE-2E — TLS startup and trust UX**: wire startup/shutdown and Compose exposure; provide CA fingerprint display plus public CA export/import flows and restart-stability verification.
+  - [x] **PNE-2E-A — Runtime config and deployment exposure**: configure the dedicated enrollment address and publish its host port without starting listener startup.
+    - Strict TDD: RED was the focused config compile failure for the missing `EnrollmentTLSAddr`; GREEN was `cd apps/api && go test ./internal/config` (6 passed); TRIANGULATE/REFACTOR covered default, trimmed custom, explicit empty/whitespace values, shell syntax, Compose, Dockerfile, installer, and docs assertions.
+    - Decision: PRIMARY displays/exports CA trust material now; NODE trust entry/import is deferred to preview.
+    - Validation: `bash scripts/install.test.sh`, `sh -n scripts/install.sh scripts/install.test.sh`, `PROXYCORE_MASTER_KEY_BASE64=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA= docker compose -f compose.yaml config --quiet`, `bun run typecheck`, and `git diff --check` all passed.
+    - Honest count: 155 authored additions across the allowlisted unit (160 changed lines including five replacements), below the 400-line budget.
+    - Boundary: no `cmd/server` wiring, listener startup, certificate issuance, endpoints/UI, enrollment transport, NODE conversion, or Nginx changes.
+    - Rollback boundary: the allowlisted config, Compose, API image, installer, environment example, README, runbook, and this task evidence only.
+    - Installer hardening correction: replaced `.env` execution with a narrow non-evaluating parser; precedence is process environment, then `.env` data, then defaults, with all publish ports validated before use.
+    - Correction evidence: RED `bash scripts/install.test.sh` failed on the missing parser; GREEN passed malicious environment/file-stream, precedence, valid-value, range, shell-syntax, and static assertions; TRIANGULATE/REFACTOR preserved the 242-addition, 256-changed-line correction split below the 400-line budget. Validation: `bash scripts/install.test.sh`, `sh -n scripts/install.sh scripts/install.test.sh`, `cd apps/api && go test ./internal/config`, `bun run typecheck`, Compose config with the required dummy key, and `git diff --check` all passed.
+    - Parser/preflight follow-up: RED-first grammar and mocked-side-effect tests now cover CRLF, whitespace, quotes, comments, duplicates, opaque unknown keys, and pre-sync rejection; this separate follow-up is 243 authored additions/251 changed lines. Atomic `.env` creation remains an advisory follow-up, not a security blocker.
+    - Atomic-file evidence: symlink/non-regular rejection, restrictive mode, content preservation, atomic replacement failure cleanup, and no-temp-leftover checks pass. Residual threat: a same-user attacker with install-directory write access can race the final type check and rename; portable shell lacks a race-free primitive, so directory ownership/permissions remain required.
 - [ ] **PNE-3 — Sealed bootstrap grant**: implement ephemeral X25519/HKDF bootstrap sealing, node credential issuance, cluster-KEK transport, binding/AAD validation, exact idempotent retry, and redaction tests.
 - [ ] **PNE-4 — Initial snapshot publication**: authenticate current node credentials, publish only latest applied immutable state, enforce revocation, and reject an unready PRIMARY.
 - [ ] **PNE-5 — Safe NODE conversion**: archive prior standalone state, preserve node-local overlay, create the sync revision/apply job, wait for exact terminal apply, and atomically commit NODE lineage/state.
