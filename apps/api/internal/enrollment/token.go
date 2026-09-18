@@ -152,6 +152,8 @@ func parseToken(value string) (string, []byte, bool) {
 }
 
 func hashSecret(secret []byte) string {
-	sum := sha256.Sum256(append([]byte(tokenHashDomain), secret...))
-	return hex.EncodeToString(sum[:])
+	hasher := sha256.New()
+	_, _ = hasher.Write([]byte(tokenHashDomain))
+	_, _ = hasher.Write(secret)
+	return hex.EncodeToString(hasher.Sum(nil))
 }
