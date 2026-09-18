@@ -49,8 +49,10 @@ func testBootstrapEnvelopeForFuzz(t testing.TB) (BootstrapRecipient, BootstrapBi
 		recipient.Destroy()
 		t.Fatalf("PublicKey: %v", err)
 	}
-	credential, kek := testBootstrapInputs()
-	envelope, err := SealBootstrap(publicKey, testBootstrapBinding(), credential, kek)
+	binding := testBootstrapBinding()
+	grant := testBootstrapGrant(t, binding)
+	envelope, err := SealBootstrap(publicKey, binding, grant)
+	grant.Destroy()
 	if err != nil {
 		recipient.Destroy()
 		t.Fatalf("SealBootstrap: %v", err)

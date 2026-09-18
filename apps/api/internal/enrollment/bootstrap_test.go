@@ -20,10 +20,10 @@ func TestBootstrapRoundTrip(t *testing.T) {
 		t.Fatalf("PublicKey: %v", err)
 	}
 	binding := testBootstrapBinding()
-	credential := bytes.Repeat([]byte{0x11}, 32)
-	kek := bytes.Repeat([]byte{0x22}, 32)
+	grant := testBootstrapGrant(t, binding)
+	defer grant.Destroy()
 
-	envelope, err := SealBootstrap(publicKey, binding, credential, kek)
+	envelope, err := SealBootstrap(publicKey, binding, grant)
 	if err != nil {
 		t.Fatalf("SealBootstrap: %v", err)
 	}
@@ -33,10 +33,10 @@ func TestBootstrapRoundTrip(t *testing.T) {
 	}
 	defer opened.Destroy()
 
-	if got := opened.NodeCredential.CopyBytes(); !bytes.Equal(got, credential) {
+	if got := opened.Secrets.NodeCredential.CopyBytes(); !bytes.Equal(got, bytes.Repeat([]byte{0x11}, bootstrapCredentialBytes)) {
 		t.Fatal("credential mismatch")
 	}
-	if got := opened.ClusterKEK.CopyBytes(); !bytes.Equal(got, kek) {
+	if got := opened.Secrets.ClusterKEK.CopyBytes(); !bytes.Equal(got, bytes.Repeat([]byte{0x22}, bootstrapKEKBytes)) {
 		t.Fatal("KEK mismatch")
 	}
 }
@@ -57,6 +57,34 @@ func testBootstrapInputs() ([]byte, []byte) {
 	return bytes.Repeat([]byte{0x11}, 32), bytes.Repeat([]byte{0x22}, 32)
 }
 
+func testBootstrapGrant(t testing.TB, binding BootstrapBinding) BootstrapGrant {
+	t.Helper()
+	credential, kek := testBootstrapInputs()
+	grant, err := NewBootstrapGrant(BootstrapGrantMetadata{
+		ProtocolVersion:             binding.ProtocolVersion,
+		CredentialID:                "credential-1",
+		ClusterKeyID:                "cluster-key-1",
+		SourcePrimaryInstallationID: binding.SourcePrimaryInstallationID,
+		TargetInstallationID:        binding.TargetInstallationID,
+		TargetNodeID:                binding.TargetNodeID,
+		AttemptID:                   binding.AttemptID,
+		LeadershipGeneration:        binding.LeadershipGeneration,
+		ExpiresAtUnix:               4102444800,
+	}, credential, kek)
+	if err != nil {
+		t.Fatalf("NewBootstrapGrant: %v", err)
+	}
+	return grant
+}
+
+func testBootstrapMetadata(t testing.TB, binding BootstrapBinding) BootstrapGrantMetadata {
+	t.Helper()
+	grant := testBootstrapGrant(t, binding)
+	metadata := grant.Metadata
+	grant.Destroy()
+	return metadata
+}
+
 func testBootstrapEnvelope(t *testing.T) (BootstrapRecipient, BootstrapBinding, []byte) {
 	t.Helper()
 	recipient, err := NewBootstrapRecipient()
@@ -68,8 +96,10 @@ func testBootstrapEnvelope(t *testing.T) (BootstrapRecipient, BootstrapBinding, 
 		recipient.Destroy()
 		t.Fatalf("PublicKey: %v", err)
 	}
-	credential, kek := testBootstrapInputs()
-	envelope, err := SealBootstrap(publicKey, testBootstrapBinding(), credential, kek)
+	binding := testBootstrapBinding()
+	grant := testBootstrapGrant(t, binding)
+	envelope, err := SealBootstrap(publicKey, binding, grant)
+	grant.Destroy()
 	if err != nil {
 		recipient.Destroy()
 		t.Fatalf("SealBootstrap: %v", err)
@@ -152,8 +182,9 @@ func TestBootstrapBindingAndSecretShapeValidation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PublicKey: %v", err)
 	}
-	credential, kek := testBootstrapInputs()
 	base := testBootstrapBinding()
+	grant := testBootstrapGrant(t, base)
+	defer grant.Destroy()
 	cases := []struct {
 		name string
 		edit func(*BootstrapBinding)
@@ -173,7 +204,7 @@ func TestBootstrapBindingAndSecretShapeValidation(t *testing.T) {
 			binding := base
 			binding.VerifiedPreviewDigest = append([]byte(nil), base.VerifiedPreviewDigest...)
 			test.edit(&binding)
-			if _, err := SealBootstrap(publicKey, binding, credential, kek); err != ErrBootstrapDenied {
+			if _, err := SealBootstrap(publicKey, binding, grant); err != ErrBootstrapDenied {
 				t.Fatal("invalid binding was not denied")
 			}
 			if _, err := binding.CanonicalBytes(); err != ErrBootstrapDenied {
@@ -188,7 +219,10 @@ func TestBootstrapBindingAndSecretShapeValidation(t *testing.T) {
 		"kek-long":         {32, 33},
 	} {
 		t.Run(name, func(t *testing.T) {
-			if _, err := SealBootstrap(publicKey, base, bytes.Repeat([]byte{1}, sizes[0]), bytes.Repeat([]byte{2}, sizes[1])); err != ErrBootstrapDenied {
+			metadata := grant.Metadata
+			candidate, err := NewBootstrapGrant(metadata, bytes.Repeat([]byte{1}, sizes[0]), bytes.Repeat([]byte{2}, sizes[1]))
+			candidate.Destroy()
+			if err != ErrBootstrapDenied {
 				t.Fatal("invalid secret shape was not denied")
 			}
 		})
@@ -249,7 +283,12 @@ func TestBootstrapEnvelopeTamperAndStrictBounds(t *testing.T) {
 		}},
 		{"nonce", func(value *bootstrapEnvelopeWire) { value.Nonce = flipWireBit(value.Nonce, bootstrapNonceBytes) }},
 		{"ciphertext", func(value *bootstrapEnvelopeWire) {
-			value.Ciphertext = flipWireBit(value.Ciphertext, bootstrapCiphertextBytes)
+			decoded, err := base64.RawURLEncoding.DecodeString(value.Ciphertext)
+			if err != nil {
+				value.Ciphertext = "!"
+				return
+			}
+			value.Ciphertext = flipWireBit(value.Ciphertext, len(decoded))
 		}},
 	}
 	for _, test := range cases {
@@ -308,22 +347,22 @@ func TestBootstrapReplayRandomnessAndSecretOwnership(t *testing.T) {
 		first.Destroy()
 		t.Fatalf("second replay: %v", err)
 	}
-	credentialCopy := first.NodeCredential.CopyBytes()
-	kekCopy := first.ClusterKEK.CopyBytes()
+	credentialCopy := first.Secrets.NodeCredential.CopyBytes()
+	kekCopy := first.Secrets.ClusterKEK.CopyBytes()
 	credentialCopy[0] ^= 1
 	kekCopy[0] ^= 1
-	if bytes.Equal(credentialCopy, first.NodeCredential.CopyBytes()) || bytes.Equal(kekCopy, first.ClusterKEK.CopyBytes()) {
+	if bytes.Equal(credentialCopy, first.Secrets.NodeCredential.CopyBytes()) || bytes.Equal(kekCopy, first.Secrets.ClusterKEK.CopyBytes()) {
 		first.Destroy()
 		second.Destroy()
 		t.Fatal("CopyBytes did not return independent memory")
 	}
 	first.Destroy()
-	if len(first.NodeCredential.CopyBytes()) != 0 || len(first.ClusterKEK.CopyBytes()) != 0 {
+	if len(first.Secrets.NodeCredential.CopyBytes()) != 0 || len(first.Secrets.ClusterKEK.CopyBytes()) != 0 {
 		second.Destroy()
 		t.Fatal("Destroy did not clear the first secret owner")
 	}
 	second.Destroy()
-	if len(second.NodeCredential.CopyBytes()) != 0 || len(second.ClusterKEK.CopyBytes()) != 0 {
+	if len(second.Secrets.NodeCredential.CopyBytes()) != 0 || len(second.Secrets.ClusterKEK.CopyBytes()) != 0 {
 		t.Fatal("Destroy did not clear the replayed secret owner")
 	}
 
@@ -331,8 +370,9 @@ func TestBootstrapReplayRandomnessAndSecretOwnership(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PublicKey after replay: %v", err)
 	}
-	credential, kek := testBootstrapInputs()
-	otherEnvelope, err := SealBootstrap(publicKey, binding, credential, kek)
+	grant := testBootstrapGrant(t, binding)
+	otherEnvelope, err := SealBootstrap(publicKey, binding, grant)
+	grant.Destroy()
 	if err != nil {
 		t.Fatalf("second seal: %v", err)
 	}
