@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"bytes"
 	"errors"
 	"strings"
 	"testing"
@@ -187,6 +188,26 @@ func TestKEKUnwrapErrorMentionsClusterKEK(t *testing.T) {
 		// We don't expose errors.Is sentinel here; just confirm phrasing.
 		t.Logf("unwrap rejected: %v", err)
 	}
+}
+
+func TestKEKDestroyInvalidatesAndZeroesKeyMaterial(t *testing.T) {
+	key := bytes.Repeat([]byte{0x4a}, KEKLength)
+	kek, err := NewKEK(key)
+	if err != nil {
+		t.Fatalf("NewKEK: %v", err)
+	}
+	envelope, err := kek.Wrap([]byte("destroy me"))
+	if err != nil {
+		t.Fatalf("Wrap: %v", err)
+	}
+	kek.Destroy()
+	if _, err := kek.Wrap([]byte("must fail")); err == nil {
+		t.Fatal("Wrap succeeded after Destroy")
+	}
+	if _, err := kek.Unwrap(envelope); err == nil {
+		t.Fatal("Unwrap succeeded after Destroy")
+	}
+	kek.Destroy()
 }
 
 func flipBase64Char(s string) string {

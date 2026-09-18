@@ -50,6 +50,18 @@ func NewKEK(key []byte) (*KEK, error) {
 	return &KEK{key: append([]byte(nil), key...)}, nil
 }
 
+// Destroy zeroes the in-memory KEK and makes future Wrap/Unwrap calls fail.
+// It is safe to call repeatedly and on a nil receiver.
+func (k *KEK) Destroy() {
+	if k == nil {
+		return
+	}
+	for index := range k.key {
+		k.key[index] = 0
+	}
+	k.key = nil
+}
+
 // GenerateKEK generates a fresh 32-byte cluster KEK using a
 // cryptographically secure random source.
 func GenerateKEK() ([]byte, error) {
