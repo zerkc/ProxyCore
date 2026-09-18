@@ -8,11 +8,13 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/zerkc/ProxyCore/apps/api/internal/cluster"
 	"github.com/zerkc/ProxyCore/apps/api/internal/domain"
+	replicationsnapshot "github.com/zerkc/ProxyCore/apps/api/internal/snapshot"
 )
 
 // PgPhase2Store is the PostgreSQL implementation of the continuity
@@ -21,8 +23,9 @@ import (
 const EnrollmentTokenHashVersion = "sha256-v1"
 
 type PgPhase2Store struct {
-	pool            *pgxpool.Pool
-	clusterKeyStore cluster.KeyStore
+	pool                         *pgxpool.Pool
+	clusterKeyStore              cluster.KeyStore
+	snapshotPublicationAfterAuth func()
 }
 
 func NewPhase2Store(pool *pgxpool.Pool) *PgPhase2Store {
@@ -35,6 +38,18 @@ func NewPhase2StoreWithClusterKeyStore(pool *pgxpool.Pool, keyStore cluster.KeyS
 
 func NewPhase2StoreWithMasterKey(pool *pgxpool.Pool, masterKeyBase64 string) *PgPhase2Store {
 	return NewPhase2StoreWithClusterKeyStore(pool, cluster.NewStore(masterKeyBase64))
+}
+
+// WithSnapshotPublicationHooks returns a shallow store copy with test-only
+// synchronization hooks. The hook executes while credential and node rows are
+// locked, before identity or snapshot reads continue.
+func (s *PgPhase2Store) WithSnapshotPublicationHooks(hooks SnapshotPublicationHooks) *PgPhase2Store {
+	if s == nil {
+		return nil
+	}
+	copy := *s
+	copy.snapshotPublicationAfterAuth = hooks.AfterCredentialAuthorization
+	return &copy
 }
 
 // GetEnrollmentHostnames returns the durable exact SAN configuration without
@@ -397,4 +412,212 @@ func phase2Int64(value *int64) any {
 		return nil
 	}
 	return *value
+}
+
+// ReadSnapshotPublication authenticates the presented node credential and
+// selects the absolute newest relevant candidate in one repeatable-read
+// transaction. It denies an incomplete or unpublishable newest candidate
+// rather than falling back to an older revision. Credential and enrolled-node
+// row locks are held through the bounded body copy and commit. A revocation
+// committed after that commit is observed on the next call; transports must
+// call this method before writing any response bytes.
+func (s *PgPhase2Store) ReadSnapshotPublication(ctx context.Context, request SnapshotPublicationRequest) (SnapshotPublicationResult, error) {
+	if s == nil || s.pool == nil || request.Authenticate == nil ||
+		request.CredentialID == "" || request.PresentedCredential == "" ||
+		request.MaxBytes <= 0 || request.MaxBytes > SnapshotPublicationMaxBytes {
+		return SnapshotPublicationResult{}, ErrSnapshotPublicationStore
+	}
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead})
+	if err != nil {
+		return SnapshotPublicationResult{}, ErrSnapshotPublicationStore
+	}
+	defer tx.Rollback(ctx)
+
+	credential, err := lockSnapshotPublicationCredential(ctx, tx, request)
+	if err != nil {
+		return SnapshotPublicationResult{}, ErrSnapshotPublicationStore
+	}
+	principal, err := request.Authenticate(request.PresentedCredential, credential)
+	if err != nil || principal.CredentialID != credential.ID || principal.NodeID != credential.NodeID {
+		return SnapshotPublicationResult{}, ErrSnapshotPublicationStore
+	}
+	if s.snapshotPublicationAfterAuth != nil {
+		s.snapshotPublicationAfterAuth()
+	}
+	if request.AfterContentHash != "" && !validSnapshotPublicationHash(request.AfterContentHash) {
+		return SnapshotPublicationResult{}, ErrSnapshotPublicationStore
+	}
+
+	identityRecord, err := lockSnapshotPublicationIdentity(ctx, tx)
+	if err != nil || !readySnapshotPublicationIdentity(identityRecord) {
+		return SnapshotPublicationResult{}, ErrSnapshotPublicationStore
+	}
+	if credential.PrimaryID != identityRecord.InstallationID {
+		return SnapshotPublicationResult{}, ErrSnapshotPublicationStore
+	}
+
+	if identityRecord.ClusterKeyID == nil || s.clusterKeyStore == nil {
+		return SnapshotPublicationResult{}, ErrSnapshotPublicationStore
+	}
+	keyMaterial, err := s.clusterKeyStore.LoadOrCreate(ctx, tx, identityRecord.ClusterKeyID)
+	if err != nil {
+		return SnapshotPublicationResult{}, ErrSnapshotPublicationStore
+	}
+	keyBytes := keyMaterial.CopyBytes()
+	keyMaterial.Destroy()
+	kek, err := cluster.NewKEK(keyBytes)
+	if err != nil {
+		zeroGrantBytes(keyBytes)
+		return SnapshotPublicationResult{}, ErrSnapshotPublicationStore
+	}
+	defer kek.Destroy()
+	zeroGrantBytes(keyBytes)
+	identityRecord.ClusterKeyUsable = true
+
+	// The metadata query computes octet_length(snapshot::text) without selecting
+	// the body. PostgreSQL stores this column as JSONB, so the text cast is only
+	// for its logical byte length; the second query fetches bytes after proof and
+	// max-size checks pass.
+	candidate, snapshotSize, err := selectLatestSnapshotPublication(ctx, tx, identityRecord, credential.PrimaryID)
+	if err != nil || snapshotSize <= 0 || snapshotSize > request.MaxBytes || !candidate.ProofComplete {
+		return SnapshotPublicationResult{}, ErrSnapshotPublicationStore
+	}
+	result := SnapshotPublicationResult{
+		Principal: principal,
+		Identity:  identityRecord,
+		Snapshot:  candidate,
+	}
+
+	var raw string
+	if err := tx.QueryRow(ctx, `
+		select snapshot::text from config_revisions
+		where id = $1
+		for share
+	`, candidate.RevisionID).Scan(&raw); err != nil || raw == "" || len(raw) != snapshotSize || len(raw) > request.MaxBytes {
+		return SnapshotPublicationResult{}, ErrSnapshotPublicationStore
+	}
+	rawBytes := []byte(raw)
+	envelope, err := replicationsnapshot.Unmarshal(rawBytes)
+	if err != nil || !replicationsnapshot.NewValidator(kek).Validate(ctx, envelope).OK {
+		return SnapshotPublicationResult{}, ErrSnapshotPublicationStore
+	}
+	candidate.Bytes = append([]byte(nil), rawBytes...)
+	result.Snapshot = candidate
+	if request.AfterContentHash != "" && request.AfterContentHash == candidate.ContentHash {
+		result.Current = true
+		result.Snapshot.Bytes = nil
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return SnapshotPublicationResult{}, ErrSnapshotPublicationStore
+	}
+	return result, nil
+}
+
+func lockSnapshotPublicationCredential(ctx context.Context, tx pgx.Tx, request SnapshotPublicationRequest) (SnapshotPublicationCredentialRecord, error) {
+	var record SnapshotPublicationCredentialRecord
+	if err := tx.QueryRow(ctx, `
+		select c.id::text, c.node_id::text, c.credential_hash, c.hash_version,
+			c.revoked_at, n.revoked_at, n.primary_id::text
+		from node_credentials c
+		join enrolled_nodes n on n.credential_id = c.id and n.node_id = c.node_id
+		where c.id = $1
+		for update of c, n
+	`, request.CredentialID).Scan(
+		&record.ID, &record.NodeID, &record.CredentialHash, &record.HashVersion,
+		&record.CredentialRevokedAt, &record.NodeRevokedAt, &record.PrimaryID,
+	); err != nil {
+		return SnapshotPublicationCredentialRecord{}, err
+	}
+	return record, nil
+}
+
+func lockSnapshotPublicationIdentity(ctx context.Context, tx pgx.Tx) (SnapshotPublicationIdentityRecord, error) {
+	var record SnapshotPublicationIdentityRecord
+	var role string
+	var installationID, nodeID string
+	if err := tx.QueryRow(ctx, `
+		select installation_id::text, node_id::text, role::text,
+			leadership_generation, latest_known_generation, cluster_key_id
+		from installation_identity
+		where id = $1
+		for update
+	`, installationIDSingleton).Scan(
+		&installationID, &nodeID, &role, &record.LeadershipGeneration,
+		&record.LatestKnownGeneration, &record.ClusterKeyID,
+	); err != nil {
+		return SnapshotPublicationIdentityRecord{}, err
+	}
+	record.InstallationID = installationID
+	record.NodeID = nodeID
+	record.Role = domain.TopologyRole(role)
+	return record, nil
+}
+
+func readySnapshotPublicationIdentity(record SnapshotPublicationIdentityRecord) bool {
+	return validPublicationUUID(record.InstallationID) && validPublicationUUID(record.NodeID) &&
+		(record.Role == domain.TopologyRolePrimary || record.Role == domain.TopologyRolePrimaryWithNodes) &&
+		record.LeadershipGeneration > 0 && record.LeadershipGeneration == record.LatestKnownGeneration
+}
+
+func selectLatestSnapshotPublication(ctx context.Context, tx pgx.Tx, _ SnapshotPublicationIdentityRecord, primaryID string) (SnapshotPublicationRecord, int, error) {
+	var record SnapshotPublicationRecord
+	var snapshotSize int
+	var proofComplete bool
+	if err := tx.QueryRow(ctx, `
+		select a.id::text, a.source_primary_id::text, a.leadership_generation,
+			a.snapshot_version, a.replication_version, a.content_hash,
+			coalesce(r.id::text, ''), coalesce(j.id::text, ''), a.applied_at, a.discarded_at,
+			coalesce(r.revision_number, 0), coalesce(octet_length(r.snapshot::text), 0),
+			(
+				a.status::text = 'applied'
+				and a.discarded_at is null
+				and r.id is not null
+				and r.applied_at is not null
+				and r.source::text = 'ordinary'
+				and r.source_node_id is null
+				and r.source_revision_id is null
+				and r.source_primary_id = a.source_primary_id
+				and r.snapshot_content_hash = a.content_hash
+				and r.snapshot_version = a.snapshot_version
+				and r.replication_version = a.replication_version
+				and r.leadership_generation = a.leadership_generation
+				and j.id is not null
+				and j.revision_id = r.id
+				and j.status::text = 'applied'
+				and j.finished_at is not null
+				and j.source::text = 'ordinary'
+				and j.source_node_id is null
+				and j.source_revision_id is null
+				and j.source_primary_id = a.source_primary_id
+				and j.snapshot_content_hash = a.content_hash
+				and j.snapshot_version = a.snapshot_version
+				and j.replication_version = a.replication_version
+				and j.leadership_generation = a.leadership_generation
+				and j.target::text = 'combined'
+			) as proof_complete
+		from applied_snapshots a
+		left join config_revisions r on r.id = a.revision_id
+		left join apply_jobs j on j.id = a.apply_job_id
+		where a.source_primary_id = $1
+		-- revision_number is unique in config_revisions; created_at and id
+		-- deterministically order incomplete candidates without a revision row.
+		order by coalesce(r.revision_number, -1) desc,
+			coalesce(r.created_at, a.applied_at) desc,
+			a.id desc
+		limit 1
+	`, primaryID).Scan(
+		&record.SnapshotID, &record.SourcePrimaryID, &record.LeadershipGeneration,
+		&record.SnapshotVersion, &record.ReplicationVersion, &record.ContentHash,
+		&record.RevisionID, &record.ApplyJobID, &record.AppliedAt, &record.DiscardedAt,
+		&record.RevisionNumber, &snapshotSize, &proofComplete,
+	); err != nil {
+		return SnapshotPublicationRecord{}, 0, err
+	}
+	record.ProofComplete = proofComplete
+	return record, snapshotSize, nil
+}
+
+func validPublicationUUID(value string) bool {
+	parsed, err := uuid.Parse(value)
+	return err == nil && parsed != uuid.Nil && parsed.String() == value
 }
