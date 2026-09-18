@@ -3,6 +3,7 @@ import {
   InMemoryContinuityPersistence,
   type EnrollmentAttemptRecord,
   type EnrollmentGrantRecord,
+  type AppliedSnapshotRecord,
   type SnapshotAcknowledgement,
 } from "./ports";
 
@@ -32,6 +33,20 @@ describe("phase 2 persistence ports", () => {
       createdAt: new Date("2026-01-01T00:00:00Z"),
       expiresAt: new Date("2026-01-01T00:15:00Z"),
     };
+    const publicationBody = new Uint8Array([0xde, 0xad, 0xbe, 0xef]);
+    const appliedSnapshot: AppliedSnapshotRecord = {
+      id: "snapshot-47",
+      sourcePrimaryId: "00000000-0000-4000-8000-000000000012",
+      leadershipGeneration: 3,
+      snapshotVersion: 1,
+      replicationVersion: 1,
+      contentHash: "hash-47",
+      snapshotBody: publicationBody,
+      revisionId: "revision-47",
+      status: "applied",
+      applyJobId: "job-47",
+      appliedAt: new Date("2026-01-01T00:01:00Z"),
+    };
     const acknowledgement: SnapshotAcknowledgement = {
       nodeId: "00000000-0000-4000-8000-000000000001",
       contentHash: "hash-47",
@@ -46,6 +61,7 @@ describe("phase 2 persistence ports", () => {
     await store.withTransaction(async (tx) => {
       await tx.createEnrollmentAttempt(attempt);
       await tx.createEnrollmentGrant(grant);
+      await tx.recordAppliedSnapshot(appliedSnapshot);
       await tx.recordSnapshotAcknowledgement(acknowledgement);
     });
 
@@ -56,6 +72,11 @@ describe("phase 2 persistence ports", () => {
         primaryUrl: "https://primary.example",
       });
       expect(await tx.getEnrollmentGrant("attempt-1")).toMatchObject(grant);
+      const storedSnapshot = await tx.getAppliedSnapshot(appliedSnapshot.id);
+      expect(storedSnapshot).toMatchObject(appliedSnapshot);
+      expect(storedSnapshot?.snapshotBody).not.toBe(publicationBody);
+      publicationBody[0] = 0;
+      expect(storedSnapshot?.snapshotBody?.[0]).toBe(0xde);
       expect(
         await tx.getSnapshotAcknowledgement(
           acknowledgement.nodeId,

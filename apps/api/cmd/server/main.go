@@ -22,6 +22,7 @@ import (
 	"github.com/zerkc/ProxyCore/apps/api/internal/httpserver"
 	"github.com/zerkc/ProxyCore/apps/api/internal/identity"
 	"github.com/zerkc/ProxyCore/apps/api/internal/snapshot"
+	syncpublication "github.com/zerkc/ProxyCore/apps/api/internal/sync"
 	"github.com/zerkc/ProxyCore/apps/api/internal/update"
 	"github.com/zerkc/ProxyCore/apps/api/internal/version"
 )
@@ -168,7 +169,7 @@ func runServer(ctx context.Context, cfg config.Config, logger *log.Logger) error
 		}
 	}
 
-	workers := make([]func(context.Context), 0, 2)
+	workers := make([]func(context.Context), 0, 3)
 	if configStore != nil {
 		workers = append(workers, func(workerCtx context.Context) {
 			// Ordinary renewal is gated by the live identity on every cycle and
@@ -182,6 +183,15 @@ func runServer(ctx context.Context, cfg config.Config, logger *log.Logger) error
 				Identity:               renewalIdentityProvider(identitySvc),
 				IdentityLease:          identitySvc,
 			}, cfg.CertRenewalInterval)
+		})
+		phase2Store := configuration.NewPhase2StoreWithMasterKey(pool, cfg.MasterKeyBase64)
+		publicationProducer := syncpublication.NewCanonicalSnapshotProducer(phase2Store, syncpublication.CanonicalSnapshotProducerOptions{
+			OnError: func(error) {
+				logger.Printf("canonical snapshot publication reconciliation unavailable")
+			},
+		})
+		workers = append(workers, func(workerCtx context.Context) {
+			publicationProducer.Run(workerCtx)
 		})
 	}
 	// Start the standalone-archive retention worker. Phase 1 introduces

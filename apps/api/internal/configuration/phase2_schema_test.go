@@ -56,6 +56,7 @@ func TestPhase2SchemaContractCoversAdditivePersistence(t *testing.T) {
 		"snapshot_version",
 		"replication_version",
 		"leadership_generation",
+		"snapshot_body",
 		"status",
 	} {
 		if !containsSQLColumn(contract.Statements, column) {
@@ -181,6 +182,17 @@ func TestEnsureSchemaIsIdempotentAgainstMigratedPostgres(t *testing.T) {
 	}
 	if err := EnsureSchema(ctx, pool); err != nil {
 		t.Fatalf("second EnsureSchema: %v", err)
+	}
+	var snapshotBodyNullable string
+	if err := pool.QueryRow(ctx, `
+		select is_nullable from information_schema.columns
+		where table_schema = current_schema() and table_name = 'applied_snapshots'
+		  and column_name = 'snapshot_body'
+	`).Scan(&snapshotBodyNullable); err != nil {
+		t.Fatalf("read snapshot body column: %v", err)
+	}
+	if snapshotBodyNullable != "YES" {
+		t.Fatalf("snapshot body nullability = %q, want YES for legacy rows", snapshotBodyNullable)
 	}
 	var previewDigestColumn string
 	if err := pool.QueryRow(ctx, `

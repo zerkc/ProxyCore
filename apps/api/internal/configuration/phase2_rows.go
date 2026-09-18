@@ -78,7 +78,7 @@ func scanAppliedSnapshot(row scanner) (AppliedSnapshotRecord, error) {
 	if err := row.Scan(
 		&snapshot.ID, &snapshot.SourcePrimaryID, &snapshot.LeadershipGeneration,
 		&snapshot.SnapshotVersion, &snapshot.ReplicationVersion, &snapshot.ContentHash,
-		&snapshot.RevisionID, &status, &snapshot.ApplyJobID, &snapshot.FailureCode,
+		&snapshot.SnapshotBody, &snapshot.RevisionID, &status, &snapshot.ApplyJobID, &snapshot.FailureCode,
 		&snapshot.AppliedAt, &snapshot.DiscardedAt,
 	); err != nil {
 		return AppliedSnapshotRecord{}, err

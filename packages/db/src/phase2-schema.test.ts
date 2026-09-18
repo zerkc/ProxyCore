@@ -4,6 +4,9 @@ import { phase2PersistenceContract } from "./schema";
 
 describe("phase 2 persistence contract", () => {
   it("describes every additive table and checked state", () => {
+    expect(phase2PersistenceContract.appliedSnapshotColumns).toEqual([
+      "snapshot_body",
+    ]);
     expect(Object.keys(phase2PersistenceContract.tables)).toEqual([
       "enrollmentTokens",
       "enrolledNodes",
@@ -64,16 +67,23 @@ describe("phase 2 persistence contract", () => {
       ),
       "utf8",
     );
+    const appliedSnapshotBodyMigration = readFileSync(
+      new URL("../migrations/0008_applied_snapshot_body.sql", import.meta.url),
+      "utf8",
+    );
     const journal = JSON.parse(
       readFileSync(new URL("../migrations/meta/_journal.json", import.meta.url), "utf8"),
     ) as { entries: Array<{ idx: number; tag: string }> };
 
     expect(journal.entries.at(-1)).toMatchObject({
-      idx: 7,
-      tag: "0007_enrollment_grant_preview_digest",
+      idx: 8,
+      tag: "0008_applied_snapshot_body",
     });
     expect(grantDigestMigration).toContain(
       'ALTER TABLE "enrollment_grants" ADD COLUMN IF NOT EXISTS "verified_preview_digest" text',
+    );
+    expect(appliedSnapshotBodyMigration).toContain(
+      'ALTER TABLE "applied_snapshots" ADD COLUMN IF NOT EXISTS "snapshot_body" bytea',
     );
     for (const constraint of [
       '"enrollment_tokens_consumed_by_attempt_id_enrollment_attempts_id_fk"',

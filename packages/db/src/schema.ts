@@ -3,6 +3,7 @@ import {
   bigint as bigintColumn,
   boolean,
   check,
+  customType,
   index,
   integer,
   jsonb,
@@ -491,6 +492,18 @@ export const nodeState = pgTable("node_state", {
  * Used by Phase 1 to drive the round-trip and by Phase 0 to retain a
  * previous known-good snapshot for rollback.
  */
+const byteaColumn = customType<{ data: Uint8Array; driverData: Buffer }>({
+  dataType() {
+    return "bytea";
+  },
+  toDriver(value) {
+    return Buffer.from(value);
+  },
+  fromDriver(value) {
+    return new Uint8Array(value as Buffer);
+  },
+});
+
 export const appliedSnapshots = pgTable(
   "applied_snapshots",
   {
@@ -502,6 +515,9 @@ export const appliedSnapshots = pgTable(
     snapshotVersion: integer("snapshot_version").notNull(),
     replicationVersion: integer("replication_version").notNull(),
     contentHash: text("content_hash").notNull(),
+    // Nullable for upgrades: legacy rows are intentionally unpublishable until
+    // the Go producer writes exact canonical bytes for a terminal apply.
+    snapshotBody: byteaColumn("snapshot_body"),
     revisionId: uuid("revision_id").references(() => configRevisions.id),
     status: appliedSnapshotStatusEnum("status").notNull().default("applied"),
     applyJobId: uuid("apply_job_id").references(() => applyJobs.id),
@@ -813,6 +829,7 @@ export const phase2PersistenceContract = {
     "replication_version",
     "leadership_generation",
   ],
+  appliedSnapshotColumns: ["snapshot_body"],
 } as const;
 
 export const schema = {

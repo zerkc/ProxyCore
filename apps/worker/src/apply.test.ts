@@ -49,6 +49,30 @@ describe("apply orchestrator", () => {
     expect((await jobs.get(job.id))?.healthOutput).toBeDefined();
   });
 
+  it("renders the desired configuration from an envelope-backed revision", async () => {
+    const { worker, job, control } = await setup();
+    let renderedSnapshot: unknown;
+    const desired = { settings: { defaultPool: { id: "pool-1" } }, zones: [] };
+    const result = await worker.apply(
+      job.id,
+      {
+        replicated: { configuration: desired },
+      },
+      (snapshot) => {
+        renderedSnapshot = snapshot;
+        return {
+          service: "coredns",
+          candidatePath: "/candidates/revision-1",
+          checksum: "abc",
+        };
+      },
+    );
+
+    expect(result.status).toBe("applied");
+    expect(renderedSnapshot).toEqual(desired);
+    expect(control.operations).toEqual(["stage", "validate", "promote", "reload", "health"]);
+  });
+
   it("leaves the active revision unchanged when validation fails", async () => {
     const { worker, revisions, revision, job, control } = await setup("validate");
     const result = await worker.apply(job.id, { zones: [] }, () => ({

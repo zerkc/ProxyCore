@@ -90,7 +90,7 @@ export class ApplyOrchestrator {
     let candidates: RenderedCandidate[] = [];
 
     try {
-      const rendered = await render(snapshot, job);
+      const rendered = await render(desiredSnapshotForApply(snapshot), job);
       candidates = Array.isArray(rendered) ? rendered : [rendered];
       if (candidates.length === 0) {
         throw new Error("No candidates were rendered");
@@ -261,6 +261,18 @@ export class ApplyOrchestrator {
   private now(): Date {
     return this.stores.now?.() ?? new Date();
   }
+}
+
+function desiredSnapshotForApply(
+  snapshot: ConfigurationSnapshot,
+): ConfigurationSnapshot {
+  if (!snapshot || typeof snapshot !== "object") return snapshot;
+  const replicated = (snapshot as { replicated?: unknown }).replicated;
+  if (!replicated || typeof replicated !== "object") return snapshot;
+  const configuration = (replicated as { configuration?: unknown }).configuration;
+  return configuration && typeof configuration === "object"
+    ? (configuration as ConfigurationSnapshot)
+    : snapshot;
 }
 
 function hasNginxDrift(response: ControlResponse): boolean {

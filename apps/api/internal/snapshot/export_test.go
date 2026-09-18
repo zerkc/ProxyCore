@@ -42,7 +42,10 @@ func (f *fakeSecrets) ListSecrets(_ context.Context) ([]PlainSecret, error) {
 		return nil, f.listErr
 	}
 	out := make([]PlainSecret, len(f.entries))
-	copy(out, f.entries)
+	for index, entry := range f.entries {
+		out[index] = entry
+		out[index].Value = append([]byte(nil), entry.Value...)
+	}
 	return out, nil
 }
 

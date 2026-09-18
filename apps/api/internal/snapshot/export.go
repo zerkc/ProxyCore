@@ -30,9 +30,9 @@ type SecretLister interface {
 // secret. The Exporter wraps the Value with the cluster KEK and produces a
 // ReplicatedSecret whose envelope is the cluster-KEK ciphertext.
 type PlainSecret struct {
-	ID     uuid.UUID
+	ID      uuid.UUID
 	Purpose string
-	Value  []byte
+	Value   []byte
 }
 
 // OwnerLister returns the admin identities (Owners and Operators) that the
@@ -58,13 +58,13 @@ type ReplicableOwner struct {
 // identity (the producer is the local installation acting as primary) and
 // the active cluster KEK.
 type ExporterInput struct {
-	InstallationID        domain.InstallationID
-	NodeID                domain.NodeID
-	Role                  domain.TopologyRole
-	Ingress               domain.Ingress
-	LeadershipGeneration  domain.LeadershipGeneration
-	ClusterKEK            *cluster.KEK
-	ClusterKeyRef         *uuid.UUID
+	InstallationID       domain.InstallationID
+	NodeID               domain.NodeID
+	Role                 domain.TopologyRole
+	Ingress              domain.Ingress
+	LeadershipGeneration domain.LeadershipGeneration
+	ClusterKEK           *cluster.KEK
+	ClusterKeyRef        *uuid.UUID
 }
 
 // Exporter turns a desired-state snapshot into a sealed replication
@@ -85,11 +85,20 @@ func NewExporter(config ConfigurationSource, secrets SecretLister, owners OwnerL
 }
 
 // Export produces a sealed Envelope. The exporter:
-//   1. Reads the desired configuration snapshot via ConfigurationSource.
-//   2. Lists local secrets and wraps each value with the cluster KEK.
-//   3. Lists admin identities and includes the hashes unchanged.
-//   4. Stamps the producer's identity into Transient and NodeLocal fields.
-//   5. Computes the content hash and seals the envelope.
+//  1. Reads the desired configuration snapshot via ConfigurationSource.
+//  2. Lists local secrets and wraps each value with the cluster KEK.
+//  3. Lists admin identities and includes the hashes unchanged.
+//  4. Stamps the producer's identity into Transient and NodeLocal fields.
+//  5. Computes the content hash and seals the envelope.
+func zeroPlainSecretValues(values []PlainSecret) {
+	for index := range values {
+		for byteIndex := range values[index].Value {
+			values[index].Value[byteIndex] = 0
+		}
+		values[index].Value = nil
+	}
+}
+
 func (e *Exporter) Export(ctx context.Context, in ExporterInput) (Envelope, error) {
 	if in.ClusterKEK == nil {
 		return Envelope{}, errors.New("exporter: cluster KEK is required")
@@ -113,6 +122,7 @@ func (e *Exporter) Export(ctx context.Context, in ExporterInput) (Envelope, erro
 	if err != nil {
 		return Envelope{}, fmt.Errorf("exporter: list secrets: %w", err)
 	}
+	defer zeroPlainSecretValues(plainSecrets)
 	replicatedSecrets := make([]ReplicatedSecret, 0, len(plainSecrets))
 	for _, s := range plainSecrets {
 		envelope, err := in.ClusterKEK.Wrap(s.Value)
@@ -150,11 +160,11 @@ func (e *Exporter) Export(ctx context.Context, in ExporterInput) (Envelope, erro
 			CapturedAt:           now,
 		},
 		NodeLocal: NodeLocalFields{
-			Ingress:             in.Ingress,
-			NodeID:              in.NodeID,
-			Role:                in.Role,
+			Ingress:              in.Ingress,
+			NodeID:               in.NodeID,
+			Role:                 in.Role,
 			LeadershipGeneration: in.LeadershipGeneration,
-			ClusterKeyRef:       in.ClusterKeyRef,
+			ClusterKeyRef:        in.ClusterKeyRef,
 		},
 		Replicated: ReplicatedFields{
 			Configuration: configuration,

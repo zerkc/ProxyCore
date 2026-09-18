@@ -518,6 +518,9 @@ class PgContinuityTransaction implements ContinuityTransactionPort {
       snapshotVersion: snapshot.snapshotVersion,
       replicationVersion: snapshot.replicationVersion,
       contentHash: snapshot.contentHash,
+      snapshotBody: snapshot.snapshotBody
+        ? new Uint8Array(snapshot.snapshotBody)
+        : null,
       revisionId: snapshot.revisionId,
       status: snapshot.status,
       applyJobId: snapshot.applyJobId,
@@ -525,6 +528,17 @@ class PgContinuityTransaction implements ContinuityTransactionPort {
       appliedAt: snapshot.appliedAt,
       discardedAt: snapshot.discardedAt,
     });
+  }
+
+  async getAppliedSnapshot(
+    id: string,
+  ): Promise<AppliedSnapshotRecord | undefined> {
+    const [row] = await this.db
+      .select()
+      .from(appliedSnapshots)
+      .where(eq(appliedSnapshots.id, id))
+      .limit(1);
+    return row ? toAppliedSnapshot(row) : undefined;
   }
 
   async recordSnapshotAcknowledgement(
@@ -660,6 +674,28 @@ function toEnrollmentGrant(
     payloadHash: row.payloadHash,
     createdAt: row.createdAt,
     expiresAt: row.expiresAt,
+  };
+}
+
+function toAppliedSnapshot(
+  row: typeof appliedSnapshots.$inferSelect,
+): AppliedSnapshotRecord {
+  return {
+    id: row.id,
+    sourcePrimaryId: row.sourcePrimaryId,
+    leadershipGeneration: row.leadershipGeneration,
+    snapshotVersion: row.snapshotVersion,
+    replicationVersion: row.replicationVersion,
+    contentHash: row.contentHash,
+    snapshotBody: row.snapshotBody
+      ? new Uint8Array(row.snapshotBody)
+      : undefined,
+    revisionId: row.revisionId ?? undefined,
+    status: row.status,
+    applyJobId: row.applyJobId ?? undefined,
+    failureCode: row.failureCode ?? undefined,
+    appliedAt: row.appliedAt,
+    discardedAt: row.discardedAt ?? undefined,
   };
 }
 

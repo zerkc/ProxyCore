@@ -111,6 +111,8 @@ export type AppliedSnapshotRecord = {
   snapshotVersion: number;
   replicationVersion: number;
   contentHash: string;
+  /** Exact canonical envelope bytes; legacy null rows are unpublishable. */
+  snapshotBody?: Uint8Array;
   revisionId?: string;
   status: AppliedSnapshotStatus;
   applyJobId?: string;
@@ -141,6 +143,7 @@ export interface ContinuityTransactionPort {
   getEnrollmentGrant(id: string): Promise<EnrollmentGrantRecord | undefined>;
   recordSyncAttempt(attempt: SyncAttemptRecord): Promise<void>;
   recordAppliedSnapshot(snapshot: AppliedSnapshotRecord): Promise<void>;
+  getAppliedSnapshot(id: string): Promise<AppliedSnapshotRecord | undefined>;
   recordSnapshotAcknowledgement(ack: SnapshotAcknowledgement): Promise<void>;
   getSnapshotAcknowledgement(
     nodeId: string,
@@ -191,7 +194,23 @@ export class InMemoryContinuityPersistence implements ContinuityPersistencePort 
         this.syncAttempts.set(attempt.id, { ...attempt });
       },
       recordAppliedSnapshot: async (snapshot) => {
-        this.appliedSnapshots.set(snapshot.id, { ...snapshot });
+        this.appliedSnapshots.set(snapshot.id, {
+          ...snapshot,
+          snapshotBody: snapshot.snapshotBody
+            ? new Uint8Array(snapshot.snapshotBody)
+            : undefined,
+        });
+      },
+      getAppliedSnapshot: async (id) => {
+        const snapshot = this.appliedSnapshots.get(id);
+        return snapshot
+          ? {
+              ...snapshot,
+              snapshotBody: snapshot.snapshotBody
+                ? new Uint8Array(snapshot.snapshotBody)
+                : undefined,
+            }
+          : undefined;
       },
       recordSnapshotAcknowledgement: async (ack) => {
         this.acknowledgements.set(`${ack.nodeId}:${ack.contentHash}`, {

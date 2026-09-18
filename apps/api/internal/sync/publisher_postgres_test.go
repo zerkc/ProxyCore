@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -153,18 +154,15 @@ func insertPublicationCandidate(t *testing.T, pool *pgxpool.Pool, primaryID stri
 		t.Fatalf("read primary identity tuple: %v", err)
 	}
 	body, contentHash := canonicalPublicationEnvelope(t, domain.InstallationID(primaryID), domain.NodeID(primaryNodeID), domain.TopologyRolePrimary, domain.LeadershipGeneration(generation), revision, clusterKeyID)
-	rawSum := sha256.Sum256(body)
+	desiredBody := []byte(fmt.Sprintf(`{"settings":{"revision":%d},"zones":[],"streams":[],"certificates":[]}`, revision))
+	rawSum := sha256.Sum256(desiredBody)
 	rawChecksum := hex.EncodeToString(rawSum[:])
 	if _, err := pool.Exec(ctx, `
 		insert into config_revisions (id, revision_number, checksum, snapshot, source, source_primary_id,
 			snapshot_content_hash, snapshot_version, replication_version, leadership_generation, applied_at)
 		values ($1, $2, $3, $4, 'ordinary', $5, $6, 1, 1, $7, case when $8 = 'applied' then now() else null end)
-	`, revisionID, revision, rawChecksum, body, primaryID, contentHash, generation, jobStatus); err != nil {
+	`, revisionID, revision, rawChecksum, desiredBody, primaryID, contentHash, generation, jobStatus); err != nil {
 		t.Fatalf("insert revision %d: %v", revision, err)
-	}
-	var storedBody string
-	if err := pool.QueryRow(ctx, `select snapshot::text from config_revisions where id = $1`, revisionID).Scan(&storedBody); err != nil {
-		t.Fatalf("read revision %d bytes: %v", revision, err)
 	}
 	hash := contentHash
 	finished := any(nil)
@@ -180,12 +178,12 @@ func insertPublicationCandidate(t *testing.T, pool *pgxpool.Pool, primaryID stri
 	}
 	if _, err := pool.Exec(ctx, `
 		insert into applied_snapshots (id, source_primary_id, leadership_generation, snapshot_version,
-			replication_version, content_hash, revision_id, status, apply_job_id, applied_at)
-		values ($1, $2, $3, 1, 1, $4, $5, $6, $7, now())
-	`, snapshotID, primaryID, generation, hash, revisionID, snapshotStatus, jobID); err != nil {
+			replication_version, content_hash, snapshot_body, revision_id, status, apply_job_id, applied_at)
+		values ($1, $2, $3, 1, 1, $4, $5, $6, $7, $8, now())
+	`, snapshotID, primaryID, generation, hash, body, revisionID, snapshotStatus, jobID); err != nil {
 		t.Fatalf("insert applied snapshot %d: %v", revision, err)
 	}
-	return publicationCandidate{SnapshotID: snapshotID, RevisionID: revisionID, JobID: jobID, PrimaryID: primaryID, Revision: revision, Hash: hash, Body: []byte(storedBody)}
+	return publicationCandidate{SnapshotID: snapshotID, RevisionID: revisionID, JobID: jobID, PrimaryID: primaryID, Revision: revision, Hash: hash, Body: append([]byte(nil), body...)}
 }
 
 func TestPostgresPublisherDeniesNewestUnpublishableWithoutFallback(t *testing.T) {
@@ -222,8 +220,8 @@ func TestPostgresPublisherRejectsCorruptOrOversizedLatest(t *testing.T) {
 	t.Run("hash mismatch", func(t *testing.T) {
 		fixture := newPublisherPostgresFixture(t)
 		defer fixture.credential.Destroy()
-		if _, err := fixture.pool.Exec(context.Background(), `update config_revisions set snapshot = '{"corrupt":true}'::jsonb where id = $1`, fixture.latest.RevisionID); err != nil {
-			t.Fatalf("corrupt snapshot: %v", err)
+		if _, err := fixture.pool.Exec(context.Background(), `update applied_snapshots set snapshot_body = convert_to('{"corrupt":true}', 'UTF8') where id = $1`, fixture.latest.SnapshotID); err != nil {
+			t.Fatalf("corrupt snapshot body: %v", err)
 		}
 		result, err := fixture.publisher.Publish(context.Background(), SnapshotRequest{Credential: fixture.credential.BearerCopy()})
 		if err != ErrSnapshotDenied || result.Current || len(result.Bytes) != 0 {
@@ -253,6 +251,7 @@ func TestPostgresPublisherRequiresCompleteApplyProof(t *testing.T) {
 		set   string
 	}{
 		{name: "discarded snapshot", table: "applied_snapshots", set: "discarded_at = now()"},
+		{name: "legacy null snapshot body", table: "applied_snapshots", set: "snapshot_body = null"},
 		{name: "revision unapplied", table: "config_revisions", set: "applied_at = null"},
 		{name: "revision source", table: "config_revisions", set: "source = 'sync'"},
 		{name: "revision source node", table: "config_revisions", set: "source_node_id = $2"},

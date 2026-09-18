@@ -206,6 +206,9 @@ func phase2SchemaContract() phase2SchemaDefinition {
 		`alter table applied_snapshots add column if not exists status proxycore_applied_snapshot_status not null default 'applied';`,
 		`alter table applied_snapshots add column if not exists apply_job_id uuid references apply_jobs(id);`,
 		`alter table applied_snapshots add column if not exists failure_code text;`,
+		// Legacy rows remain nullable and are rejected by the publication reader
+		// until the producer writes the exact canonical envelope bytes.
+		`alter table applied_snapshots add column if not exists snapshot_body bytea;`,
 		`do $$ begin alter table applied_snapshots add constraint applied_snapshots_status_check check (status in ('pending','applied','rejected','rolled-back','archived')); exception when duplicate_object then null; end $$;`,
 	}}
 }

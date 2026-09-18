@@ -1,6 +1,7 @@
 package configuration
 
 import (
+	"bytes"
 	"context"
 	"crypto/subtle"
 	"encoding/json"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/zerkc/ProxyCore/apps/api/internal/cluster"
 	"github.com/zerkc/ProxyCore/apps/api/internal/domain"
+	securesecrets "github.com/zerkc/ProxyCore/apps/api/internal/secrets"
 	replicationsnapshot "github.com/zerkc/ProxyCore/apps/api/internal/snapshot"
 )
 
@@ -25,6 +27,7 @@ const EnrollmentTokenHashVersion = "sha256-v1"
 type PgPhase2Store struct {
 	pool                         *pgxpool.Pool
 	clusterKeyStore              cluster.KeyStore
+	masterKeyBase64              string
 	snapshotPublicationAfterAuth func()
 }
 
@@ -37,7 +40,9 @@ func NewPhase2StoreWithClusterKeyStore(pool *pgxpool.Pool, keyStore cluster.KeyS
 }
 
 func NewPhase2StoreWithMasterKey(pool *pgxpool.Pool, masterKeyBase64 string) *PgPhase2Store {
-	return NewPhase2StoreWithClusterKeyStore(pool, cluster.NewStore(masterKeyBase64))
+	store := NewPhase2StoreWithClusterKeyStore(pool, cluster.NewStore(masterKeyBase64))
+	store.masterKeyBase64 = masterKeyBase64
+	return store
 }
 
 // WithSnapshotPublicationHooks returns a shallow store copy with test-only
@@ -111,10 +116,64 @@ func (s *PgPhase2Store) WithTransaction(ctx context.Context, fn func(Phase2Trans
 		return err
 	}
 	defer tx.Rollback(ctx)
-	if err := fn(&pgPhase2Transaction{tx: tx, clusterKeyStore: s.clusterKeyStore}); err != nil {
+	if err := fn(&pgPhase2Transaction{tx: tx, clusterKeyStore: s.clusterKeyStore, masterKeyBase64: s.masterKeyBase64}); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
+}
+
+// WithCanonicalSnapshot owns the producer's atomic identity/job/revision/
+// applied-snapshot transaction. The callback must not publish outside it.
+func (s *PgPhase2Store) WithCanonicalSnapshot(ctx context.Context, fn func(CanonicalSnapshotTransaction) error) error {
+	if s == nil || s.pool == nil || s.clusterKeyStore == nil || fn == nil {
+		return ErrSnapshotPublicationStore
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if err := fn(&pgPhase2Transaction{tx: tx, clusterKeyStore: s.clusterKeyStore, masterKeyBase64: s.masterKeyBase64}); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+// ListCanonicalSnapshotCandidates finds terminal ordinary combined jobs that
+// do not yet have a non-null applied snapshot body. Legacy null-body rows stay
+// candidates and are never treated as publishable.
+func (s *PgPhase2Store) ListCanonicalSnapshotCandidates(ctx context.Context) ([]CanonicalSnapshotApplyRef, error) {
+	if s == nil || s.pool == nil {
+		return nil, ErrSnapshotPublicationStore
+	}
+	rows, err := s.pool.Query(ctx, `
+		select j.id::text
+		from apply_jobs j
+		left join applied_snapshots a
+			on a.apply_job_id = j.id
+			and a.status::text = 'applied'
+			and a.discarded_at is null
+			and a.snapshot_body is not null
+		where j.status::text = 'applied'
+		  and j.target::text = 'combined'
+		  and j.source::text = 'ordinary'
+		  and j.finished_at is not null
+		  and a.id is null
+		order by j.finished_at asc, j.id asc
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	candidates := make([]CanonicalSnapshotApplyRef, 0)
+	for rows.Next() {
+		var candidate CanonicalSnapshotApplyRef
+		if err := rows.Scan(&candidate.JobID); err != nil {
+			return nil, err
+		}
+		candidates = append(candidates, candidate)
+	}
+	return candidates, rows.Err()
 }
 
 func (s *PgPhase2Store) WithPrimaryGrant(ctx context.Context, fn func(PrimaryGrantTransaction) error) error {
@@ -126,7 +185,7 @@ func (s *PgPhase2Store) WithPrimaryGrant(ctx context.Context, fn func(PrimaryGra
 		return err
 	}
 	defer tx.Rollback(ctx)
-	if err := fn(&pgPhase2Transaction{tx: tx, clusterKeyStore: s.clusterKeyStore}); err != nil {
+	if err := fn(&pgPhase2Transaction{tx: tx, clusterKeyStore: s.clusterKeyStore, masterKeyBase64: s.masterKeyBase64}); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
@@ -155,6 +214,7 @@ func (s *PgPhase2Store) RevokeEnrollmentToken(ctx context.Context, id, ownerID s
 type pgPhase2Transaction struct {
 	tx              pgx.Tx
 	clusterKeyStore cluster.KeyStore
+	masterKeyBase64 string
 }
 
 var errEnrollmentTokenDenied = errors.New("enrollment token denied")
@@ -337,8 +397,8 @@ func (t *pgPhase2Transaction) RecordAppliedSnapshot(ctx context.Context, snapsho
 	_, err := t.tx.Exec(ctx, `
 		insert into applied_snapshots (
 			id, source_primary_id, leadership_generation, snapshot_version, replication_version,
-			content_hash, revision_id, status, apply_job_id, failure_code, applied_at, discarded_at
-		) values ($1, $2, $3, $4, $5, $6, $7, $8::proxycore_applied_snapshot_status, $9, $10, $11, $12)
+			content_hash, snapshot_body, revision_id, status, apply_job_id, failure_code, applied_at, discarded_at
+		) values ($1, $2, $3, $4, $5, $6, $7, $8, $9::proxycore_applied_snapshot_status, $10, $11, $12, $13)
 		on conflict (id) do update set
 			status = excluded.status,
 			apply_job_id = excluded.apply_job_id,
@@ -346,8 +406,9 @@ func (t *pgPhase2Transaction) RecordAppliedSnapshot(ctx context.Context, snapsho
 			applied_at = excluded.applied_at,
 			discarded_at = excluded.discarded_at
 	`, snapshot.ID, snapshot.SourcePrimaryID, snapshot.LeadershipGeneration, snapshot.SnapshotVersion,
-		snapshot.ReplicationVersion, snapshot.ContentHash, phase2String(snapshot.RevisionID), string(snapshot.Status),
-		phase2String(snapshot.ApplyJobID), phase2String(snapshot.FailureCode), snapshot.AppliedAt, snapshot.DiscardedAt,
+		snapshot.ReplicationVersion, snapshot.ContentHash, snapshot.SnapshotBody,
+		phase2String(snapshot.RevisionID), string(snapshot.Status), phase2String(snapshot.ApplyJobID),
+		phase2String(snapshot.FailureCode), snapshot.AppliedAt, snapshot.DiscardedAt,
 	)
 	return err
 }
@@ -368,6 +429,232 @@ func (t *pgPhase2Transaction) RecordSnapshotAcknowledgement(ctx context.Context,
 	`, ack.NodeID, ack.ContentHash, ack.SnapshotVersion, ack.ReplicationVersion, ack.RevisionID,
 		ack.LeadershipGeneration, ack.AppliedAt, ack.ReceivedAt)
 	return err
+}
+
+func (t *pgPhase2Transaction) GetCanonicalSnapshotApply(ctx context.Context, id string) (CanonicalSnapshotApply, error) {
+	var (
+		apply                     CanonicalSnapshotApply
+		revisionSource, jobSource string
+		desiredSnapshot           []byte
+	)
+	err := t.tx.QueryRow(ctx, `
+		select j.id::text, j.revision_id::text, r.revision_number, r.snapshot,
+			j.status::text, j.target::text, j.source::text,
+			j.source_primary_id::text, j.source_node_id::text, j.source_revision_id::text,
+			j.snapshot_content_hash, j.snapshot_version, j.replication_version,
+			j.leadership_generation, j.finished_at,
+			r.source::text, r.source_primary_id::text, r.source_node_id::text,
+			r.source_revision_id::text, r.snapshot_content_hash, r.snapshot_version,
+			r.replication_version, r.leadership_generation, r.applied_at
+		from apply_jobs j
+		join config_revisions r on r.id = j.revision_id
+		where j.id = $1
+		for update of j, r
+	`, id).Scan(
+		&apply.JobID, &apply.RevisionID, &apply.RevisionNumber, &desiredSnapshot,
+		&apply.Status, &apply.Target, &jobSource,
+		&apply.SourcePrimaryID, &apply.SourceNodeID, &apply.SourceRevisionID,
+		&apply.SnapshotContentHash, &apply.SnapshotVersion, &apply.ReplicationVersion,
+		&apply.LeadershipGeneration, &apply.FinishedAt,
+		&revisionSource, &apply.RevisionSourcePrimaryID, &apply.RevisionSourceNodeID,
+		&apply.RevisionSourceRevisionID, &apply.RevisionSnapshotHash,
+		&apply.RevisionSnapshotVersion, &apply.RevisionReplication,
+		&apply.RevisionGeneration, &apply.RevisionAppliedAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return CanonicalSnapshotApply{}, ErrCanonicalSnapshotNotFound
+	}
+	if err != nil {
+		return CanonicalSnapshotApply{}, err
+	}
+	apply.DesiredSnapshot = append([]byte(nil), desiredSnapshot...)
+	apply.Source = PersistenceSource(jobSource)
+	apply.RevisionSource = PersistenceSource(revisionSource)
+	return apply, nil
+}
+
+func (t *pgPhase2Transaction) FindCanonicalSnapshotForJob(ctx context.Context, jobID string) (*CanonicalSnapshotRecord, error) {
+	row := t.tx.QueryRow(ctx, `
+		select id::text, source_primary_id::text, leadership_generation,
+			snapshot_version, replication_version, content_hash, snapshot_body,
+			revision_id::text, status::text, apply_job_id::text, failure_code,
+			applied_at, discarded_at
+		from applied_snapshots
+		where apply_job_id = $1
+		order by applied_at desc, id desc
+		limit 1
+		for update
+	`, jobID)
+	record, err := scanAppliedSnapshot(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &CanonicalSnapshotRecord{AppliedSnapshotRecord: record}, nil
+}
+
+func (t *pgPhase2Transaction) ListSecrets(ctx context.Context) ([]replicationsnapshot.PlainSecret, error) {
+	rows, err := t.tx.Query(ctx, `
+		select id, purpose, ciphertext
+		from secrets
+		order by id
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make([]replicationsnapshot.PlainSecret, 0)
+	for rows.Next() {
+		var id uuid.UUID
+		var purpose, ciphertext string
+		if err := rows.Scan(&id, &purpose, &ciphertext); err != nil {
+			zeroCanonicalPlainSecrets(result)
+			return nil, err
+		}
+		plaintext, err := securesecrets.DecryptSecret(ciphertext, t.masterKeyBase64)
+		if err != nil {
+			zeroCanonicalPlainSecrets(result)
+			return nil, err
+		}
+		result = append(result, replicationsnapshot.PlainSecret{
+			ID: id, Purpose: purpose, Value: []byte(plaintext),
+		})
+	}
+	if err := rows.Err(); err != nil {
+		zeroCanonicalPlainSecrets(result)
+		return nil, err
+	}
+	return result, nil
+}
+
+func (t *pgPhase2Transaction) ListReplicableOwners(ctx context.Context) ([]replicationsnapshot.ReplicableOwner, error) {
+	rows, err := t.tx.Query(ctx, `
+		select id, username, password_hash, role::text
+		from users
+		order by id
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make([]replicationsnapshot.ReplicableOwner, 0)
+	for rows.Next() {
+		var owner replicationsnapshot.ReplicableOwner
+		if err := rows.Scan(&owner.UserID, &owner.Username, &owner.PasswordHash, &owner.Role); err != nil {
+			return nil, err
+		}
+		result = append(result, owner)
+	}
+	return result, rows.Err()
+}
+
+func (t *pgPhase2Transaction) PublishCanonicalSnapshot(ctx context.Context, write CanonicalSnapshotWrite) error {
+	if t == nil || len(write.SnapshotBody) == 0 || !validPublicationUUID(write.ID) ||
+		!validPublicationUUID(write.SourcePrimaryID) || !validPublicationUUID(write.RevisionID) ||
+		!validPublicationUUID(write.ApplyJobID) || write.LeadershipGeneration <= 0 ||
+		write.SnapshotVersion <= 0 || write.ReplicationVersion <= 0 || write.ContentHash == "" ||
+		write.AppliedAt.IsZero() {
+		return ErrCanonicalSnapshotConflict
+	}
+	if existing, err := t.findCanonicalSnapshotByHash(ctx, write.ContentHash); err != nil {
+		return err
+	} else if existing != nil {
+		if canonicalSnapshotMatches(existing.AppliedSnapshotRecord, write) {
+			return nil
+		}
+		return ErrCanonicalSnapshotConflict
+	}
+
+	revisionTag, err := t.tx.Exec(ctx, `
+		update config_revisions
+		set source = 'ordinary', source_primary_id = $2, source_node_id = null,
+			source_revision_id = null, snapshot_content_hash = $3,
+			snapshot_version = $4, replication_version = $5,
+			leadership_generation = $6
+		where id = $1 and source = 'ordinary' and applied_at is not null
+	`, write.RevisionID, write.SourcePrimaryID, write.ContentHash, write.SnapshotVersion,
+		write.ReplicationVersion, write.LeadershipGeneration)
+	if err != nil || revisionTag.RowsAffected() != 1 {
+		if err != nil {
+			return err
+		}
+		return ErrCanonicalSnapshotConflict
+	}
+	jobTag, err := t.tx.Exec(ctx, `
+		update apply_jobs
+		set source = 'ordinary', source_primary_id = $2, source_node_id = null,
+			source_revision_id = null, snapshot_content_hash = $3,
+			snapshot_version = $4, replication_version = $5,
+			leadership_generation = $6, target = 'combined'
+		where id = $1 and revision_id = $7 and status = 'applied' and finished_at is not null
+	`, write.ApplyJobID, write.SourcePrimaryID, write.ContentHash, write.SnapshotVersion,
+		write.ReplicationVersion, write.LeadershipGeneration, write.RevisionID)
+	if err != nil || jobTag.RowsAffected() != 1 {
+		if err != nil {
+			return err
+		}
+		return ErrCanonicalSnapshotConflict
+	}
+	_, err = t.tx.Exec(ctx, `
+		insert into applied_snapshots (
+			id, source_primary_id, leadership_generation, snapshot_version,
+			replication_version, content_hash, snapshot_body, revision_id,
+			status, apply_job_id, failure_code, applied_at, discarded_at
+		) values ($1, $2, $3, $4, $5, $6, $7, $8, 'applied', $9, null, $10, null)
+	`, write.ID, write.SourcePrimaryID, write.LeadershipGeneration, write.SnapshotVersion,
+		write.ReplicationVersion, write.ContentHash, write.SnapshotBody, write.RevisionID,
+		write.ApplyJobID, write.AppliedAt)
+	if err != nil {
+		if existing, lookupErr := t.findCanonicalSnapshotByHash(ctx, write.ContentHash); lookupErr == nil &&
+			existing != nil && canonicalSnapshotMatches(existing.AppliedSnapshotRecord, write) {
+			return nil
+		}
+		return err
+	}
+	return nil
+}
+
+func (t *pgPhase2Transaction) findCanonicalSnapshotByHash(ctx context.Context, contentHash string) (*CanonicalSnapshotRecord, error) {
+	row := t.tx.QueryRow(ctx, `
+		select id::text, source_primary_id::text, leadership_generation,
+			snapshot_version, replication_version, content_hash, snapshot_body,
+			revision_id::text, status::text, apply_job_id::text, failure_code,
+			applied_at, discarded_at
+		from applied_snapshots
+		where content_hash = $1
+		for update
+	`, contentHash)
+	record, err := scanAppliedSnapshot(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &CanonicalSnapshotRecord{AppliedSnapshotRecord: record}, nil
+}
+
+func canonicalSnapshotMatches(record AppliedSnapshotRecord, write CanonicalSnapshotWrite) bool {
+	return record.Status == AppliedSnapshotApplied && record.DiscardedAt == nil &&
+		record.SourcePrimaryID == write.SourcePrimaryID &&
+		record.LeadershipGeneration == write.LeadershipGeneration &&
+		record.SnapshotVersion == write.SnapshotVersion &&
+		record.ReplicationVersion == write.ReplicationVersion &&
+		record.ContentHash == write.ContentHash && record.RevisionID != nil &&
+		*record.RevisionID == write.RevisionID && record.ApplyJobID != nil &&
+		*record.ApplyJobID == write.ApplyJobID && record.AppliedAt.Equal(write.AppliedAt) &&
+		bytes.Equal(record.SnapshotBody, write.SnapshotBody)
+}
+
+func zeroCanonicalPlainSecrets(values []replicationsnapshot.PlainSecret) {
+	for index := range values {
+		for byteIndex := range values[index].Value {
+			values[index].Value[byteIndex] = 0
+		}
+		values[index].Value = nil
+	}
 }
 
 func (t *pgPhase2Transaction) GetApplyJob(ctx context.Context, id string) (JobRecord, error) {
@@ -488,12 +775,12 @@ func (s *PgPhase2Store) ReadSnapshotPublication(ctx context.Context, request Sna
 		Snapshot:  candidate,
 	}
 
-	var raw string
+	var raw []byte
 	if err := tx.QueryRow(ctx, `
-		select snapshot::text from config_revisions
+		select snapshot_body from applied_snapshots
 		where id = $1
 		for share
-	`, candidate.RevisionID).Scan(&raw); err != nil || raw == "" || len(raw) != snapshotSize || len(raw) > request.MaxBytes {
+	`, candidate.SnapshotID).Scan(&raw); err != nil || len(raw) == 0 || len(raw) != snapshotSize || len(raw) > request.MaxBytes {
 		return SnapshotPublicationResult{}, ErrSnapshotPublicationStore
 	}
 	rawBytes := []byte(raw)
@@ -567,9 +854,10 @@ func selectLatestSnapshotPublication(ctx context.Context, tx pgx.Tx, _ SnapshotP
 		select a.id::text, a.source_primary_id::text, a.leadership_generation,
 			a.snapshot_version, a.replication_version, a.content_hash,
 			coalesce(r.id::text, ''), coalesce(j.id::text, ''), a.applied_at, a.discarded_at,
-			coalesce(r.revision_number, 0), coalesce(octet_length(r.snapshot::text), 0),
+			coalesce(r.revision_number, 0), coalesce(octet_length(a.snapshot_body), 0),
 			(
 				a.status::text = 'applied'
+				and a.snapshot_body is not null
 				and a.discarded_at is null
 				and r.id is not null
 				and r.applied_at is not null

@@ -272,18 +272,21 @@ type SyncAttemptRecord struct {
 // AppliedSnapshotRecord proves which snapshot candidate reached a terminal
 // local state and links it to the worker job when one exists.
 type AppliedSnapshotRecord struct {
-	ID                   string                `json:"id"`
-	SourcePrimaryID      string                `json:"sourcePrimaryId"`
-	LeadershipGeneration int64                 `json:"leadershipGeneration"`
-	SnapshotVersion      int                   `json:"snapshotVersion"`
-	ReplicationVersion   int                   `json:"replicationVersion"`
-	ContentHash          string                `json:"contentHash"`
-	RevisionID           *string               `json:"revisionId,omitempty"`
-	Status               AppliedSnapshotStatus `json:"status"`
-	ApplyJobID           *string               `json:"applyJobId,omitempty"`
-	FailureCode          *string               `json:"failureCode,omitempty"`
-	AppliedAt            time.Time             `json:"appliedAt"`
-	DiscardedAt          *time.Time            `json:"discardedAt,omitempty"`
+	ID                   string `json:"id"`
+	SourcePrimaryID      string `json:"sourcePrimaryId"`
+	LeadershipGeneration int64  `json:"leadershipGeneration"`
+	SnapshotVersion      int    `json:"snapshotVersion"`
+	ReplicationVersion   int    `json:"replicationVersion"`
+	ContentHash          string `json:"contentHash"`
+	// SnapshotBody is the immutable canonical envelope bytes. It is nullable
+	// only for legacy rows, which publication readers must reject.
+	SnapshotBody []byte                `json:"-"`
+	RevisionID   *string               `json:"revisionId,omitempty"`
+	Status       AppliedSnapshotStatus `json:"status"`
+	ApplyJobID   *string               `json:"applyJobId,omitempty"`
+	FailureCode  *string               `json:"failureCode,omitempty"`
+	AppliedAt    time.Time             `json:"appliedAt"`
+	DiscardedAt  *time.Time            `json:"discardedAt,omitempty"`
 }
 
 // SnapshotAcknowledgement is the durable outbox tuple sent only after the
