@@ -116,6 +116,17 @@ Deliver secure one-time enrollment that converts a standalone ProxyCore installa
     - Review split: shared acme RSA helper/material tests are 228 changed lines; proof parser integration/tests are 108; the existing CA projection/config slice is 146; task evidence is 11; aggregate allowlisted diff is 493, with each implementation slice below 400.
     - Boundary: no HTTP route, UI, startup/shutdown, supervisor, Compose, renewal-policy, listener, or secret-storage changes; only the allowlisted CA/config/proof files and this task evidence changed.
     - Rollback boundary: `apps/api/internal/acme/internal_ca.go`, `internal_ca_test.go`, `apps/api/internal/configuration/internal_ca.go`, `internal_ca_test.go`, `apps/api/internal/enrollment/identity_proof_crypto.go`, `identity_proof_test.go`, `identity_proof_signer_test.go`, and this evidence.
+  - [x] **PNE-2E-C — Role-aware enrollment TLS startup supervisor/state machine**: reconcile eligible PRIMARY roles and configured enrollment material into an owned proof-only TLS listener without cmd/server wiring.
+    - Verifier correction strict-TDD RED: `cd apps/api && go test ./internal/enrollment` failed to compile with missing `RoleEligible`/`MaterialReady` status fields, fake clock, and factory barriers (0 passed); GREEN the corrected focused suite passed 141 tests.
+    - Corrected status semantics: `Eligible` means full current role + hostname configuration + validated material prerequisites; `RoleEligible`, `Configured`, `MaterialReady`, and `Running` expose the individual prerequisites/runtime state. Direct unconfigured-primary coverage is present.
+    - Review split, gofmt-clean counts: `supervisor.go` = 400 lines; `supervisor_test.go` = 336 core/fake lines; `supervisor_lifecycle_test.go` = 221 lifecycle lines; `supervisor_policy_test.go` = 301 policy/timing/status lines. Each file is at or below 400 lines; aggregate source/test count is 1,258 before task evidence.
+    - TRIANGULATE/REFACTOR covers unexpected Serve error classification/redaction/retry, bounded exponential retry through an injected fake clock, exact immutable address/provider forwarding, role stop/restart, direct unconfigured-primary state, cancellation, serialized reconciles, concurrent Status readers, and no fixed sleeps or polling loops.
+    - Trusted boundary: `EnrollmentTLSListenerFactory` is only a construction seam; production PNE-2E-D wiring must bind the address and construct `NewEnrollmentTLSServer`. Injected factories and these tests do not by themselves prove proof-only TLS security.
+    - Runtime harness: deterministic identity/configuration/material/listener/publisher fakes, channel barriers, and fake timers; no real enrollment port or cmd/server/Compose/UI/trust/token/snapshot wiring.
+    - Validation: `cd apps/api && go test ./internal/enrollment` (141 passed); `cd apps/api && go test ./...` (412 passed); `cd apps/api && go test -race ./internal/enrollment` (141 passed); `gofmt -d apps/api/internal/enrollment/supervisor*.go`; `git diff --check`; `! grep -R 'time.Sleep' apps/api/internal/enrollment/supervisor*_test.go` — all clean.
+    - Address policy: the supervisor copies one configured address at construction and does not support runtime address mutation; changed addresses require a new supervisor, avoiding unsafe implicit rebinding.
+    - Boundary: provider/listener ownership and status/error categories only; no cmd/server wiring, ordinary HTTP route mounting/downgrade, trust UX, Compose, token/bootstrap, snapshot, or NODE conversion.
+    - Rollback boundary: `apps/api/internal/enrollment/supervisor.go`, `supervisor_test.go`, `supervisor_lifecycle_test.go`, `supervisor_policy_test.go`, and this evidence.
 - [ ] **PNE-3 — Sealed bootstrap grant**: implement ephemeral X25519/HKDF bootstrap sealing, node credential issuance, cluster-KEK transport, binding/AAD validation, exact idempotent retry, and redaction tests.
 - [ ] **PNE-4 — Initial snapshot publication**: authenticate current node credentials, publish only latest applied immutable state, enforce revocation, and reject an unready PRIMARY.
 - [ ] **PNE-5 — Safe NODE conversion**: archive prior standalone state, preserve node-local overlay, create the sync revision/apply job, wait for exact terminal apply, and atomically commit NODE lineage/state.
@@ -126,7 +137,7 @@ Deliver secure one-time enrollment that converts a standalone ProxyCore installa
 
 ## First Implementation Unit
 
-PNE-1 through PNE-2E-B are complete as recorded above; continue with the next unchecked PNE-2E unit only. Keep implementation, tests, runtime evidence, and rollback boundary in the same work-unit commit. If the honest unit still exceeds 400 authored changed lines, report the smallest coherent count before implementation rather than compressing or omitting tests.
+PNE-1 through PNE-2E-C are complete as recorded above; continue with PNE-3, the next unchecked unit. Keep implementation, tests, runtime evidence, and rollback boundary in the same work-unit commit. If the honest unit still exceeds 400 authored changed lines, report the smallest coherent count before implementation rather than compressing or omitting tests.
 
 ## Verification Baseline
 
