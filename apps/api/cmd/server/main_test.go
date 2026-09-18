@@ -177,3 +177,53 @@ func TestRenewalIdentityProviderTracksLiveServiceRole(t *testing.T) {
 		t.Fatalf("node renewal policy unexpectedly allowed: %+v", status)
 	}
 }
+
+func TestNodeConverterFlagIsExplicitAndOffByDefault(t *testing.T) {
+	if nodeConverterEnabled(nil) {
+		t.Fatal("node converter should be disabled without an explicit flag")
+	}
+	if nodeConverterEnabled([]string{"--other"}) {
+		t.Fatal("unrelated flag enabled node converter")
+	}
+	if !nodeConverterEnabled([]string{"--enable-node-converter"}) || !nodeConverterEnabled([]string{"--enable-node-converter=true"}) {
+		t.Fatal("explicit node converter flag was not recognized")
+	}
+	if nodeConverterEnabled([]string{"--enable-node-converter=false"}) {
+		t.Fatal("false node converter flag enabled conversion")
+	}
+}
+
+func TestBuildNodeConverterRequiresFlagAndEligibleIdentity(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		role    domain.TopologyRole
+		enabled bool
+		want    bool
+	}{
+		{name: "disabled standalone", role: domain.TopologyRoleStandalone, enabled: false, want: false},
+		{name: "enabled standalone", role: domain.TopologyRoleStandalone, enabled: true, want: true},
+		{name: "enabled primary", role: domain.TopologyRolePrimary, enabled: true, want: true},
+		{name: "node is not eligible", role: domain.TopologyRoleNode, enabled: true, want: false},
+		{name: "primary with nodes is not eligible", role: domain.TopologyRolePrimaryWithNodes, enabled: true, want: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			service, _, _, err := bootstrapIdentity(context.Background(), &startupIdentityStore{
+				current: identity.Identity{
+					InstallationID:        domain.NewInstallationID(),
+					NodeID:                domain.NewNodeID(),
+					Role:                  test.role,
+					LeadershipGeneration:  1,
+					LatestKnownGeneration: 1,
+				},
+				present: true,
+			})
+			if err != nil {
+				t.Fatalf("bootstrapIdentity: %v", err)
+			}
+			got := buildNodeConverter(test.enabled, &configuration.Store{}, service, nil)
+			if (got != nil) != test.want {
+				t.Fatalf("converter present=%t, want %t", got != nil, test.want)
+			}
+		})
+	}
+}

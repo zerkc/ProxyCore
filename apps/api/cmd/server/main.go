@@ -75,12 +75,18 @@ func main() {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	if err := runServer(ctx, cfg, logger); err != nil {
+	if err := runServerWithNodeConverter(ctx, cfg, logger, nodeConverterEnabled(os.Args[1:])); err != nil {
 		logger.Fatalf("server: %v", err)
 	}
 }
 
+// runServer preserves the default-safe boot path for callers and tests. NODE
+// conversion is opt-in through the explicit command-line flag only.
 func runServer(ctx context.Context, cfg config.Config, logger *log.Logger) error {
+	return runServerWithNodeConverter(ctx, cfg, logger, false)
+}
+
+func runServerWithNodeConverter(ctx context.Context, cfg config.Config, logger *log.Logger, enableNodeConverter bool) error {
 	if ctx == nil {
 		return errors.New("process context is required")
 	}
@@ -151,6 +157,9 @@ func runServer(ctx context.Context, cfg config.Config, logger *log.Logger) error
 			identityResult.Role,
 			identityResult.LeadershipGeneration,
 		)
+		if converter := buildNodeConverter(enableNodeConverter, configStore, identitySvc, logger); converter != nil {
+			logger.Printf("node converter ready for role=%s", identityResult.Role)
+		}
 	}
 
 	server := &http.Server{
@@ -408,4 +417,42 @@ func redactedEnrollmentTLSError(err error) string {
 	default:
 		return "unavailable"
 	}
+}
+
+func nodeConverterEnabled(args []string) bool {
+	for _, arg := range args {
+		if arg == "--enable-node-converter" || arg == "--enable-node-converter=true" {
+			return true
+		}
+	}
+	return false
+}
+
+func buildNodeConverter(enabled bool, configStore *configuration.Store, identitySvc *identity.Service, logger *log.Logger) *enrollment.NodeConverter {
+	if !enabled || configStore == nil || identitySvc == nil || !nodeConverterRoleEligible(identitySvc) {
+		return nil
+	}
+	logf := func(format string, args ...any) {}
+	if logger != nil {
+		logf = logger.Printf
+	}
+	return enrollment.NewNodeConverter(enrollment.NodeConverterOptions{
+		Importer:      snapshot.NewImporter(configStore, configStore, time.Now),
+		Archive:       configStore,
+		Identity:      identitySvc,
+		ApplyWaiter:   configStore,
+		ApplyEnqueuer: configStore,
+		Logger:        logf,
+		Now:           time.Now,
+	})
+}
+
+func nodeConverterRoleEligible(service *identity.Service) (eligible bool) {
+	defer func() {
+		if recover() != nil {
+			eligible = false
+		}
+	}()
+	current := service.Current()
+	return current.Role == domain.TopologyRoleStandalone || current.Role == domain.TopologyRolePrimary
 }
