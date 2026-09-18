@@ -238,6 +238,8 @@ Deliver secure one-time enrollment that converts a standalone ProxyCore installa
 
 PNE-1 through PNE-3D and PNE-4B are complete as recorded above; continue with PNE-5, the next unchecked implementation unit. PNE-4 parent acceptance remains unchecked pending parent-level acceptance. Keep implementation, tests, runtime evidence, and rollback boundary in the same work-unit commit. Review slices remain <=400 changed lines; existing physical files may exceed 400 lines.
 
+PNE-4B work-unit commit: `c65332dffbf2653e86042893e8d6171e9c040860` (`feat(sync): publish canonical applied snapshots`). Closing run reused disposable PostgreSQL 17 on `127.0.0.1:55438`, focused sync suite passed 78.889s, race `internal/sync ./internal/configuration` passed 126 tests, `go test ./...` passed 671 tests, `vitest run --reporter=dot` passed 35 files/198 tests, `gofmt -d`, `git diff --check`, and `bun run typecheck` were clean; container `proxycore-pne4b-closing-pg17` was removed via `docker rm -f` and verified absent from `docker ps -a --format '{{.Names}}'`.
+
 ## Verification Baseline
 
 - Strict TDD is active from `openspec/config.yaml`; Go tests must show RED, GREEN, TRIANGULATE, and REFACTOR evidence.
