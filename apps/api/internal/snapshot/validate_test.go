@@ -1,7 +1,9 @@
 package snapshot
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -39,6 +41,45 @@ func sealedEnvelope(t *testing.T) Envelope {
 	}
 	env.ContentHash = hash
 	return env
+}
+
+func TestValidatorZeroesPlaintextAfterSecretValidation(t *testing.T) {
+	kekBytes, err := cluster.GenerateKEK()
+	if err != nil {
+		t.Fatalf("GenerateKEK: %v", err)
+	}
+	kek, err := cluster.NewKEK(kekBytes)
+	if err != nil {
+		t.Fatalf("NewKEK: %v", err)
+	}
+	env := sealedEnvelope(t)
+	env.Replicated.Secrets = []ReplicatedSecret{{ID: uuid.New(), Purpose: "tls-key", Envelope: "v1.kek:test:test:test"}}
+	if hash, err := env.ExpectedHash(); err == nil {
+		env.ContentHash = hash
+	}
+	for _, tc := range []struct {
+		name      string
+		unwrapErr error
+		wantOK    bool
+	}{
+		{name: "success", wantOK: true},
+		{name: "error", unwrapErr: errors.New("decrypt failed")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var plaintext []byte
+			validator := newValidatorWithUnwrapper(kek, func(*cluster.KEK, string) ([]byte, error) {
+				plaintext = []byte("plaintext that must be cleared")
+				return plaintext, tc.unwrapErr
+			})
+			result := validator.Validate(context.Background(), env)
+			if result.OK != tc.wantOK {
+				t.Fatalf("validation OK=%v, want %v; issues=%+v", result.OK, tc.wantOK, result.Issues)
+			}
+			if !bytes.Equal(plaintext, make([]byte, len(plaintext))) {
+				t.Fatalf("plaintext buffer was not zeroed: %x", plaintext)
+			}
+		})
+	}
 }
 
 func TestValidatorAcceptsSealedEnvelope(t *testing.T) {

@@ -13,14 +13,21 @@ import (
 // Phase 0 schema defines, returning a typed ValidationResult that the
 // importer can use to decide whether to proceed with apply.
 type Validator struct {
-	kek *cluster.KEK
+	kek    *cluster.KEK
+	unwrap func(*cluster.KEK, string) ([]byte, error)
 }
 
 // NewValidator constructs a Validator that decrypts replicated secrets
 // with the supplied cluster KEK. The KEK MUST be the one the snapshot was
 // produced with; otherwise the secret-availability check will fail.
 func NewValidator(kek *cluster.KEK) *Validator {
-	return &Validator{kek: kek}
+	return newValidatorWithUnwrapper(kek, func(key *cluster.KEK, envelope string) ([]byte, error) {
+		return key.Unwrap(envelope)
+	})
+}
+
+func newValidatorWithUnwrapper(kek *cluster.KEK, unwrap func(*cluster.KEK, string) ([]byte, error)) *Validator {
+	return &Validator{kek: kek, unwrap: unwrap}
 }
 
 // ValidationIssue is one reason a snapshot was rejected. The Phase 1
@@ -33,7 +40,7 @@ type ValidationIssue struct {
 
 // ValidationResult is the outcome of a validation pass.
 type ValidationResult struct {
-	OK    bool              `json:"ok"`
+	OK     bool              `json:"ok"`
 	Issues []ValidationIssue `json:"issues,omitempty"`
 }
 
@@ -102,10 +109,18 @@ func (v *Validator) validateSecrets(env Envelope, result *ValidationResult) {
 				"secret %s: envelope is not a cluster-KEK envelope", secret.ID)
 			continue
 		}
-		if _, err := v.kek.Unwrap(secret.Envelope); err != nil {
+		plaintext, err := v.unwrap(v.kek, secret.Envelope)
+		zeroSnapshotSecretBytes(plaintext)
+		if err != nil {
 			result.add("SECRET_DECRYPT", "replicated.secrets[].envelope",
 				"secret %s: cannot decrypt with local KEK: %v", secret.ID, err)
 		}
+	}
+}
+
+func zeroSnapshotSecretBytes(value []byte) {
+	for index := range value {
+		value[index] = 0
 	}
 }
 
