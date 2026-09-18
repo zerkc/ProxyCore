@@ -20,6 +20,19 @@ installation can reproduce another installation's data plane.
   transfer is the operator's responsibility for the duration of this
   runbook.
 
+## Enrollment TLS deployment boundary
+
+Compose publishes the API's dedicated enrollment address `:3443` to
+`ENROLLMENT_PORT` (default `3443`). This is a direct TLS enrollment
+socket, independent of `WEB_PORT` and not Nginx proxy ingress. This
+bounded deployment unit reserves the port and configures the runtime
+address, but does not start the enrollment listener yet.
+
+Trust UX sequencing is explicit: the PRIMARY displays and exports its
+CA trust material now. NODE trust entry/import is deferred to preview;
+this unit does not add enrollment transport, certificate issuance, or
+NODE conversion behavior.
+
 ## Phase 1 export from A
 
 The Phase 1 commit delivers the `Exporter` library

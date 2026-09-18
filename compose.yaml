@@ -25,6 +25,8 @@ services:
       dockerfile: infra/compose/Dockerfile.api
     environment:
       PROXYCORE_API_ADDR: ":3000"
+      # Enrollment TLS is direct from the API container, not Nginx proxy ingress.
+      PROXYCORE_ENROLLMENT_TLS_ADDR: ":3443"
       PROXYCORE_UI_DIST: /app/ui
       DATABASE_URL: postgres://${POSTGRES_USER:-proxycore}:${POSTGRES_PASSWORD:-change-me}@postgres:5432/${POSTGRES_DB:-proxycore}
       PROXYCORE_MASTER_KEY_BASE64: ${PROXYCORE_MASTER_KEY_BASE64:?set a 32-byte base64 master key}
@@ -43,6 +45,7 @@ services:
         condition: service_healthy
     ports:
       - "${WEB_PORT:-3000}:3000"
+      - "${ENROLLMENT_PORT:-3443}:3443"
     healthcheck:
       test:
         [

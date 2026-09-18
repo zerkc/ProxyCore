@@ -30,7 +30,7 @@ Linux host with Docker Engine (Compose v2) and Git:
 curl -fsSL https://raw.githubusercontent.com/zerkc/ProxyCore/main/scripts/install.sh | sh
 ```
 
-That clones or updates the checkout (`/opt/proxycore` as root, otherwise `~/proxycore`), creates `.env` with generated secrets on first run, applies migrations, and starts the stack. **Nginx runs with `network_mode: host`** so HTTP/HTTPS and stream ports bind on the host.
+That clones or updates the checkout (`/opt/proxycore` as root, otherwise `~/proxycore`), creates `.env` with generated secrets on first run, applies migrations, and starts the stack. **Nginx runs with `network_mode: host`** so HTTP/HTTPS and stream ports bind on the host. The API also publishes `ENROLLMENT_PORT` (default `3443`) for direct TLS enrollment, independent of `WEB_PORT`; it is not Nginx proxy ingress. This deployment unit reserves the port but does not start the enrollment listener yet.
 
 Then open `http://<host-ip>:3000/bootstrap` once to create the Owner.
 
@@ -39,6 +39,7 @@ Then open `http://<host-ip>:3000/bootstrap` once to create the Owner.
 | `PROXYCORE_HOME` | `/opt/proxycore` or `~/proxycore` | Install directory |
 | `PROXYCORE_BRANCH` | `main` | Git branch |
 | `WEB_PORT` | `3000` | Dashboard / API |
+| `ENROLLMENT_PORT` | `3443` | Direct TLS enrollment, separate from Nginx proxy ingress |
 | `DNS_PORT` | `53` | CoreDNS |
 | `SKIP_BUILD` | `0` | Set `1` to recreate without rebuild |
 | `PROXYCORE_UPDATE_CHECK_ENABLED` | `1` | Set `0` to disable stable release checks against GitHub |

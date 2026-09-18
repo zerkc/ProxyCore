@@ -1,11 +1,60 @@
 package config_test
 
 import (
+	"os"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/zerkc/ProxyCore/apps/api/internal/config"
 )
+
+func TestLoadEnrollmentTLSAddr(t *testing.T) {
+	unsetEnv(t, "PROXYCORE_ENROLLMENT_TLS_ADDR")
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.EnrollmentTLSAddr != ":3443" {
+		t.Fatalf("EnrollmentTLSAddr=%q, want default :3443", cfg.EnrollmentTLSAddr)
+	}
+
+	t.Setenv("PROXYCORE_ENROLLMENT_TLS_ADDR", "  127.0.0.1:9443  ")
+	cfg, err = config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.EnrollmentTLSAddr != "127.0.0.1:9443" {
+		t.Fatalf("EnrollmentTLSAddr=%q, want trimmed configured address", cfg.EnrollmentTLSAddr)
+	}
+}
+
+func TestLoadRejectsEmptyEnrollmentTLSAddr(t *testing.T) {
+	for _, value := range []string{"", " \t"} {
+		t.Run("empty value", func(t *testing.T) {
+			t.Setenv("PROXYCORE_ENROLLMENT_TLS_ADDR", value)
+			_, err := config.Load()
+			if err == nil || !strings.Contains(err.Error(), "PROXYCORE_ENROLLMENT_TLS_ADDR") {
+				t.Fatalf("Load() error=%v, want named empty-address error", err)
+			}
+		})
+	}
+}
+
+func unsetEnv(t *testing.T, key string) {
+	t.Helper()
+	value, present := os.LookupEnv(key)
+	if err := os.Unsetenv(key); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if present {
+			_ = os.Setenv(key, value)
+		} else {
+			_ = os.Unsetenv(key)
+		}
+	})
+}
 
 func TestLoadSecureCookiesOptIn(t *testing.T) {
 	t.Setenv("NODE_ENV", "production")

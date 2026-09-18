@@ -9,7 +9,9 @@ import (
 )
 
 type Config struct {
+	// API and dedicated direct TLS enrollment listen addresses.
 	Addr              string
+	EnrollmentTLSAddr string
 	DatabaseURL       string
 	UIDist            string
 	MasterKeyBase64   string
@@ -41,8 +43,13 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	enrollmentTLSAddr, err := envListenAddr("PROXYCORE_ENROLLMENT_TLS_ADDR", ":3443")
+	if err != nil {
+		return Config{}, err
+	}
 	cfg := Config{
 		Addr:              env("PROXYCORE_API_ADDR", ":3000"),
+		EnrollmentTLSAddr: enrollmentTLSAddr,
 		DatabaseURL:       os.Getenv("DATABASE_URL"),
 		UIDist:            env("PROXYCORE_UI_DIST", "apps/ui/dist"),
 		MasterKeyBase64:   os.Getenv("PROXYCORE_MASTER_KEY_BASE64"),
@@ -78,6 +85,18 @@ func env(key, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+func envListenAddr(key, fallback string) (string, error) {
+	value, present := os.LookupEnv(key)
+	if !present {
+		return fallback, nil
+	}
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", fmt.Errorf("%s must not be empty", key)
+	}
+	return value, nil
 }
 
 func envInt(key string, fallback int) (int, error) {

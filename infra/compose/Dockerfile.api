@@ -55,5 +55,5 @@ COPY --from=ui /ui/dist /app/ui
 ENV PROXYCORE_UI_DIST=/app/ui
 ENV PROXYCORE_API_ADDR=:3000
 USER proxycore
-EXPOSE 3000
+EXPOSE 3000 3443
 ENTRYPOINT ["/app/proxycore-api"]
