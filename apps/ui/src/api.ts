@@ -1,4 +1,8 @@
-import type { EnrollmentHostnameConfig } from "./dashboard/types";
+import type {
+  EnrollmentHostnameConfig,
+  EnrollmentTrust,
+  EnrollmentTrustDownload,
+} from "./dashboard/types";
 
 export const SESSION_USERNAME_KEY = "proxycore_username";
 
@@ -32,22 +36,27 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   if (response.status === 204) {
     return undefined as T;
   }
-  const body = (await response.json().catch(() => ({}))) as {
-    error?: string;
-  } & T;
   if (!response.ok) {
-    throw new ApiError(
-      response.status,
-      body.error ?? `Request failed (${response.status})`,
-    );
+    throw await responseApiError(response);
   }
-  return body;
+  return (await response.json()) as T;
 }
 
-export function getEnrollmentHostnames() {
+async function responseApiError(response: Response) {
+  const body = (await response.json().catch(() => ({}))) as {
+    error?: unknown;
+  };
+  const message =
+    typeof body.error === "string" && body.error
+      ? body.error
+      : `Request failed (${response.status})`;
+  return new ApiError(response.status, message);
+}
+
+export function getEnrollmentHostnames(signal?: AbortSignal) {
   return api<EnrollmentHostnameConfig>(
     "/api/settings/enrollment-hostnames",
-    { cache: "no-store" },
+    signal ? { cache: "no-store", signal } : { cache: "no-store" },
   );
 }
 
@@ -59,4 +68,27 @@ export function updateEnrollmentHostnames(hostnames: string[]) {
       body: JSON.stringify({ hostnames }),
     },
   );
+}
+
+export function getEnrollmentTrust(signal?: AbortSignal) {
+  return api<EnrollmentTrust>(
+    "/api/settings/enrollment-trust",
+    signal ? { cache: "no-store", signal } : { cache: "no-store" },
+  );
+}
+
+const ENROLLMENT_CA_FILENAME = "proxycore-enrollment-ca.pem";
+
+export async function downloadEnrollmentTrustCA(): Promise<EnrollmentTrustDownload> {
+  const response = await fetch("/api/settings/enrollment-trust/ca", {
+    credentials: "include",
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    throw await responseApiError(response);
+  }
+  return {
+    blob: await response.blob(),
+    filename: ENROLLMENT_CA_FILENAME,
+  };
 }

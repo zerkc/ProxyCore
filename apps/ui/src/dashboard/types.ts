@@ -33,6 +33,23 @@ export type EnrollmentHostnameConfig = {
   hostnames: string[];
 };
 
+export type EnrollmentTrustStatus = "unconfigured" | "not-ready" | "ready";
+
+export type EnrollmentTrust = {
+  status: EnrollmentTrustStatus;
+  configured: boolean;
+  ready: boolean;
+  certificatePem?: string;
+  caCertificatePem?: string;
+  caDerSha256?: string;
+  expiresAt?: string;
+};
+
+export type EnrollmentTrustDownload = {
+  blob: Blob;
+  filename: string;
+};
+
 export type TopologyRole =
   | "standalone-primary"
   | "primary"
