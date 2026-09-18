@@ -20,45 +20,8 @@ export function CertificatesView(props: {
   onError: (message: string) => void;
 }) {
   const [dialogOpen, setDialogOpen] = useState(false);
-  const [downloadingCA, setDownloadingCA] = useState(false);
   const [regeneratingId, setRegeneratingId] = useState<string>();
   const [deletingId, setDeletingId] = useState<string>();
-
-  async function downloadTrustCA() {
-    props.onMessage("");
-    props.onError("");
-    setDownloadingCA(true);
-    try {
-      const response = await fetch("/api/certificates/ca", {
-        credentials: "include",
-      });
-      if (!response.ok) {
-        const payload = (await response.json().catch(() => ({}))) as {
-          error?: string;
-        };
-        props.onError(
-          payload.error ?? "Could not download trust certificate",
-        );
-        return;
-      }
-      const blob = await response.blob();
-      const url = URL.createObjectURL(blob);
-      const anchor = document.createElement("a");
-      anchor.href = url;
-      anchor.download = "proxycore-ca.crt";
-      document.body.appendChild(anchor);
-      anchor.click();
-      anchor.remove();
-      URL.revokeObjectURL(url);
-      props.onMessage(
-        "Downloaded proxycore-ca.crt — install it once in your OS trust store",
-      );
-    } catch {
-      props.onError("Could not download trust certificate");
-    } finally {
-      setDownloadingCA(false);
-    }
-  }
 
   async function regenerateSelfSigned(certificateId: string) {
     props.onMessage("");
@@ -146,14 +109,6 @@ export function CertificatesView(props: {
           <button
             type="button"
             className="pc-btn-ghost !text-xs"
-            disabled={downloadingCA}
-            onClick={() => void downloadTrustCA()}
-          >
-            {downloadingCA ? "Preparing…" : "Download trust CA"}
-          </button>
-          <button
-            type="button"
-            className="pc-btn-ghost !text-xs"
             onClick={() => void props.onRefresh()}
           >
             Refresh inventory
@@ -205,9 +160,7 @@ function CertificateCard(props: {
   onDelete?: () => void;
 }) {
   const { certificate } = props;
-  const expires = certificate.expiresAt
-    ? new Date(certificate.expiresAt)
-    : undefined;
+  const expires = parseExpiry(certificate.expiresAt);
   const daysRemaining = expires
     ? Math.ceil((expires.getTime() - Date.now()) / (24 * 60 * 60 * 1_000))
     : undefined;
@@ -243,7 +196,9 @@ function CertificateCard(props: {
             ? daysRemaining !== undefined && daysRemaining >= 0
               ? `${daysRemaining} days left · ${expires.toLocaleDateString()}`
               : `Expired · ${expires.toLocaleDateString()}`
-            : "Expiry pending"}
+            : certificate.expiresAt
+              ? "Expiry unavailable"
+              : "Expiry pending"}
         </p>
         <div className="flex flex-wrap gap-2">
           {props.onRegenerate ? (
@@ -270,4 +225,10 @@ function CertificateCard(props: {
       </div>
     </article>
   );
+}
+
+function parseExpiry(value?: string) {
+  if (!value) return undefined;
+  const date = new Date(value);
+  return Number.isFinite(date.getTime()) ? date : undefined;
 }
