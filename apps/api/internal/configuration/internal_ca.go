@@ -1,9 +1,12 @@
 package configuration
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"net"
@@ -40,6 +43,13 @@ type EnrollmentTLSPublicMaterial struct {
 	ExpiresAt        time.Time `json:"expiresAt"`
 }
 
+// EnrollmentTLSTrust describes the read-only, established enrollment trust state.
+type EnrollmentTLSTrust struct {
+	Configured bool
+	Ready      bool
+	Material   EnrollmentTLSPublicMaterial
+}
+
 // Public returns enrollment certificate and CA trust material without private or secret data.
 func (m EnrollmentTLSMaterial) Public() EnrollmentTLSPublicMaterial {
 	return EnrollmentTLSPublicMaterial{
@@ -55,9 +65,9 @@ type validatedEnrollmentLeaf struct {
 	ca          *x509.Certificate
 }
 
-func newEnrollmentTLSMaterial(certificatePEM, privateKeyPEM, caPEM string, validated validatedEnrollmentLeaf) EnrollmentTLSMaterial {
+func newEnrollmentTLSMaterial(_ string, privateKeyPEM, caPEM string, validated validatedEnrollmentLeaf) EnrollmentTLSMaterial {
 	return EnrollmentTLSMaterial{
-		CertificatePEM:   certificatePEM,
+		CertificatePEM:   canonicalCertificatePEM(validated.certificate),
 		PrivateKeyPEM:    privateKeyPEM,
 		CACertificatePEM: caPEM,
 		CADERHashSHA256:  acme.DERHashSHA256(validated.ca.Raw),
@@ -72,6 +82,116 @@ var enrollmentTLSMu sync.Mutex
 func (s *Store) EnsureInternalCACertificatePEM(ctx context.Context) (string, error) {
 	certPEM, _, err := s.ensureInternalCA(ctx)
 	return certPEM, err
+}
+
+// LoadEnrollmentTLSTrust loads established enrollment trust without creating,
+// renewing, or otherwise mutating any configuration or certificate material.
+func (s *Store) LoadEnrollmentTLSTrust(ctx context.Context) (EnrollmentTLSTrust, error) {
+	configured, hostnames, err := s.loadEnrollmentHostnamesReadOnly(ctx)
+	if err != nil {
+		return EnrollmentTLSTrust{}, err
+	}
+	trust := EnrollmentTLSTrust{Configured: configured}
+	if !configured {
+		return trust, nil
+	}
+	public, established, err := s.loadEstablishedEnrollmentTLSPublicMaterial(ctx, hostnames)
+	if err != nil {
+		return EnrollmentTLSTrust{}, err
+	}
+	if !established {
+		return trust, nil
+	}
+	trust.Ready = true
+	trust.Material = public
+	return trust, nil
+}
+
+func (s *Store) loadEnrollmentHostnamesReadOnly(ctx context.Context) (bool, []string, error) {
+	var raw []byte
+	err := s.pool.QueryRow(ctx,
+		`select enrollment_hostnames from installation_settings where id = $1`, installationID,
+	).Scan(&raw)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil, nil
+	}
+	if err != nil {
+		return false, nil, err
+	}
+	if len(raw) == 0 || string(raw) == "null" {
+		return false, nil, nil
+	}
+	var hostnames []string
+	if err := json.Unmarshal(raw, &hostnames); err != nil {
+		return false, nil, fmt.Errorf("read enrollment hostnames: %w", err)
+	}
+	canonical, err := NormalizeEnrollmentHostnames(hostnames)
+	if err != nil {
+		return false, nil, fmt.Errorf("read enrollment hostnames: %w", err)
+	}
+	return len(canonical) != 0, canonical, nil
+}
+
+func (s *Store) loadEstablishedEnrollmentTLSPublicMaterial(ctx context.Context, hostnames []string) (EnrollmentTLSPublicMaterial, bool, error) {
+	var establishedAt time.Time
+	err := s.pool.QueryRow(ctx,
+		`select established_at from internal_ca_enrollment_state where id = $1`, enrollmentStateID,
+	).Scan(&establishedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		var leafPEM, leafSecretID []byte
+		rowErr := s.pool.QueryRow(ctx, `
+			select enrollment_certificate_pem, enrollment_key_secret_id::text
+			  from internal_ca
+			 where id = $1`, internalCAID).Scan(&leafPEM, &leafSecretID)
+		if errors.Is(rowErr, pgx.ErrNoRows) {
+			return EnrollmentTLSPublicMaterial{}, false, nil
+		}
+		if rowErr != nil {
+			return EnrollmentTLSPublicMaterial{}, false, rowErr
+		}
+		if strings.TrimSpace(string(leafPEM)) != "" || strings.TrimSpace(string(leafSecretID)) != "" {
+			return EnrollmentTLSPublicMaterial{}, false, errors.New("enrollment TLS material exists without its establishment marker")
+		}
+		return EnrollmentTLSPublicMaterial{}, false, nil
+	}
+	if err != nil {
+		return EnrollmentTLSPublicMaterial{}, false, err
+	}
+
+	var caPEM, caSecretID string
+	var leafPEM, leafSecretID []byte
+	if err := s.pool.QueryRow(ctx, `
+		select certificate_pem, key_secret_id::text, enrollment_certificate_pem, enrollment_key_secret_id::text
+		  from internal_ca
+		 where id = $1`, internalCAID).Scan(&caPEM, &caSecretID, &leafPEM, &leafSecretID); err != nil {
+		return EnrollmentTLSPublicMaterial{}, false, fmt.Errorf("load established enrollment CA: %w", err)
+	}
+	if strings.TrimSpace(caPEM) == "" || strings.TrimSpace(caSecretID) == "" || strings.TrimSpace(string(leafPEM)) == "" || strings.TrimSpace(string(leafSecretID)) == "" {
+		return EnrollmentTLSPublicMaterial{}, false, errors.New("established enrollment TLS material is incomplete")
+	}
+	if s.secrets == nil {
+		return EnrollmentTLSPublicMaterial{}, false, errors.New("established enrollment TLS material is unavailable")
+	}
+	caKeyPEM, err := s.secrets.Get(ctx, caSecretID)
+	if err != nil {
+		return EnrollmentTLSPublicMaterial{}, false, err
+	}
+	leafKeyPEM, err := s.secrets.Get(ctx, string(leafSecretID))
+	if err != nil {
+		return EnrollmentTLSPublicMaterial{}, false, err
+	}
+	if err := acme.ValidateInternalCAMaterial(caPEM, caKeyPEM); err != nil {
+		return EnrollmentTLSPublicMaterial{}, false, fmt.Errorf("validate established internal CA: %w", err)
+	}
+	validated, err := validateEnrollmentLeaf(string(leafPEM), leafKeyPEM, caPEM, caKeyPEM)
+	if err != nil {
+		return EnrollmentTLSPublicMaterial{}, false, fmt.Errorf("validate established enrollment TLS material: %w", err)
+	}
+	if !sameEnrollmentHostnames(validated.certificate, hostnames) {
+		return EnrollmentTLSPublicMaterial{}, false, errors.New("established enrollment leaf certificate SANs do not cover configured hostnames")
+	}
+	material := newEnrollmentTLSMaterial(string(leafPEM), leafKeyPEM, caPEM, validated)
+	return material.Public(), true, nil
 }
 
 func (s *Store) ensureInternalCA(ctx context.Context) (certPEM, keyPEM string, err error) {
@@ -230,12 +350,15 @@ func (s *Store) EnsureEnrollmentTLSMaterial(ctx context.Context) (EnrollmentTLSM
 }
 
 func validateEnrollmentLeaf(certificatePEM, keyPEM, caCertPEM, caKeyPEM string) (validatedEnrollmentLeaf, error) {
+	certificate, err := parseSingleCertificatePEM(certificatePEM)
+	if err != nil {
+		return validatedEnrollmentLeaf{}, errors.New("enrollment leaf certificate PEM is invalid")
+	}
 	pair, err := tls.X509KeyPair([]byte(certificatePEM), []byte(keyPEM))
-	if err != nil || len(pair.Certificate) == 0 {
+	if err != nil || len(pair.Certificate) != 1 || !bytes.Equal(pair.Certificate[0], certificate.Raw) {
 		return validatedEnrollmentLeaf{}, errors.New("enrollment leaf certificate and private key are invalid or do not match")
 	}
-	certificate, err := x509.ParseCertificate(pair.Certificate[0])
-	if err != nil || certificate.IsCA {
+	if certificate.IsCA {
 		return validatedEnrollmentLeaf{}, errors.New("enrollment leaf certificate is invalid")
 	}
 	serverAuth := false
@@ -264,6 +387,26 @@ func validateEnrollmentLeaf(certificatePEM, keyPEM, caCertPEM, caKeyPEM string) 
 		return validatedEnrollmentLeaf{}, errors.New("enrollment leaf certificate does not chain to the internal CA")
 	}
 	return validatedEnrollmentLeaf{certificate: certificate, ca: caCert}, nil
+}
+
+func parseSingleCertificatePEM(certificatePEM string) (*x509.Certificate, error) {
+	data := []byte(certificatePEM)
+	if !bytes.HasPrefix(data, []byte("-----BEGIN CERTIFICATE-----")) {
+		return nil, errors.New("certificate PEM must start with a CERTIFICATE block")
+	}
+	block, rest := pem.Decode(data)
+	if block == nil || block.Type != "CERTIFICATE" || len(bytes.TrimSpace(rest)) != 0 {
+		return nil, errors.New("certificate PEM must contain exactly one CERTIFICATE block")
+	}
+	certificate, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return nil, err
+	}
+	return certificate, nil
+}
+
+func canonicalCertificatePEM(certificate *x509.Certificate) string {
+	return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certificate.Raw}))
 }
 
 func sameEnrollmentHostnames(certificate *x509.Certificate, configured []string) bool {

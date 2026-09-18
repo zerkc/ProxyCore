@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/zerkc/ProxyCore/apps/api/internal/acme"
 	"github.com/zerkc/ProxyCore/apps/api/internal/secrets"
 )
@@ -301,4 +302,218 @@ func enrollmentSPKI(t *testing.T, certificate *x509.Certificate) []byte {
 		t.Fatalf("marshal SPKI: %v", err)
 	}
 	return spki
+}
+
+func TestLoadEnrollmentTLSTrustReloadsEstablishedPublicMaterialWithoutMutation(t *testing.T) {
+	firstStore, reopen := newEnrollmentStoreView(t)
+	const masterKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+	firstStore.secrets = secrets.NewPgStore(firstStore.pool, masterKey)
+	if _, err := firstStore.UpdateEnrollmentHostnames(t.Context(), []string{"enroll.example"}); err != nil {
+		t.Fatalf("configure hostnames: %v", err)
+	}
+	issued, err := firstStore.EnsureEnrollmentTLSMaterial(t.Context())
+	if err != nil {
+		t.Fatalf("issue material: %v", err)
+	}
+	before := enrollmentTrustPersistenceState(t, firstStore)
+
+	secondStore := reopen()
+	secondStore.secrets = secrets.NewPgStore(secondStore.pool, masterKey)
+	trust, err := secondStore.LoadEnrollmentTLSTrust(t.Context())
+	if err != nil {
+		t.Fatalf("load established trust: %v", err)
+	}
+	if !trust.Configured || !trust.Ready {
+		t.Fatalf("trust state=%+v, want configured and ready", trust)
+	}
+	if trust.Material.CertificatePEM != issued.CertificatePEM || trust.Material.CACertificatePEM != issued.CACertificatePEM || trust.Material.CADERHashSHA256 != issued.CADERHashSHA256 || !trust.Material.ExpiresAt.Equal(issued.ExpiresAt) {
+		t.Fatalf("reloaded trust=%+v, issued=%+v", trust.Material, issued)
+	}
+	if got := enrollmentTrustPersistenceState(t, secondStore); got != before {
+		t.Fatalf("read changed persistence: before=%+v after=%+v", before, got)
+	}
+}
+
+func TestLoadEnrollmentTLSTrustReportsUnconfiguredAndNotReadyWithoutMutation(t *testing.T) {
+	store := newEnrollmentTLSStore(t)
+	before := enrollmentTrustPersistenceState(t, store)
+	unconfigured, err := store.LoadEnrollmentTLSTrust(t.Context())
+	if err != nil {
+		t.Fatalf("load unconfigured trust: %v", err)
+	}
+	if unconfigured.Configured || unconfigured.Ready || unconfigured.Material != (EnrollmentTLSPublicMaterial{}) {
+		t.Fatalf("unconfigured trust=%+v", unconfigured)
+	}
+	if got := enrollmentTrustPersistenceState(t, store); got != before {
+		t.Fatalf("unconfigured read changed persistence: before=%+v after=%+v", before, got)
+	}
+
+	if _, err := store.UpdateEnrollmentHostnames(t.Context(), []string{"enroll.example"}); err != nil {
+		t.Fatalf("configure hostnames: %v", err)
+	}
+	before = enrollmentTrustPersistenceState(t, store)
+	notReady, err := store.LoadEnrollmentTLSTrust(t.Context())
+	if err != nil {
+		t.Fatalf("load not-ready trust: %v", err)
+	}
+	if !notReady.Configured || notReady.Ready || notReady.Material != (EnrollmentTLSPublicMaterial{}) {
+		t.Fatalf("not-ready trust=%+v", notReady)
+	}
+	if got := enrollmentTrustPersistenceState(t, store); got != before {
+		t.Fatalf("not-ready read changed persistence: before=%+v after=%+v", before, got)
+	}
+	var internalCAMaterial, enrollmentState int
+	if err := store.pool.QueryRow(t.Context(), `select count(*) from internal_ca`).Scan(&internalCAMaterial); err != nil {
+		t.Fatalf("count internal CA rows: %v", err)
+	}
+	if err := store.pool.QueryRow(t.Context(), `select count(*) from internal_ca_enrollment_state`).Scan(&enrollmentState); err != nil {
+		t.Fatalf("count enrollment state rows: %v", err)
+	}
+	if internalCAMaterial != 0 || enrollmentState != 0 {
+		t.Fatalf("not-ready read created material: ca=%d state=%d", internalCAMaterial, enrollmentState)
+	}
+}
+
+func TestLoadEnrollmentTLSTrustTreatsCAOnlyAsNotReady(t *testing.T) {
+	store := newEnrollmentTLSStore(t)
+	if _, err := store.UpdateEnrollmentHostnames(t.Context(), []string{"enroll.example"}); err != nil {
+		t.Fatalf("configure hostnames: %v", err)
+	}
+	if _, err := store.EnsureInternalCACertificatePEM(t.Context()); err != nil {
+		t.Fatalf("create CA-only fixture: %v", err)
+	}
+	trust, err := store.LoadEnrollmentTLSTrust(t.Context())
+	if err != nil {
+		t.Fatalf("load CA-only trust: %v", err)
+	}
+	if !trust.Configured || trust.Ready || trust.Material != (EnrollmentTLSPublicMaterial{}) {
+		t.Fatalf("CA-only trust=%+v", trust)
+	}
+}
+
+func TestLoadEnrollmentTLSTrustRejectsNonCanonicalStoredLeafPEM(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(t *testing.T, store *Store, certificatePEM, leafKeyPEM string)
+	}{
+		{
+			name: "appended certificate block",
+			mutate: func(t *testing.T, store *Store, certificatePEM, _ string) {
+				_, err := store.pool.Exec(t.Context(), `update internal_ca set enrollment_certificate_pem = $1 where id = $2`, certificatePEM+"\n"+certificatePEM, internalCAID)
+				if err != nil {
+					t.Fatalf("append certificate block: %v", err)
+				}
+			},
+		},
+		{
+			name: "appended private key block",
+			mutate: func(t *testing.T, store *Store, certificatePEM, leafKeyPEM string) {
+				_, err := store.pool.Exec(t.Context(), `update internal_ca set enrollment_certificate_pem = $1 where id = $2`, certificatePEM+"\n"+leafKeyPEM, internalCAID)
+				if err != nil {
+					t.Fatalf("append private key block: %v", err)
+				}
+			},
+		},
+		{
+			name: "trailing garbage",
+			mutate: func(t *testing.T, store *Store, certificatePEM, _ string) {
+				_, err := store.pool.Exec(t.Context(), `update internal_ca set enrollment_certificate_pem = $1 where id = $2`, certificatePEM+"\ngarbage", internalCAID)
+				if err != nil {
+					t.Fatalf("append garbage: %v", err)
+				}
+			},
+		},
+		{
+			name: "leading whitespace",
+			mutate: func(t *testing.T, store *Store, certificatePEM, _ string) {
+				_, err := store.pool.Exec(t.Context(), `update internal_ca set enrollment_certificate_pem = $1 where id = $2`, " "+certificatePEM, internalCAID)
+				if err != nil {
+					t.Fatalf("prepend whitespace: %v", err)
+				}
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store, first, _, _, leafKeyID := seedEnrollmentTLS(t)
+			leafKeyPEM, err := store.secrets.Get(t.Context(), leafKeyID)
+			if err != nil {
+				t.Fatalf("load leaf key fixture: %v", err)
+			}
+			test.mutate(t, store, first.CertificatePEM, leafKeyPEM)
+			if _, err := store.LoadEnrollmentTLSTrust(t.Context()); err == nil {
+				t.Fatalf("accepted non-canonical stored leaf PEM: %s", test.name)
+			}
+		})
+	}
+}
+
+func TestLoadEnrollmentTLSTrustCanonicalizesStoredLeafPEM(t *testing.T) {
+	store, first, _, _, _ := seedEnrollmentTLS(t)
+	stored := strings.TrimRight(first.CertificatePEM, "\r\n") + "\n \t\r\n"
+	if _, err := store.pool.Exec(t.Context(), `update internal_ca set enrollment_certificate_pem = $1 where id = $2`, stored, internalCAID); err != nil {
+		t.Fatalf("add trailing whitespace: %v", err)
+	}
+	trust, err := store.LoadEnrollmentTLSTrust(t.Context())
+	if err != nil {
+		t.Fatalf("load whitespace-suffixed leaf: %v", err)
+	}
+	if !trust.Ready || trust.Material.CertificatePEM != first.CertificatePEM || trust.Material.CertificatePEM == stored {
+		t.Fatalf("leaf projection was not canonical: ready=%v stored=%q projected=%q", trust.Ready, stored, trust.Material.CertificatePEM)
+	}
+}
+
+func TestLoadEnrollmentTLSTrustFailsClosedOnEstablishedTamper(t *testing.T) {
+	for _, name := range []string{"corrupt CA", "missing CA key", "corrupt leaf", "missing leaf key", "missing establishment marker"} {
+		t.Run(name, func(t *testing.T) {
+			store, _, _, caKeyID, leafKeyID := seedEnrollmentTLS(t)
+			var err error
+			switch name {
+			case "corrupt CA":
+				_, err = store.pool.Exec(t.Context(), `update internal_ca set certificate_pem = 'bad' where id = $1`, internalCAID)
+			case "missing CA key":
+				_, err = store.pool.Exec(t.Context(), `update secrets set ciphertext = 'bad' where id = $1`, caKeyID)
+			case "corrupt leaf":
+				_, err = store.pool.Exec(t.Context(), `update internal_ca set enrollment_certificate_pem = $1 where id = $2`, "bad", internalCAID)
+			case "missing leaf key":
+				_, err = store.pool.Exec(t.Context(), `update secrets set ciphertext = 'bad' where id = $1`, leafKeyID)
+			case "missing establishment marker":
+				_, err = store.pool.Exec(t.Context(), `delete from internal_ca_enrollment_state where id = $1`, enrollmentStateID)
+			}
+			if err != nil {
+				t.Fatalf("tamper %s: %v", name, err)
+			}
+			if _, err := store.LoadEnrollmentTLSTrust(t.Context()); err == nil {
+				t.Fatalf("accepted established %s", name)
+			}
+		})
+	}
+}
+
+type enrollmentTrustPersistence struct {
+	SettingsUpdatedAt time.Time
+	CAUpdatedAt       time.Time
+	SecretCount       int
+	StateCount        int
+}
+
+func enrollmentTrustPersistenceState(t *testing.T, store *Store) enrollmentTrustPersistence {
+	t.Helper()
+	var state enrollmentTrustPersistence
+	if err := store.pool.QueryRow(t.Context(), `select updated_at from installation_settings where id = $1`, installationID).Scan(&state.SettingsUpdatedAt); err != nil {
+		if err == pgx.ErrNoRows {
+			state.SettingsUpdatedAt = time.Time{}
+		} else {
+			t.Fatalf("read settings timestamp: %v", err)
+		}
+	}
+	if err := store.pool.QueryRow(t.Context(), `select coalesce(max(updated_at), 'epoch'::timestamptz) from internal_ca`).Scan(&state.CAUpdatedAt); err != nil {
+		t.Fatalf("read CA timestamp: %v", err)
+	}
+	if err := store.pool.QueryRow(t.Context(), `select count(*) from secrets`).Scan(&state.SecretCount); err != nil {
+		t.Fatalf("count secrets: %v", err)
+	}
+	if err := store.pool.QueryRow(t.Context(), `select count(*) from internal_ca_enrollment_state`).Scan(&state.StateCount); err != nil {
+		t.Fatalf("count enrollment state: %v", err)
+	}
+	return state
 }
