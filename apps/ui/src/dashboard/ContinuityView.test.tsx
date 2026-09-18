@@ -4,9 +4,7 @@ import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ContinuityView } from "./ContinuityView";
 import type { TopologyIdentity } from "./types";
-
 type Listener = (event: TestEvent) => void;
-
 class TestNode {
   readonly childNodes: TestNode[] = [];
   parentNode: TestNode | null = null;
@@ -24,7 +22,6 @@ class TestNode {
     node.parentNode = this;
     return node;
   }
-
   insertBefore(node: TestNode, before: TestNode | null) {
     if (node.parentNode) node.parentNode.removeChild(node);
     const index = before ? this.childNodes.indexOf(before) : -1;
@@ -40,7 +37,6 @@ class TestNode {
     node.parentNode = null;
     return node;
   }
-
   addEventListener(type: string, listener: Listener) {
     (this.listeners[type] ??= []).push(listener);
   }
@@ -58,7 +54,6 @@ class TestNode {
     }
     return !event.defaultPrevented;
   }
-
   contains(node: TestNode): boolean {
     return node === this || this.childNodes.some((child) => child.contains(node));
   }
@@ -66,7 +61,6 @@ class TestNode {
   get firstChild() {
     return this.childNodes[0] ?? null;
   }
-
   get textContent() {
     return this.childNodes.map((node) => node.textContent).join("");
   }
@@ -77,7 +71,6 @@ class TestNode {
     if (value) this.appendChild(new TestText(value, this.ownerDocument));
   }
 }
-
 class TestText extends TestNode {
   data: string;
 
@@ -94,7 +87,6 @@ class TestText extends TestNode {
     this.data = value;
   }
 }
-
 class TestElement extends TestNode {
   readonly attributes: Record<string, string> = {};
   readonly style = {};
@@ -109,7 +101,6 @@ class TestElement extends TestNode {
     super(1, name.toUpperCase(), ownerDocument);
     this.tagName = this.nodeName;
   }
-
   get defaultValue() {
     return this._defaultValue;
   }
@@ -134,7 +125,6 @@ class TestElement extends TestNode {
   getAttribute(name: string) {
     return this.attributes[name] ?? null;
   }
-
   focus() {
     if (this.ownerDocument) this.ownerDocument.activeElement = this;
   }
@@ -147,7 +137,6 @@ class TestElement extends TestNode {
     return matches;
   }
 }
-
 class TestDocument extends TestNode {
   readonly documentElement: TestElement;
   readonly body: TestElement;
@@ -242,9 +231,18 @@ function jsonResponse(body: unknown, status = 200) {
   });
 }
 
-function queueFetch(...responses: Array<Response | Promise<Response>>) {
-  const fetchMock = vi.fn();
-  for (const response of responses) fetchMock.mockResolvedValueOnce(response);
+function queueContinuityFetch(
+  hostnames: Array<Response | Promise<Response>>,
+  trust: Array<Response | Promise<Response>>,
+) {
+  let hostnameIndex = 0;
+  let trustIndex = 0;
+  const fetchMock = vi.fn((input: RequestInfo | URL) => {
+    const path = String(input);
+    return path.includes("/enrollment-trust")
+      ? trust[trustIndex++]
+      : hostnames[hostnameIndex++];
+  });
   globalThis.fetch = fetchMock as unknown as typeof fetch;
   return fetchMock;
 }
@@ -296,7 +294,10 @@ async function submit(container: TestElement) {
 
 describe("mounted ContinuityView", () => {
   it("renders an accessible loading status while GET is pending", async () => {
-    const fetchMock = queueFetch(new Promise<Response>(() => {}));
+    const fetchMock = queueContinuityFetch(
+      [new Promise<Response>(() => {})],
+      [new Promise<Response>(() => {})],
+    );
     const container = await mount(topology("standalone-primary", true));
 
     expect(byRole(container, "status")[0]!.textContent).toContain("Loading");
@@ -307,14 +308,20 @@ describe("mounted ContinuityView", () => {
   });
 
   it("renders unconfigured and configured states with an accessible hostname label", async () => {
-    queueFetch(jsonResponse({ configured: false, hostnames: [] }));
+    queueContinuityFetch(
+      [jsonResponse({ configured: false, hostnames: [] })],
+      [jsonResponse({ status: "unconfigured", configured: false, ready: false })],
+    );
     const unconfigured = await mount(topology("standalone-primary", true));
     expect(unconfigured.textContent).toContain("Not configured");
     expect(unconfigured.textContent).toContain("TLS SANs for enrollment on port 3443");
     expect(byTag(unconfigured, "LABEL")[0]!.textContent).toContain("DNS names or IP literals");
     expect(byTag(unconfigured, "TEXTAREA")[0]!.getAttribute("id")).toBe("enrollment-hostnames");
 
-    queueFetch(jsonResponse({ configured: true, hostnames: ["primary.example"] }));
+    queueContinuityFetch(
+      [jsonResponse({ configured: true, hostnames: ["primary.example"] })],
+      [jsonResponse({ status: "not-ready", configured: true, ready: false })],
+    );
     const configured = await mount(topology("standalone-primary", true));
     expect(configured.textContent).toContain("Configured");
     expect(byTag(configured, "TEXTAREA")[0]!.value).toBe("primary.example");
@@ -322,7 +329,10 @@ describe("mounted ContinuityView", () => {
 
   it("disables editing and saving for NODE and stale-primary identities", async () => {
     for (const role of ["node", "stale-primary"] as const) {
-      queueFetch(jsonResponse({ configured: true, hostnames: ["primary.example"] }));
+      queueContinuityFetch(
+        [jsonResponse({ configured: true, hostnames: ["primary.example"] })],
+        [],
+      );
       const container = await mount(topology(role, false));
       expect(byTag(container, "TEXTAREA")[0]!.disabled).toBe(true);
       expect(byTag(container, "BUTTON")[0]!.disabled).toBe(true);
@@ -331,9 +341,12 @@ describe("mounted ContinuityView", () => {
   });
 
   it("renders the canonical PUT response and success status", async () => {
-    const fetchMock = queueFetch(
-      jsonResponse({ configured: true, hostnames: ["Input.Example"] }),
-      jsonResponse({ configured: true, hostnames: ["10.0.0.5", "input.example"] }),
+    const fetchMock = queueContinuityFetch(
+      [
+        jsonResponse({ configured: true, hostnames: ["Input.Example"] }),
+        jsonResponse({ configured: true, hostnames: ["10.0.0.5", "input.example"] }),
+      ],
+      [jsonResponse({ status: "not-ready", configured: true, ready: false })],
     );
     const container = await mount(topology("standalone-primary", true));
 
@@ -354,9 +367,12 @@ describe("mounted ContinuityView", () => {
   });
 
   it("renders validation failures as an accessible alert", async () => {
-    queueFetch(
-      jsonResponse({ configured: true, hostnames: ["primary.example"] }),
-      jsonResponse({ error: "invalid enrollment DNS name" }, 400),
+    queueContinuityFetch(
+      [
+        jsonResponse({ configured: true, hostnames: ["primary.example"] }),
+        jsonResponse({ error: "invalid enrollment DNS name" }, 400),
+      ],
+      [jsonResponse({ status: "not-ready", configured: true, ready: false })],
     );
     const container = await mount(topology("standalone-primary", true));
 
@@ -366,7 +382,10 @@ describe("mounted ContinuityView", () => {
   });
 
   it("renders no Owner controls when the Owner GET is forbidden", async () => {
-    queueFetch(jsonResponse({ error: "Permission denied" }, 403));
+    queueContinuityFetch(
+      [jsonResponse({ error: "Permission denied" }, 403)],
+      [jsonResponse({ error: "Permission denied" }, 403)],
+    );
     const container = await mount(topology("standalone-primary", true));
 
     expect(byRole(container, "alert")[0]!.textContent).toContain("Owner access is required");
