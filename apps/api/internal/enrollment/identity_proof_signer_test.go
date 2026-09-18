@@ -2,7 +2,11 @@ package enrollment
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/ed25519"
+	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/rsa"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/asn1"
@@ -56,6 +60,74 @@ func TestIdentityProofSignerRefreshesIdentityTimeAndMaterialPerCall(t *testing.T
 	loaded = false
 	if _, err := signer.Sign(ctx, f.request); err == nil {
 		t.Fatal("unloaded identity was accepted")
+	}
+}
+
+func TestIdentityProofSignerRejectsNonExactOrNonRSAKeyPEM(t *testing.T) {
+	f := newProofFixture(t)
+	keyBlock, _ := pem.Decode([]byte(f.leafKey))
+	if keyBlock == nil {
+		t.Fatal("leaf key did not decode")
+	}
+	parsed, err := x509.ParsePKCS8PrivateKey(keyBlock.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rsaKey, ok := parsed.(*rsa.PrivateKey)
+	if !ok {
+		t.Fatal("fixture key is not RSA")
+	}
+	rsaPKCS1 := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(rsaKey)})
+	ecdsaKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ecdsaDER, err := x509.MarshalPKCS8PrivateKey(ecdsaKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, ed25519Key, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ed25519DER, err := x509.MarshalPKCS8PrivateKey(ed25519Key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name string
+		key  string
+		ok   bool
+	}{
+		{"canonical PKCS8 RSA", f.leafKey, true},
+		{"canonical PKCS1 RSA", string(rsaPKCS1), true},
+		{"leading junk", "junk" + f.leafKey, false},
+		{"leading whitespace", "\n" + f.leafKey, false},
+		{"trailing bytes", f.leafKey + "trailing", false},
+		{"RSA DER relabeled certificate", string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: keyBlock.Bytes})), false},
+		{"RSA DER relabeled EC key", string(pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyBlock.Bytes})), false},
+		{"RSA DER relabeled unknown key", string(pem.EncodeToMemory(&pem.Block{Type: "NOT A KEY", Bytes: keyBlock.Bytes})), false},
+		{"actual ECDSA PKCS8", string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: ecdsaDER})), false},
+		{"actual Ed25519 PKCS8", string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: ed25519DER})), false},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			signer, err := NewIdentityProofSigner(IdentityProofSignerOptions{
+				Identity: func(context.Context) (identity.Identity, bool, error) { return f.id, true, nil },
+				Material: func(context.Context) (string, string, string, error) { return f.leaf, tt.key, f.ca, nil },
+				Now:      func() time.Time { return f.now },
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = signer.Sign(context.Background(), f.request)
+			if tt.ok && err != nil {
+				t.Fatalf("valid RSA key rejected: %v", err)
+			}
+			if !tt.ok && err == nil {
+				t.Fatal("invalid or non-RSA key accepted")
+			}
+		})
 	}
 }
 

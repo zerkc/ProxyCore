@@ -8,12 +8,15 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/pem"
+	"errors"
 	"net"
 	"net/url"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/zerkc/ProxyCore/apps/api/internal/acme"
 )
 
 func parseCertificate(value string) (*x509.Certificate, error) {
@@ -29,20 +32,14 @@ func parseCertificate(value string) (*x509.Certificate, error) {
 }
 
 func parseRSAKey(value string) (*rsa.PrivateKey, error) {
-	block, _ := pem.Decode([]byte(value))
-	if block == nil {
-		return nil, ErrInvalidIdentityProof
-	}
-	if parsed, err := x509.ParsePKCS8PrivateKey(block.Bytes); err == nil {
-		if key, ok := parsed.(*rsa.PrivateKey); ok {
-			return key, nil
-		}
+	key, err := acme.ParseRSAPrivateKeyPEM(value)
+	if errors.Is(err, acme.ErrUnsupportedRSAPrivateKey) {
 		return nil, ErrUnsupportedIdentityProofKey
 	}
-	if key, err := x509.ParsePKCS1PrivateKey(block.Bytes); err == nil {
-		return key, nil
+	if err != nil {
+		return nil, ErrInvalidIdentityProof
 	}
-	return nil, ErrInvalidIdentityProof
+	return key, nil
 }
 
 func validateCertificatePair(leaf, ca *x509.Certificate, now time.Time) error {
@@ -136,6 +133,5 @@ func publicKeyHash(publicKey any) string {
 }
 
 func derHash(der []byte) string {
-	sum := sha256.Sum256(der)
-	return hex.EncodeToString(sum[:])
+	return acme.DERHashSHA256(der)
 }

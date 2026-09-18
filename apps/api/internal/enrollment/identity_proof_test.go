@@ -69,6 +69,20 @@ func (f proofFixture) options(now time.Time) IdentityProofVerifierOptions {
 	return IdentityProofVerifierOptions{Request: f.request, ExpectedInstallationID: f.id.InstallationID, ExpectedNodeID: f.id.NodeID, ExpectedLeadershipGeneration: f.id.LeadershipGeneration, ExpectedLeafSPKISHA256: f.proof.LeafSPKISHA256, ExpectedCADERHashSHA256: f.proof.CADERHashSHA256, LeafCertificatePEM: f.leaf, CACertificatePEM: f.ca, Now: now}
 }
 
+func TestIdentityProofCAHashMatchesSharedDERHelper(t *testing.T) {
+	f := newProofFixture(t)
+	ca, err := parseCertificate(f.ca)
+	if err != nil {
+		t.Fatalf("parse CA: %v", err)
+	}
+	if got := acme.DERHashSHA256(ca.Raw); f.proof.CADERHashSHA256 != got {
+		t.Fatalf("proof CA fingerprint=%q, shared fingerprint=%q", f.proof.CADERHashSHA256, got)
+	}
+	if got, err := acme.CertificateDERHashSHA256(f.ca); err != nil || got != f.proof.CADERHashSHA256 {
+		t.Fatalf("PEM fingerprint=%q/%v, proof fingerprint=%q", got, err, f.proof.CADERHashSHA256)
+	}
+}
+
 func TestIdentityProofRoundTripAndCanonicalBytes(t *testing.T) {
 	f := newProofFixture(t)
 	if err := VerifyIdentityProof(f.proof, f.options(f.now)); err != nil {
