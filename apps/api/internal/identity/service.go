@@ -107,6 +107,21 @@ func (s *Service) Current() Identity {
 	return s.cached
 }
 
+// SnapshotPublicationIdentity returns the loaded identity without panicking.
+// Snapshot publication fails closed until startup has loaded or bootstrapped
+// the durable identity.
+func (s *Service) SnapshotPublicationIdentity() (Identity, error) {
+	if s == nil {
+		return Identity{}, ErrIdentityNotLoaded
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if !s.loaded {
+		return Identity{}, ErrIdentityNotLoaded
+	}
+	return s.cached, nil
+}
+
 // WithAutomaticRenewalLease validates the live cached identity and runs one
 // renewal operation while holding the identity read lock. Role transitions
 // acquire the write side of this lock, so they cannot complete during the
