@@ -3,11 +3,13 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -16,6 +18,7 @@ import (
 	"github.com/zerkc/ProxyCore/apps/api/internal/config"
 	"github.com/zerkc/ProxyCore/apps/api/internal/configuration"
 	"github.com/zerkc/ProxyCore/apps/api/internal/domain"
+	"github.com/zerkc/ProxyCore/apps/api/internal/enrollment"
 	"github.com/zerkc/ProxyCore/apps/api/internal/httpserver"
 	"github.com/zerkc/ProxyCore/apps/api/internal/identity"
 	"github.com/zerkc/ProxyCore/apps/api/internal/snapshot"
@@ -50,9 +53,25 @@ func main() {
 	if err != nil {
 		logger.Fatalf("config: %v", err)
 	}
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	if err := runServer(ctx, cfg, logger); err != nil {
+		logger.Fatalf("server: %v", err)
+	}
+}
+
+func runServer(ctx context.Context, cfg config.Config, logger *log.Logger) error {
+	if ctx == nil {
+		return errors.New("process context is required")
+	}
+	if logger == nil {
+		logger = log.Default()
+	}
 
 	var pool *pgxpool.Pool
 	var configStore *configuration.Store
+	var identitySvc *identity.Service
+	var identityResult identity.Identity
 	options := []httpserver.Option{
 		httpserver.WithUpdateChecker(update.NewChecker(update.CheckerOptions{
 			CurrentVersion: version.Version,
@@ -70,17 +89,17 @@ func main() {
 		pool, err = pgxpool.New(connectCtx, cfg.DatabaseURL)
 		cancel()
 		if err != nil {
-			logger.Fatalf("database: %v", err)
+			return fmt.Errorf("database: %w", err)
 		}
 		defer pool.Close()
 
 		if err := pool.Ping(context.Background()); err != nil {
-			logger.Fatalf("database ping: %v", err)
+			return fmt.Errorf("database ping: %w", err)
 		}
 		// Drizzle migrate remains the primary path; EnsureSchema is idempotent and
 		// covers additive tables (e.g. internal_ca) if migrate was not re-run yet.
 		if err := configuration.EnsureSchema(context.Background(), pool); err != nil {
-			logger.Fatalf("configuration schema: %v", err)
+			return fmt.Errorf("configuration schema: %w", err)
 		}
 		store := auth.NewPostgresStore(pool)
 		options = append(options, httpserver.WithAuthService(auth.NewService(store, auth.ServiceOptions{
@@ -99,10 +118,10 @@ func main() {
 		// the HTTP server enforces their writable/read-only boundary.
 		identityStore := identity.NewPgStore(pool)
 		identityCtx, identityCancel := context.WithTimeout(context.Background(), 10*time.Second)
-		identitySvc, identityResult, _, err := bootstrapIdentity(identityCtx, identityStore)
+		identitySvc, identityResult, _, err = bootstrapIdentity(identityCtx, identityStore)
 		identityCancel()
 		if err != nil {
-			logger.Fatalf("identity bootstrap: %v", err)
+			return fmt.Errorf("identity bootstrap: %w", err)
 		}
 		options = append(options, httpserver.WithIdentityService(identitySvc))
 		logger.Printf(
@@ -120,37 +139,239 @@ func main() {
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
-
-	if configStore != nil {
-		go configuration.RunRenewalLoop(ctx, configStore, configuration.RenewalOptions{
-			StagingDirectoryURL:    cfg.ACMEDirectoryURL,
-			ProductionDirectoryURL: cfg.ACMEProductionDirectoryURL,
-			Email:                  cfg.AcmeEmail,
-			Log:                    logger,
-		}, cfg.CertRenewalInterval)
+	var supervisor *enrollment.EnrollmentTLSSupervisor
+	if configStore != nil && identitySvc != nil {
+		var err error
+		supervisor, err = buildEnrollmentTLSSupervisor(cfg, identitySvc, configStore, logger)
+		if err != nil {
+			logEnrollmentTLSFailure(logger, "supervisor unavailable")
+			supervisor = nil
+		}
 	}
 
+	workers := make([]func(context.Context), 0, 2)
+	if configStore != nil {
+		workers = append(workers, func(workerCtx context.Context) {
+			configuration.RunRenewalLoop(workerCtx, configStore, configuration.RenewalOptions{
+				StagingDirectoryURL:    cfg.ACMEDirectoryURL,
+				ProductionDirectoryURL: cfg.ACMEProductionDirectoryURL,
+				Email:                  cfg.AcmeEmail,
+				Log:                    logger,
+			}, cfg.CertRenewalInterval)
+		})
+	}
 	// Start the standalone-archive retention worker. Phase 1 introduces
 	// the worker and the ArchiveStore seam; the actual ArchiveStore
 	// implementation that reads from PostgreSQL is added by the same
 	// change that wires enrollment in Phase 2. Until then, the worker
 	// runs with a no-op archive store and is a no-op itself.
-	go snapshot.NewRetentionWorker(snapshot.NoopArchiveStore{}, time.Hour, logger).Run(ctx)
+	workers = append(workers, func(workerCtx context.Context) {
+		snapshot.NewRetentionWorker(snapshot.NoopArchiveStore{}, time.Hour, logger).Run(workerCtx)
+	})
 
-	go func() {
-		logger.Printf("proxycore-api listening on %s (ui=%s)", cfg.Addr, cfg.UIDist)
-		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			logger.Fatalf("listen: %v", err)
+	logger.Printf("proxycore-api listening on %s (ui=%s)", cfg.Addr, cfg.UIDist)
+	return runServerRuntime(ctx, logger, serverRuntimeOptions{
+		ordinary:   server,
+		enrollment: supervisor,
+		workers:    workers,
+	})
+}
+
+type serverRuntimeResult struct {
+	kind string
+	err  error
+}
+
+const (
+	serverRuntimeHTTPResult         = "ordinary-http"
+	serverRuntimeEnrollmentResult   = "enrollment-tls"
+	serverRuntimeStatusResult       = "enrollment-tls-status"
+	defaultEnrollmentStatusInterval = time.Second
+)
+
+func runServerRuntime(ctx context.Context, logger *log.Logger, opts serverRuntimeOptions) error {
+	if ctx == nil {
+		return errEnrollmentTLSRuntimeUnavailable
+	}
+	if opts.ordinary == nil {
+		return errors.New("ordinary HTTP server is required")
+	}
+	if logger == nil {
+		logger = log.Default()
+	}
+	childCtx, rawCancel := context.WithCancel(ctx)
+	cancel := newProcessRuntimeCancel(rawCancel, opts.cancelObserved)
+	defer cancel()
+	results := make(chan serverRuntimeResult, 3)
+	var workers sync.WaitGroup
+	for _, worker := range opts.workers {
+		if worker == nil {
+			continue
 		}
+		workers.Add(1)
+		go func(run func(context.Context)) {
+			defer workers.Done()
+			run(childCtx)
+		}(worker)
+	}
+	workersDone := make(chan struct{})
+	go func() {
+		workers.Wait()
+		close(workersDone)
 	}()
 
-	<-ctx.Done()
+	go func() {
+		results <- serverRuntimeResult{kind: serverRuntimeHTTPResult, err: opts.ordinary.ListenAndServe()}
+	}()
+	remaining := 1
 
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	if err := server.Shutdown(shutdownCtx); err != nil {
-		logger.Printf("shutdown: %v", err)
+	var statusCancel context.CancelFunc
+	if opts.enrollment != nil {
+		go func() {
+			results <- serverRuntimeResult{kind: serverRuntimeEnrollmentResult, err: opts.enrollment.Run(childCtx)}
+		}()
+		remaining++
+		statusCtx, cancelStatus := context.WithCancel(childCtx)
+		statusCancel = cancelStatus
+		interval := opts.enrollmentStatusInterval
+		if interval <= 0 {
+			interval = defaultEnrollmentStatusInterval
+		}
+		go func() {
+			watchEnrollmentTLSStatus(statusCtx, opts.enrollment, logger, interval)
+			results <- serverRuntimeResult{kind: serverRuntimeStatusResult}
+		}()
+		remaining++
+	}
+	if statusCancel == nil {
+		statusCancel = func() {}
+	}
+
+	var firstErr error
+	var shutdownErr error
+	shutdownStarted := false
+	ctxDone := (<-chan struct{})(ctx.Done())
+	shutdown := func() {
+		if shutdownStarted {
+			return
+		}
+		shutdownStarted = true
+		shutdownErr = shutdownProcessRuntime(cancel, opts.ordinary, workersDone, processRuntimeShutdownOptions{
+			Timeout:     opts.shutdownTimeout,
+			WithTimeout: opts.shutdownWithTimeout,
+		})
+		if shutdownErr != nil {
+			if firstErr == nil {
+				firstErr = shutdownErr
+			}
+			logger.Printf("process shutdown: %s", redactedProcessRuntimeError(shutdownErr))
+		}
+	}
+
+	for remaining > 0 {
+		select {
+		case <-ctxDone:
+			shutdown()
+			if shutdownErr != nil {
+				return firstErr
+			}
+			ctxDone = nil
+		case result := <-results:
+			remaining--
+			switch result.kind {
+			case serverRuntimeHTTPResult:
+				if !isNormalRuntimeClose(result.err) {
+					if firstErr == nil {
+						firstErr = errProcessRuntimeHTTPServeFailed
+					}
+					logger.Printf("ordinary HTTP server stopped: %s", redactedProcessRuntimeError(errProcessRuntimeHTTPServeFailed))
+				}
+				if !shutdownStarted {
+					shutdown()
+					if shutdownErr != nil {
+						return firstErr
+					}
+				}
+			case serverRuntimeEnrollmentResult:
+				statusCancel()
+				if result.err != nil && !isNormalRuntimeClose(result.err) {
+					logger.Printf("enrollment TLS supervisor stopped: %s", redactedEnrollmentTLSError(result.err))
+					if shutdownStarted && firstErr == nil {
+						firstErr = errEnrollmentTLSRuntimeUnavailable
+					}
+				}
+			case serverRuntimeStatusResult:
+			}
+		}
+	}
+	return firstErr
+}
+
+func watchEnrollmentTLSStatus(ctx context.Context, supervisor enrollmentSupervisorRunner, logger *log.Logger, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	var previous enrollmentTLSStatusObservation
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			status := supervisor.Status()
+			observation := enrollmentTLSStatusObservation{
+				state:               status.State,
+				roleEligible:        status.RoleEligible,
+				configured:          status.Configured,
+				materialReady:       status.MaterialReady,
+				lastError:           status.LastError,
+				consecutiveFailures: status.ConsecutiveFailures,
+			}
+			if observation == previous {
+				continue
+			}
+			previous = observation
+			if status.State == enrollment.EnrollmentTLSStateIneligible {
+				switch {
+				case !status.RoleEligible:
+					logEnrollmentTLSFailure(logger, "ineligible identity")
+				case !status.Configured:
+					logEnrollmentTLSFailure(logger, "hostnames are not configured")
+				case !status.MaterialReady:
+					logEnrollmentTLSFailure(logger, "TLS material unavailable")
+				}
+			}
+			if status.LastError != "" {
+				logger.Printf("enrollment TLS degraded: %s", redactedEnrollmentTLSError(errors.New(status.LastError)))
+			}
+		}
+	}
+}
+
+type enrollmentTLSStatusObservation struct {
+	state               enrollment.EnrollmentTLSState
+	roleEligible        bool
+	configured          bool
+	materialReady       bool
+	lastError           string
+	consecutiveFailures int
+}
+
+func redactedEnrollmentTLSError(err error) string {
+	switch {
+	case err == nil:
+		return "none"
+	case errors.Is(err, enrollment.ErrEnrollmentTLSIdentityUnavailable):
+		return "identity unavailable"
+	case errors.Is(err, enrollment.ErrEnrollmentTLSConfigurationUnavailable):
+		return "configuration unavailable"
+	case errors.Is(err, enrollment.ErrEnrollmentTLSMaterialUnavailable):
+		return "TLS material unavailable"
+	case errors.Is(err, enrollment.ErrEnrollmentTLSBind):
+		return "listener bind unavailable"
+	case errors.Is(err, enrollment.ErrEnrollmentTLSServe):
+		return "listener stopped unexpectedly"
+	case errors.Is(err, enrollment.ErrEnrollmentTLSShutdown):
+		return "listener shutdown unavailable"
+	default:
+		return "unavailable"
 	}
 }
