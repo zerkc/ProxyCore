@@ -25,9 +25,44 @@ const (
 )
 
 type EnrollmentTLSMaterial struct {
-	CertificatePEM string
-	PrivateKeyPEM  string
-	ExpiresAt      time.Time
+	CertificatePEM   string    `json:"certificatePem"`
+	PrivateKeyPEM    string    `json:"-"`
+	CACertificatePEM string    `json:"caCertificatePem"`
+	CADERHashSHA256  string    `json:"caDerSha256"`
+	ExpiresAt        time.Time `json:"expiresAt"`
+}
+
+// EnrollmentTLSPublicMaterial is the redacted trust projection safe for Owner-facing serialization.
+type EnrollmentTLSPublicMaterial struct {
+	CertificatePEM   string    `json:"certificatePem"`
+	CACertificatePEM string    `json:"caCertificatePem"`
+	CADERHashSHA256  string    `json:"caDerSha256"`
+	ExpiresAt        time.Time `json:"expiresAt"`
+}
+
+// Public returns enrollment certificate and CA trust material without private or secret data.
+func (m EnrollmentTLSMaterial) Public() EnrollmentTLSPublicMaterial {
+	return EnrollmentTLSPublicMaterial{
+		CertificatePEM:   m.CertificatePEM,
+		CACertificatePEM: m.CACertificatePEM,
+		CADERHashSHA256:  m.CADERHashSHA256,
+		ExpiresAt:        m.ExpiresAt,
+	}
+}
+
+type validatedEnrollmentLeaf struct {
+	certificate *x509.Certificate
+	ca          *x509.Certificate
+}
+
+func newEnrollmentTLSMaterial(certificatePEM, privateKeyPEM, caPEM string, validated validatedEnrollmentLeaf) EnrollmentTLSMaterial {
+	return EnrollmentTLSMaterial{
+		CertificatePEM:   certificatePEM,
+		PrivateKeyPEM:    privateKeyPEM,
+		CACertificatePEM: caPEM,
+		CADERHashSHA256:  acme.DERHashSHA256(validated.ca.Raw),
+		ExpiresAt:        validated.certificate.NotAfter,
+	}
 }
 
 var enrollmentTLSMu sync.Mutex
@@ -132,8 +167,8 @@ func (s *Store) EnsureEnrollmentTLSMaterial(ctx context.Context) (EnrollmentTLSM
 		if err != nil {
 			return EnrollmentTLSMaterial{}, err
 		}
-		certificate, err := validateEnrollmentLeaf(issued.CertificatePEM, issued.PrivateKeyPEM, caCertPEM, caKeyPEM)
-		if err != nil || !sameEnrollmentHostnames(certificate, configured.Hostnames) {
+		validated, err := validateEnrollmentLeaf(issued.CertificatePEM, issued.PrivateKeyPEM, caCertPEM, caKeyPEM)
+		if err != nil || !sameEnrollmentHostnames(validated.certificate, configured.Hostnames) {
 			if err == nil {
 				err = errors.New("enrollment leaf certificate SANs do not cover configured hostnames")
 			}
@@ -155,7 +190,7 @@ func (s *Store) EnsureEnrollmentTLSMaterial(ctx context.Context) (EnrollmentTLSM
 		if err := tx.Commit(ctx); err != nil {
 			return EnrollmentTLSMaterial{}, err
 		}
-		return EnrollmentTLSMaterial{CertificatePEM: issued.CertificatePEM, PrivateKeyPEM: issued.PrivateKeyPEM, ExpiresAt: certificate.NotAfter}, nil
+		return newEnrollmentTLSMaterial(issued.CertificatePEM, issued.PrivateKeyPEM, caCertPEM, validated), nil
 	}
 	keyPEM, err := s.secrets.Get(ctx, keySecretID)
 	if err != nil {
@@ -164,22 +199,22 @@ func (s *Store) EnsureEnrollmentTLSMaterial(ctx context.Context) (EnrollmentTLSM
 	if strings.TrimSpace(keyPEM) == "" {
 		return EnrollmentTLSMaterial{}, errors.New("enrollment leaf private key secret is missing")
 	}
-	certificate, err := validateEnrollmentLeaf(certificatePEM, keyPEM, caCertPEM, caKeyPEM)
+	validated, err := validateEnrollmentLeaf(certificatePEM, keyPEM, caCertPEM, caKeyPEM)
 	if err != nil {
 		return EnrollmentTLSMaterial{}, fmt.Errorf("validate established enrollment TLS material: %w", err)
 	}
-	if sameEnrollmentHostnames(certificate, configured.Hostnames) && certificate.NotAfter.After(time.Now().UTC().Add(enrollmentLeafRenewalWindow)) {
+	if sameEnrollmentHostnames(validated.certificate, configured.Hostnames) && validated.certificate.NotAfter.After(time.Now().UTC().Add(enrollmentLeafRenewalWindow)) {
 		if err := tx.Commit(ctx); err != nil {
 			return EnrollmentTLSMaterial{}, err
 		}
-		return EnrollmentTLSMaterial{CertificatePEM: certificatePEM, PrivateKeyPEM: keyPEM, ExpiresAt: certificate.NotAfter}, nil
+		return newEnrollmentTLSMaterial(certificatePEM, keyPEM, caCertPEM, validated), nil
 	}
 	issued, err := acme.IssueSignedByCAWithKey(configured.Hostnames, enrollmentLeafValidityDays, caCertPEM, caKeyPEM, keyPEM)
 	if err != nil {
 		return EnrollmentTLSMaterial{}, fmt.Errorf("renew enrollment TLS material: %w", err)
 	}
-	certificate, err = validateEnrollmentLeaf(issued.CertificatePEM, issued.PrivateKeyPEM, caCertPEM, caKeyPEM)
-	if err != nil || !sameEnrollmentHostnames(certificate, configured.Hostnames) {
+	validated, err = validateEnrollmentLeaf(issued.CertificatePEM, issued.PrivateKeyPEM, caCertPEM, caKeyPEM)
+	if err != nil || !sameEnrollmentHostnames(validated.certificate, configured.Hostnames) {
 		if err == nil {
 			err = errors.New("renewed enrollment leaf SANs do not cover configured hostnames")
 		}
@@ -191,17 +226,17 @@ func (s *Store) EnsureEnrollmentTLSMaterial(ctx context.Context) (EnrollmentTLSM
 	if err := tx.Commit(ctx); err != nil {
 		return EnrollmentTLSMaterial{}, err
 	}
-	return EnrollmentTLSMaterial{CertificatePEM: issued.CertificatePEM, PrivateKeyPEM: keyPEM, ExpiresAt: certificate.NotAfter}, nil
+	return newEnrollmentTLSMaterial(issued.CertificatePEM, keyPEM, caCertPEM, validated), nil
 }
 
-func validateEnrollmentLeaf(certificatePEM, keyPEM, caCertPEM, caKeyPEM string) (*x509.Certificate, error) {
+func validateEnrollmentLeaf(certificatePEM, keyPEM, caCertPEM, caKeyPEM string) (validatedEnrollmentLeaf, error) {
 	pair, err := tls.X509KeyPair([]byte(certificatePEM), []byte(keyPEM))
 	if err != nil || len(pair.Certificate) == 0 {
-		return nil, errors.New("enrollment leaf certificate and private key are invalid or do not match")
+		return validatedEnrollmentLeaf{}, errors.New("enrollment leaf certificate and private key are invalid or do not match")
 	}
 	certificate, err := x509.ParseCertificate(pair.Certificate[0])
 	if err != nil || certificate.IsCA {
-		return nil, errors.New("enrollment leaf certificate is invalid")
+		return validatedEnrollmentLeaf{}, errors.New("enrollment leaf certificate is invalid")
 	}
 	serverAuth := false
 	for _, usage := range certificate.ExtKeyUsage {
@@ -209,26 +244,26 @@ func validateEnrollmentLeaf(certificatePEM, keyPEM, caCertPEM, caKeyPEM string) 
 	}
 	for _, name := range certificate.DNSNames {
 		if net.ParseIP(name) != nil {
-			return nil, errors.New("enrollment leaf certificate encodes an IP as a DNS SAN")
+			return validatedEnrollmentLeaf{}, errors.New("enrollment leaf certificate encodes an IP as a DNS SAN")
 		}
 	}
 	if !serverAuth || len(certificate.DNSNames)+len(certificate.IPAddresses) == 0 {
-		return nil, errors.New("enrollment leaf certificate lacks ServerAuth or SANs")
+		return validatedEnrollmentLeaf{}, errors.New("enrollment leaf certificate lacks ServerAuth or SANs")
 	}
 	caPair, err := tls.X509KeyPair([]byte(caCertPEM), []byte(caKeyPEM))
 	if err != nil || len(caPair.Certificate) == 0 {
-		return nil, errors.New("internal CA certificate and key are invalid")
+		return validatedEnrollmentLeaf{}, errors.New("internal CA certificate and key are invalid")
 	}
 	caCert, err := x509.ParseCertificate(caPair.Certificate[0])
 	if err != nil {
-		return nil, errors.New("internal CA certificate is invalid")
+		return validatedEnrollmentLeaf{}, errors.New("internal CA certificate is invalid")
 	}
 	roots := x509.NewCertPool()
 	roots.AddCert(caCert)
 	if _, err := certificate.Verify(x509.VerifyOptions{Roots: roots, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}}); err != nil {
-		return nil, errors.New("enrollment leaf certificate does not chain to the internal CA")
+		return validatedEnrollmentLeaf{}, errors.New("enrollment leaf certificate does not chain to the internal CA")
 	}
-	return certificate, nil
+	return validatedEnrollmentLeaf{certificate: certificate, ca: caCert}, nil
 }
 
 func sameEnrollmentHostnames(certificate *x509.Certificate, configured []string) bool {

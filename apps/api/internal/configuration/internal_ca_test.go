@@ -7,6 +7,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/json"
 	"encoding/pem"
 	"net"
 	"strings"
@@ -38,6 +39,66 @@ func seedEnrollmentTLS(t *testing.T) (*Store, EnrollmentTLSMaterial, string, str
 		t.Fatalf("read identity ids: %v", err)
 	}
 	return store, material, caPEM, caKeyID, leafKeyID
+}
+
+func TestEnsureEnrollmentTLSMaterialExposesValidatedPublicTrust(t *testing.T) {
+	_, material, caPEM, caKeyID, leafKeyID := seedEnrollmentTLS(t)
+	if material.PrivateKeyPEM == "" {
+		t.Fatal("internal runtime material lost the leaf private key")
+	}
+	if material.CACertificatePEM != caPEM {
+		t.Fatal("returned CA certificate does not match the validated persisted CA")
+	}
+	ca := parseEnrollmentCertificate(t, material.CACertificatePEM)
+	if want := acme.DERHashSHA256(ca.Raw); material.CADERHashSHA256 != want {
+		t.Fatalf("CA fingerprint=%q, want %q", material.CADERHashSHA256, want)
+	}
+	public := material.Public()
+	encoded, err := json.Marshal(public)
+	if err != nil {
+		t.Fatalf("marshal public material: %v", err)
+	}
+	serialized := string(encoded)
+	for _, forbidden := range []string{"PRIVATE KEY", "PrivateKeyPEM", caKeyID, leafKeyID, "ciphertext"} {
+		if strings.Contains(serialized, forbidden) {
+			t.Fatalf("public material serialized %q", forbidden)
+		}
+	}
+	internalEncoded, err := json.Marshal(material)
+	if err != nil {
+		t.Fatalf("marshal internal material: %v", err)
+	}
+	if strings.Contains(string(internalEncoded), "PRIVATE KEY") || strings.Contains(string(internalEncoded), material.PrivateKeyPEM) {
+		t.Fatal("internal material JSON serialized the leaf private key")
+	}
+	if public.CACertificatePEM != material.CACertificatePEM || public.CADERHashSHA256 != material.CADERHashSHA256 {
+		t.Fatal("public projection changed validated trust material")
+	}
+}
+
+func TestEnsureEnrollmentTLSMaterialReloadsExistingPublicTrust(t *testing.T) {
+	firstStore, reopen := newEnrollmentStoreView(t)
+	const masterKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+	firstStore.secrets = secrets.NewPgStore(firstStore.pool, masterKey)
+	if _, err := firstStore.UpdateEnrollmentHostnames(t.Context(), []string{"enroll.example"}); err != nil {
+		t.Fatalf("configure hostnames: %v", err)
+	}
+	first, err := firstStore.EnsureEnrollmentTLSMaterial(t.Context())
+	if err != nil {
+		t.Fatalf("issue material: %v", err)
+	}
+	secondStore := reopen()
+	secondStore.secrets = secrets.NewPgStore(secondStore.pool, masterKey)
+	second, err := secondStore.EnsureEnrollmentTLSMaterial(t.Context())
+	if err != nil {
+		t.Fatalf("reload material: %v", err)
+	}
+	if first.CertificatePEM != second.CertificatePEM || first.CACertificatePEM != second.CACertificatePEM || first.CADERHashSHA256 != second.CADERHashSHA256 || !first.ExpiresAt.Equal(second.ExpiresAt) {
+		t.Fatal("reloaded public enrollment trust material changed")
+	}
+	if second.PrivateKeyPEM == "" {
+		t.Fatal("reloaded internal material lost the leaf private key")
+	}
 }
 
 func TestEnsureEnrollmentTLSMaterialIssuesAndKeepsSPKI(t *testing.T) {
@@ -89,7 +150,7 @@ func TestEnsureEnrollmentTLSMaterialIssuesAndKeepsSPKI(t *testing.T) {
 }
 
 func TestEnsureEnrollmentTLSMaterialFailsClosed(t *testing.T) {
-	for _, name := range []string{"missing CA key", "corrupt CA", "missing leaf key", "deleted internal CA", "cleared enrollment leaf", "wrong key", "wrong chain", "bad EKU", "expired leaf", "malformed SAN"} {
+	for _, name := range []string{"missing CA key", "corrupt CA", "tampered CA signature", "missing leaf key", "deleted internal CA", "cleared enrollment leaf", "wrong key", "wrong chain", "bad EKU", "expired leaf", "malformed SAN"} {
 		t.Run(name, func(t *testing.T) {
 			store, first, caPEM, caKeyID, leafKeyID := seedEnrollmentTLS(t)
 			var mutateErr error
@@ -98,6 +159,12 @@ func TestEnsureEnrollmentTLSMaterialFailsClosed(t *testing.T) {
 				_, mutateErr = store.pool.Exec(t.Context(), `update secrets set ciphertext = 'bad' where id = $1`, caKeyID)
 			case "corrupt CA":
 				_, mutateErr = store.pool.Exec(t.Context(), `update internal_ca set certificate_pem = 'bad' where id = $1`, internalCAID)
+			case "tampered CA signature":
+				block, _ := pem.Decode([]byte(caPEM))
+				der := append([]byte(nil), block.Bytes...)
+				der[len(der)-1] ^= 1
+				tampered := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+				_, mutateErr = store.pool.Exec(t.Context(), `update internal_ca set certificate_pem = $1 where id = $2`, tampered, internalCAID)
 			case "missing leaf key":
 				_, mutateErr = store.pool.Exec(t.Context(), `update secrets set ciphertext = 'bad' where id = $1`, leafKeyID)
 			case "deleted internal CA":
