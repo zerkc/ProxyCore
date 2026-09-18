@@ -1,11 +1,14 @@
 package acme
 
 import (
+	"bytes"
 	"crypto"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/sha256"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/hex"
 	"encoding/pem"
 	"errors"
 	"math/big"
@@ -19,6 +22,25 @@ const (
 	defaultLeafValidityDays = 365
 	internalCACN            = "ProxyCore Internal CA"
 )
+
+// DERHashSHA256 returns the lowercase SHA-256 fingerprint of the exact DER bytes.
+func DERHashSHA256(der []byte) string {
+	sum := sha256.Sum256(der)
+	return hex.EncodeToString(sum[:])
+}
+
+// CertificateDERHashSHA256 fingerprints one syntactically valid certificate PEM value.
+func CertificateDERHashSHA256(certificatePEM string) (string, error) {
+	block, err := decodeExactPEM(certificatePEM, "CERTIFICATE")
+	if err != nil {
+		return "", err
+	}
+	certificate, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return "", errors.New("certificate DER is invalid")
+	}
+	return DERHashSHA256(certificate.Raw), nil
+}
 
 // CreateInternalCA creates a long-lived private CA used to sign internal leaf certificates.
 func CreateInternalCA(validityDays int) (Material, error) {
@@ -135,8 +157,8 @@ func IssueSignedByCAWithKey(hostnames []string, validityDays int, caCertPEM, caK
 }
 
 func parseCAMaterial(caCertPEM, caKeyPEM string) (*x509.Certificate, crypto.Signer, error) {
-	block, _ := pem.Decode([]byte(caCertPEM))
-	if block == nil || block.Type != "CERTIFICATE" {
+	block, err := decodeExactPEM(caCertPEM, "CERTIFICATE")
+	if err != nil {
 		return nil, nil, errors.New("internal CA certificate PEM is invalid")
 	}
 	caCert, err := x509.ParseCertificate(block.Bytes)
@@ -147,7 +169,7 @@ func parseCAMaterial(caCertPEM, caKeyPEM string) (*x509.Certificate, crypto.Sign
 	if now.Before(caCert.NotBefore) || !caCert.NotAfter.After(now) {
 		return nil, nil, errors.New("internal CA certificate is expired or not yet valid")
 	}
-	caKey, err := parsePrivateKey(caKeyPEM)
+	caKey, err := parseExactCAMaterialKey(caKeyPEM)
 	if err != nil {
 		return nil, nil, errors.New("internal CA private key PEM is invalid")
 	}
@@ -158,6 +180,61 @@ func parseCAMaterial(caCertPEM, caKeyPEM string) (*x509.Certificate, crypto.Sign
 		return nil, nil, errors.New("internal CA certificate signature is invalid")
 	}
 	return caCert, caKey, nil
+}
+
+func decodeExactPEM(value, expectedType string) (*pem.Block, error) {
+	data := []byte(value)
+	prefix := []byte("-----BEGIN " + expectedType + "-----\n")
+	if !bytes.HasPrefix(data, prefix) {
+		return nil, errors.New("PEM has unexpected leading bytes or block type")
+	}
+	block, rest := pem.Decode(data)
+	if block == nil || block.Type != expectedType || len(block.Headers) != 0 || len(rest) != 0 {
+		return nil, errors.New("PEM must contain exactly one block")
+	}
+	return block, nil
+}
+
+// ErrUnsupportedRSAPrivateKey reports a correctly encoded private key that is not RSA.
+var ErrUnsupportedRSAPrivateKey = errors.New("private key is not RSA")
+
+// ParseRSAPrivateKeyPEM parses the exact supported RSA private-key PEM forms.
+func ParseRSAPrivateKeyPEM(value string) (*rsa.PrivateKey, error) {
+	var block *pem.Block
+	var err error
+	for _, blockType := range []string{"PRIVATE KEY", "RSA PRIVATE KEY"} {
+		if bytes.HasPrefix([]byte(value), []byte("-----BEGIN "+blockType+"-----\n")) {
+			block, err = decodeExactPEM(value, blockType)
+			break
+		}
+	}
+	if err != nil || block == nil {
+		return nil, errors.New("RSA private key PEM is invalid")
+	}
+	switch block.Type {
+	case "PRIVATE KEY":
+		parsed, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+		if err != nil {
+			return nil, errors.New("RSA private key PEM is invalid")
+		}
+		key, ok := parsed.(*rsa.PrivateKey)
+		if !ok {
+			return nil, ErrUnsupportedRSAPrivateKey
+		}
+		return key, nil
+	case "RSA PRIVATE KEY":
+		key, err := x509.ParsePKCS1PrivateKey(block.Bytes)
+		if err != nil {
+			return nil, errors.New("RSA private key PEM is invalid")
+		}
+		return key, nil
+	default:
+		return nil, errors.New("RSA private key PEM is invalid")
+	}
+}
+
+func parseExactCAMaterialKey(keyPEM string) (crypto.Signer, error) {
+	return ParseRSAPrivateKeyPEM(keyPEM)
 }
 
 func ValidateInternalCAMaterial(caCertPEM, caKeyPEM string) error {
