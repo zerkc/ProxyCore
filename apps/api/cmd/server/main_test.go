@@ -1,13 +1,16 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
 	"io"
 	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -237,6 +240,77 @@ func TestWireEnrollmentWorkflowDependenciesPreservesLegacyNilPath(t *testing.T) 
 	wireEnrollmentWorkflowDependencies(&workflow, nil, nil)
 	if workflow.FetchSnapshot != nil || workflow.Validator != nil {
 		t.Fatalf("legacy workflow dependencies fetcher=%v validator=%v, want both nil", workflow.FetchSnapshot != nil, workflow.Validator != nil)
+	}
+}
+
+func TestWireEnrollmentWorkflowDependenciesSelectsTokenTransport(t *testing.T) {
+	token := "pcenr1_" + strings.Repeat("a", 32) + "_" + base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x42}, 32))
+	credential, err := syncpublication.NewNodeCredential("11112222-3333-4444-8999-aabbccddeeff", bytes.Repeat([]byte{0x19}, syncpublication.NodeCredentialSecretBytes))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer credential.Destroy()
+	type observedRequest struct {
+		method string
+		path   string
+		auth   string
+		body   []byte
+	}
+	var observed []observedRequest
+	client := syncpublication.NewSnapshotClient(syncpublication.SnapshotClientOptions{
+		CanonicalizeURL: func(string) (string, error) { return "https://primary.example:3443/", nil },
+		HTTPClient: &http.Client{Transport: snapshotRoundTripperMain(func(request *http.Request) (*http.Response, error) {
+			var body []byte
+			if request.Body != nil {
+				body, _ = io.ReadAll(request.Body)
+			}
+			observed = append(observed, observedRequest{method: request.Method, path: request.URL.Path, auth: request.Header.Get("Authorization"), body: body})
+			return &http.Response{StatusCode: http.StatusOK, ProtoMajor: 2, Body: io.NopCloser(bytes.NewReader([]byte("not-an-envelope"))), Header: make(http.Header)}, nil
+		})},
+	})
+	workflow := httpserver.EnrollmentWorkflowHandlerOptions{}
+	wireEnrollmentWorkflowDependencies(&workflow, client, nil)
+	if workflow.FetchSnapshot == nil {
+		t.Fatal("workflow fetcher was not wired")
+	}
+	_, _ = workflow.FetchSnapshot(context.Background(), "https://primary.example:3443/", token)
+	_, _ = workflow.FetchSnapshot(context.Background(), "https://primary.example:3443/", credential.BearerCopy())
+	if len(observed) != 2 {
+		t.Fatalf("observed %d requests, want 2", len(observed))
+	}
+	if observed[0].method != http.MethodPost || observed[0].path != "/api/topology/sync/snapshot-by-token" ||
+		string(observed[0].body) != `{"token":"`+token+`"}` || observed[0].auth != "" {
+		t.Fatalf("token request=%+v", observed[0])
+	}
+	if observed[1].method != http.MethodGet || observed[1].path != "/api/topology/sync/snapshot" ||
+		observed[1].auth != "Bearer "+credential.BearerCopy() {
+		t.Fatalf("node request=%+v", observed[1])
+	}
+}
+
+type snapshotRoundTripperMain func(*http.Request) (*http.Response, error)
+
+func (f snapshotRoundTripperMain) RoundTrip(request *http.Request) (*http.Response, error) {
+	return f(request)
+}
+
+func TestEnrollmentWorkflowTLSListenerFactoryMountsSnapshotByTokenRoute(t *testing.T) {
+	workflow := httpserver.EnrollmentWorkflowHandlerOptions{Cache: enrollment.NewDraftCache(enrollment.DraftCacheOptions{})}
+	factory := newEnrollmentWorkflowTLSListenerFactory(runtimeTestIdentity{}, workflow, log.New(io.Discard, "", 0))
+	factory.snapshotByToken = &httpserver.EnrollmentSnapshotByTokenHandlerOptions{}
+	var gotHandler http.Handler
+	factory.listen = func(string, string) (net.Listener, error) { return runtimeTestNetListener{}, nil }
+	factory.newServer = func(_ net.Listener, handler http.Handler, _ *enrollment.TLSCertificateProvider) (enrollment.EnrollmentTLSListener, error) {
+		gotHandler = handler
+		return runtimeTestListener{}, nil
+	}
+	if _, err := factory.Listen(context.Background(), "127.0.0.1:0", &enrollment.TLSCertificateProvider{}); err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	response := httptest.NewRecorder()
+	gotHandler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, httpserver.EnrollmentSnapshotByTokenPath, nil))
+	if response.Code != http.StatusMethodNotAllowed || response.Header().Get("Allow") != http.MethodPost {
+		t.Fatalf("snapshot-by-token route status=%d allow=%q", response.Code, response.Header().Get("Allow"))
 	}
 }
 

@@ -1,10 +1,12 @@
 package sync
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"io"
 	"net"
@@ -17,7 +19,11 @@ import (
 	"github.com/zerkc/ProxyCore/apps/api/internal/configuration"
 )
 
-const snapshotPublicationHTTPPath = "/api/topology/sync/snapshot"
+const (
+	snapshotPublicationHTTPPath    = "/api/topology/sync/snapshot"
+	snapshotByTokenHTTPPath        = "/api/topology/sync/snapshot-by-token"
+	maxSnapshotByTokenRequestBytes = 8 << 10
+)
 
 var (
 	ErrSnapshotClientUnauthorized = errors.New("snapshot client unauthorized")
@@ -114,12 +120,52 @@ func (c *SnapshotClient) FetchSnapshot(ctx context.Context, primaryURL string, c
 	return c.fetchWithRetries(request)
 }
 
+// FetchSnapshotByToken retrieves one canonical snapshot using a pcenr1 token
+// in a bounded JSON POST body. The token is never placed in the URL, a log, or
+// an error value.
+func (c *SnapshotClient) FetchSnapshotByToken(ctx context.Context, primaryURL string, token string) ([]byte, error) {
+	if c == nil || c.httpClient == nil || c.canonicalURL == nil || ctx == nil || token == "" ||
+		len(token) > maxSnapshotByTokenRequestBytes {
+		return nil, ErrSnapshotClientInvalid
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, ErrSnapshotClientUnavailable
+	}
+	normalized, err := c.canonicalURL(primaryURL)
+	if err != nil || !validSnapshotClientOrigin(normalized) {
+		return nil, ErrSnapshotClientInvalid
+	}
+	payload, err := json.Marshal(struct {
+		Token string `json:"token"`
+	}{Token: token})
+	if err != nil || len(payload) > maxSnapshotByTokenRequestBytes {
+		return nil, ErrSnapshotClientInvalid
+	}
+	endpoint := strings.TrimRight(normalized, "/") + snapshotByTokenHTTPPath
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
+	if err != nil {
+		return nil, ErrSnapshotClientInvalid
+	}
+	request.Header.Set("Content-Type", "application/json")
+	return c.fetchWithRetries(request)
+}
+
 func (c *SnapshotClient) fetchWithRetries(request *http.Request) ([]byte, error) {
 	attempts := c.retryableErrors
 	if attempts <= 0 {
 		attempts = 1
 	}
 	for attempt := 1; attempt <= attempts; attempt++ {
+		if attempt > 1 && request.Body != nil {
+			if request.GetBody == nil {
+				return nil, ErrSnapshotClientUnavailable
+			}
+			body, err := request.GetBody()
+			if err != nil {
+				return nil, ErrSnapshotClientUnavailable
+			}
+			request.Body = body
+		}
 		response, err := c.httpClient.Do(request)
 		if err != nil {
 			if snapshotTLSFailure(err) {
