@@ -6,9 +6,55 @@ import { RecordDialog } from "./RecordDialog";
 import { ZoneDialog } from "./dns/ZoneDialog";
 import { VersionStatus } from "./VersionStatus";
 import { deriveBarState } from "./patch-bar-state";
+import { EnrollmentTokenPanel } from "./EnrollmentTokenPanel";
+import { NodeContinuityView } from "./NodeContinuityView";
 import type { TopologyIdentity } from "./types";
 
 const NAVIGATION_STORAGE_KEY = "proxycore.navigation.collapsed";
+
+type IdentityTupleInput = {
+  role?: unknown;
+  installationId?: unknown;
+  nodeId?: unknown;
+  clusterKeyId?: unknown;
+  leadershipGeneration?: unknown;
+};
+
+export type DashboardSurface = "ordinary" | "node-only" | "error";
+
+export function getDashboardSurface(
+  identity?: Pick<TopologyIdentity, "role"> & { stalePrimary?: boolean },
+): DashboardSurface {
+  if (!identity) return "error";
+  const role = String(identity.role);
+  if (identity.stalePrimary || role === "stale-primary" || role === "stale-generation") {
+    return "error";
+  }
+  if (role === "node") return "node-only";
+  if (role === "standalone-primary" || role === "primary" || role === "primary-with-nodes") return "ordinary";
+  return "error";
+}
+
+export function getIdentityTuple(identity?: IdentityTupleInput) {
+  if (!identity) return "unloaded";
+  return [
+    identity.role,
+    identity.installationId,
+    identity.nodeId,
+    identity.clusterKeyId,
+    identity.leadershipGeneration,
+  ]
+    .map((value) => String(value ?? ""))
+    .join("|");
+}
+
+export function getDashboardNavigation(surface: DashboardSurface) {
+  if (surface === "error") return [];
+  if (surface === "node-only") {
+    return dashboardNav.filter((item) => item.id === "continuity");
+  }
+  return dashboardNav;
+}
 
 export function getTopologyInspectorRows(identity?: TopologyIdentity) {
   if (!identity) return [];
@@ -145,7 +191,6 @@ export default function DashboardShell({ children }: { children: ReactNode }) {
     closeRecordDialog,
     saveRecord,
     zoneDialogOpen,
-    openZoneDialog,
     closeZoneDialog,
     createZone,
     apply,
@@ -186,6 +231,12 @@ export default function DashboardShell({ children }: { children: ReactNode }) {
             ? "apply pending"
             : "live";
   const topologyRows = getTopologyInspectorRows(identity);
+  const surface = getDashboardSurface(identity);
+  const nodeOnly = surface === "node-only";
+  const ordinaryControls = surface === "ordinary";
+  const identityTuple = getIdentityTuple(identity);
+  const visibleNav = getDashboardNavigation(surface);
+  const activeNavigationId = nodeOnly ? "continuity" : current.id;
 
   return (
     <main className="min-h-screen">
@@ -202,6 +253,7 @@ export default function DashboardShell({ children }: { children: ReactNode }) {
         onLogout={logout}
         railCollapsed={railCollapsed}
         onToggleRail={toggleRail}
+        ordinaryControls={ordinaryControls}
       />
 
       <div className="w-full min-h-[calc(100vh-3.5rem)]">
@@ -217,14 +269,15 @@ export default function DashboardShell({ children }: { children: ReactNode }) {
               </div>
             ) : null}
             <nav className="pc-command-rail-nav" aria-label="Main navigation">
-              {dashboardNav.map((item) => (
+              {visibleNav.map((item) => (
                 <Link
                   key={item.href}
                   to={item.href}
-                  data-active={current.id === item.id}
-                  aria-current={current.id === item.id ? "page" : undefined}
+                  data-active={activeNavigationId === item.id}
+                  aria-current={activeNavigationId === item.id ? "page" : undefined}
                   title={item.title}
                   className="pc-command-rail-link"
+                  data-testid={`dashboard-nav-${item.id}`}
                 >
                   <NavIcon icon={item.icon} />
                   <span className="pc-command-rail-label">{item.label}</span>
@@ -237,7 +290,9 @@ export default function DashboardShell({ children }: { children: ReactNode }) {
             <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_280px]">
           <section className="min-w-0 p-4 md:p-6">
             <div className="mx-auto w-full max-w-[1120px]">
-              {current.id === "overview" ? (
+              {surface === "error" ? (
+                <TopologyErrorState />
+              ) : current.id === "overview" && !nodeOnly ? (
                 <header className="border-b border-line/80 pb-4 md:pb-5">
                   <p className="pc-eyebrow">control room</p>
                   <h1 className="pc-title mt-2 text-3xl text-mist">
@@ -261,8 +316,17 @@ export default function DashboardShell({ children }: { children: ReactNode }) {
                 </p>
               ) : null}
 
-              <div key={current.href} className="pc-enter">
-                {children}
+              <div key={`${current.href}:${identityTuple}`} className="pc-enter">
+                {surface === "error" ? null : nodeOnly ? (
+                  <NodeContinuityView key={identityTuple} />
+                ) : (
+                  <>
+                    {children}
+                    {current.id === "continuity" && identity ? (
+                      <EnrollmentTokenPanel identity={identity} />
+                    ) : null}
+                  </>
+                )}
               </div>
             </div>
           </section>
@@ -334,7 +398,14 @@ export default function DashboardShell({ children }: { children: ReactNode }) {
             ) : null}
 
             <section className="pc-inspector-section border-t border-line/80 px-4 py-5 md:px-5">
-              {routeZone ? (
+              {nodeOnly ? (
+                <>
+                  <p className="pc-eyebrow pc-eyebrow-signal">NODE-only mode</p>
+                  <p className="mt-2 text-sm leading-5 text-mute">
+                    Ordinary editing is locked after NODE conversion.
+                  </p>
+                </>
+              ) : routeZone ? (
                 <>
                   <p className="pc-eyebrow pc-eyebrow-signal">Now editing</p>
                   <p className="mt-2 break-all font-mono text-sm text-mist">
@@ -342,6 +413,7 @@ export default function DashboardShell({ children }: { children: ReactNode }) {
                   </p>
                   <Link
                     to="/dashboard/dns"
+                    data-testid="dashboard-back-zones"
                     className="mt-2 inline-block text-xs text-mute underline decoration-line underline-offset-4 transition hover:text-mist"
                   >
                     Back to zones
@@ -372,15 +444,15 @@ export default function DashboardShell({ children }: { children: ReactNode }) {
         </div>
       </div>
 
-      <RecordDialog
+      {ordinaryControls ? <RecordDialog
         open={recordDialogOpen}
         zoneName={activeZone?.name}
         certificates={status?.certificates ?? []}
         initial={editingRecord}
         onClose={closeRecordDialog}
         onSubmit={saveRecord}
-      />
-      <ZoneDialog
+      /> : null}
+      {ordinaryControls ? <ZoneDialog
         open={zoneDialogOpen}
         onClose={closeZoneDialog}
         onSubmit={async (name) => {
@@ -388,8 +460,27 @@ export default function DashboardShell({ children }: { children: ReactNode }) {
           if (ok) closeZoneDialog();
           return ok;
         }}
-      />
+      /> : null}
     </main>
+  );
+}
+
+function TopologyErrorState() {
+  return (
+    <section
+      className="mt-8 space-y-3 border-y border-danger/40 px-1 py-5"
+      data-testid="topology-error-state"
+      role="alert"
+    >
+      <p className="pc-eyebrow text-danger">topology unavailable</p>
+      <h1 className="pc-title text-2xl text-mist">
+        Editing is locked
+      </h1>
+      <p className="text-sm leading-6 text-mute">
+        The local topology identity is unloaded or stale. Wait for status to
+        recover before editing this installation.
+      </p>
+    </section>
   );
 }
 
@@ -408,6 +499,7 @@ type TopBarProps = {
   onToggleRail: () => void;
   onApply: () => void;
   onLogout: () => void;
+  ordinaryControls: boolean;
 };
 
 function TopBar({
@@ -423,6 +515,7 @@ function TopBar({
   onToggleRail,
   onApply,
   onLogout,
+  ordinaryControls,
 }: TopBarProps) {
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const userMenuRef = useRef<HTMLDivElement>(null);
@@ -495,6 +588,7 @@ function TopBar({
           aria-label={railToggleLabel}
           aria-expanded={!railCollapsed}
           title={railToggleLabel}
+          data-testid="dashboard-rail-toggle"
         >
           <svg
             xmlns="http://www.w3.org/2000/svg"
@@ -520,14 +614,16 @@ function TopBar({
 
       {/* Center: bell + revision status */}
       <div className="pc-topbar-center">
-        <BellButton
-          state={state}
-          loaded={loaded}
-          autoRetrying={autoRetrying}
-          statusLabel={statusLabel}
-          actionLabel={actionLabel}
-          onApply={onApply}
-        />
+        {ordinaryControls ? (
+          <BellButton
+            state={state}
+            loaded={loaded}
+            autoRetrying={autoRetrying}
+            statusLabel={statusLabel}
+            actionLabel={actionLabel}
+            onApply={onApply}
+          />
+        ) : null}
 
         <span
           className="pc-topbar-status hidden text-xs font-semibold md:inline"
@@ -566,6 +662,7 @@ function TopBar({
               aria-expanded={userMenuOpen}
               aria-controls="topbar-user-menu"
               title={`Signed in as ${user}`}
+              data-testid="dashboard-user-menu-toggle"
             >
               <span className="pc-topbar-user-avatar" aria-hidden="true">
                 {user.charAt(0).toUpperCase()}
@@ -602,6 +699,7 @@ function TopBar({
                   type="button"
                   role="menuitem"
                   className="pc-topbar-user-menu-item"
+                  data-testid="dashboard-sign-out"
                   onClick={() => {
                     setUserMenuOpen(false);
                     onLogout();
@@ -649,6 +747,7 @@ function BellButton({
         disabled={disabled}
         aria-label={`${actionLabel}. ${statusLabel}`}
         title={`${actionLabel}. ${statusLabel}`}
+        data-testid="dashboard-apply"
         className={[
           "pc-topbar-bell",
           state.kind === "applying" || state.kind === "checking"
