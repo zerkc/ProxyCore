@@ -414,6 +414,26 @@ func TestEnrollmentWorkflowTLSListenerFactoryMountsSnapshotByTokenRoute(t *testi
 	}
 }
 
+func TestEnrollmentWorkflowTLSListenerFactoryMountsAcknowledgementRoute(t *testing.T) {
+	workflow := httpserver.EnrollmentWorkflowHandlerOptions{Cache: enrollment.NewDraftCache(enrollment.DraftCacheOptions{})}
+	factory := newEnrollmentWorkflowTLSListenerFactory(runtimeTestIdentity{}, workflow, log.New(io.Discard, "", 0))
+	factory.acknowledgement = &httpserver.EnrollmentSnapshotAcknowledgementHandlerOptions{}
+	var gotHandler http.Handler
+	factory.listen = func(string, string) (net.Listener, error) { return runtimeTestNetListener{}, nil }
+	factory.newServer = func(_ net.Listener, handler http.Handler, _ *enrollment.TLSCertificateProvider) (enrollment.EnrollmentTLSListener, error) {
+		gotHandler = handler
+		return runtimeTestListener{}, nil
+	}
+	if _, err := factory.Listen(context.Background(), "127.0.0.1:0", &enrollment.TLSCertificateProvider{}); err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	response := httptest.NewRecorder()
+	gotHandler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, httpserver.EnrollmentSnapshotAcknowledgementPath, nil))
+	if response.Code != http.StatusMethodNotAllowed || response.Header().Get("Allow") != http.MethodPost {
+		t.Fatalf("acknowledgement route status=%d allow=%q", response.Code, response.Header().Get("Allow"))
+	}
+}
+
 func TestBuildNodeConverterRequiresFlagAndEligibleIdentity(t *testing.T) {
 	for _, test := range []struct {
 		name    string

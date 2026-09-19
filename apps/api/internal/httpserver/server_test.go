@@ -72,12 +72,14 @@ func (s *readyIdentityStore) UpdateClusterKeyID(_ context.Context, keyID *uuid.U
 }
 
 func TestReadyIdentityUsesRedactedTopologyFields(t *testing.T) {
+	clusterKeyID := uuid.MustParse("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee")
 	store := &readyIdentityStore{current: identity.Identity{
 		InstallationID:        domain.NewInstallationID(),
 		NodeID:                domain.NewNodeID(),
 		Role:                  domain.TopologyRoleStalePrimary,
 		LeadershipGeneration:  3,
 		LatestKnownGeneration: 7,
+		ClusterKeyID:          &clusterKeyID,
 	}}
 	identityService := identity.NewService(store)
 	if _, err := identityService.Load(context.Background()); err != nil {
@@ -113,8 +115,8 @@ func TestReadyIdentityUsesRedactedTopologyFields(t *testing.T) {
 	if body.Identity["role"] != string(domain.TopologyRoleStalePrimary) || body.Identity["writable"] != false {
 		t.Fatalf("unexpected identity=%v", body.Identity)
 	}
-	if _, ok := body.Identity["clusterKeyId"]; ok {
-		t.Fatalf("identity leaked cluster key id: %v", body.Identity)
+	if body.Identity["clusterKeyId"] != clusterKeyID.String() {
+		t.Fatalf("identity cluster key id=%v want %q", body.Identity["clusterKeyId"], clusterKeyID)
 	}
 }
 

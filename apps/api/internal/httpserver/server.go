@@ -119,7 +119,7 @@ func (s *Server) publicIdentity() map[string]any {
 	}
 	current := svc.Current()
 	stalePrimary := svc.IsStalePrimary()
-	return map[string]any{
+	projection := map[string]any{
 		"installationId":        string(current.InstallationID),
 		"nodeId":                string(current.NodeID),
 		"role":                  string(current.Role),
@@ -128,6 +128,10 @@ func (s *Server) publicIdentity() map[string]any {
 		"stalePrimary":          stalePrimary,
 		"writable":              svc.IsWritable() && !stalePrimary,
 	}
+	if current.ClusterKeyID != nil {
+		projection["clusterKeyId"] = current.ClusterKeyID.String()
+	}
+	return projection
 }
 
 func (s *Server) identityWritable() bool {

@@ -909,3 +909,126 @@ func validPublicationUUID(value string) bool {
 	parsed, err := uuid.Parse(value)
 	return err == nil && parsed != uuid.Nil && parsed.String() == value
 }
+
+func activeSnapshotAcknowledgementKey(ctx context.Context, tx pgx.Tx, id uuid.UUID) (bool, error) {
+	var exists bool
+	if err := tx.QueryRow(ctx, `
+		select exists(
+			select 1 from cluster_keys where id = $1 and retired_at is null
+		)
+	`, id).Scan(&exists); err != nil {
+		return false, err
+	}
+	return exists, nil
+}
+
+func findSnapshotAcknowledgementCandidate(
+	ctx context.Context,
+	tx pgx.Tx,
+	contentHash string,
+	appliedAt time.Time,
+	identityRecord SnapshotPublicationIdentityRecord,
+) (SnapshotAcknowledgement, bool, error) {
+	rows, err := tx.Query(ctx, `
+		select a.source_primary_id::text, a.leadership_generation, a.snapshot_version,
+			a.replication_version, a.revision_id::text, a.applied_at
+		from applied_snapshots a
+		join config_revisions r on r.id = a.revision_id
+		join apply_jobs j on j.id = a.apply_job_id
+		where a.content_hash = $1
+		  and a.status::text = 'applied'
+		  and a.snapshot_body is not null
+		  and octet_length(a.snapshot_body) > 0
+		  and a.discarded_at is null
+		  and a.source_primary_id = $2
+		  and a.leadership_generation = $3
+		  and r.source::text = 'ordinary'
+		  and r.source_primary_id = a.source_primary_id
+		  and r.source_node_id is null
+		  and r.source_revision_id is null
+		  and r.snapshot_content_hash = a.content_hash
+		  and r.snapshot_version = a.snapshot_version
+		  and r.replication_version = a.replication_version
+		  and r.leadership_generation = a.leadership_generation
+		  and r.applied_at is not null
+		  and j.revision_id = r.id
+		  and j.status::text = 'applied'
+		  and j.finished_at is not null
+		  and j.source::text = 'ordinary'
+		  and j.source_node_id is null
+		  and j.source_revision_id is null
+		  and j.source_primary_id = a.source_primary_id
+		  and j.snapshot_content_hash = a.content_hash
+		  and j.snapshot_version = a.snapshot_version
+		  and j.replication_version = a.replication_version
+		  and j.leadership_generation = a.leadership_generation
+		order by a.applied_at desc, a.id desc
+		for share of a, r, j
+	`, contentHash, identityRecord.InstallationID, identityRecord.LeadershipGeneration)
+	if err != nil {
+		return SnapshotAcknowledgement{}, false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var candidate SnapshotAcknowledgement
+		var sourcePrimaryID string
+		if err := rows.Scan(
+			&sourcePrimaryID, &candidate.LeadershipGeneration, &candidate.SnapshotVersion,
+			&candidate.ReplicationVersion, &candidate.RevisionID, &candidate.AppliedAt,
+		); err != nil {
+			return SnapshotAcknowledgement{}, false, err
+		}
+		if sourcePrimaryID == identityRecord.InstallationID && candidate.AppliedAt.Equal(appliedAt) {
+			if candidate.SnapshotVersion <= 0 || candidate.ReplicationVersion <= 0 ||
+				!validPublicationUUID(candidate.RevisionID) {
+				return SnapshotAcknowledgement{}, false, nil
+			}
+			candidate.ContentHash = contentHash
+			return candidate, true, nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return SnapshotAcknowledgement{}, false, err
+	}
+	return SnapshotAcknowledgement{}, false, nil
+}
+
+func insertSnapshotAcknowledgement(ctx context.Context, tx pgx.Tx, ack SnapshotAcknowledgement) error {
+	_, err := tx.Exec(ctx, `
+		insert into node_snapshot_acks (
+			node_id, content_hash, snapshot_version, replication_version, revision_id,
+			leadership_generation, applied_at, received_at
+		) values ($1, $2, $3, $4, $5, $6, $7, $8)
+		on conflict (node_id, content_hash) do update set
+			snapshot_version = excluded.snapshot_version,
+			replication_version = excluded.replication_version,
+			revision_id = excluded.revision_id,
+			leadership_generation = excluded.leadership_generation,
+			applied_at = excluded.applied_at,
+			received_at = excluded.received_at
+	`, ack.NodeID, ack.ContentHash, ack.SnapshotVersion, ack.ReplicationVersion,
+		ack.RevisionID, ack.LeadershipGeneration, ack.AppliedAt, ack.ReceivedAt)
+	return err
+}
+
+func recordSnapshotAcknowledgementTx(ctx context.Context, tx pgx.Tx, keyStore cluster.KeyStore, ack SnapshotAcknowledgement, credential snapshotAcknowledgementCredential) error {
+	derived, err := deriveSnapshotAcknowledgement(ctx, tx, keyStore, SnapshotAcknowledgementInput{
+		NodeID:      ack.NodeID,
+		ContentHash: ack.ContentHash,
+		AppliedAt:   ack.AppliedAt,
+		ReceivedAt:  ack.ReceivedAt,
+	}, credential)
+	if err != nil {
+		return err
+	}
+	if derived.SnapshotVersion != ack.SnapshotVersion ||
+		derived.ReplicationVersion != ack.ReplicationVersion ||
+		derived.RevisionID != ack.RevisionID ||
+		derived.LeadershipGeneration != ack.LeadershipGeneration {
+		return ErrSnapshotAcknowledgementDenied
+	}
+	if err := insertSnapshotAcknowledgement(ctx, tx, ack); err != nil {
+		return ErrSnapshotAcknowledgementUnavailable
+	}
+	return nil
+}

@@ -399,6 +399,45 @@ func TestRenewalWorkItemsUseAtomicIdentityLeaseAndStopAfterTransition(t *testing
 	}
 }
 
+func TestRenewalWorkItemsFailClosedForStaleGenerationAndUnloadedLease(t *testing.T) {
+	staleStore := &renewalLeaseStore{
+		current: identity.Identity{Role: domain.TopologyRolePrimary, LeadershipGeneration: 3, LatestKnownGeneration: 4},
+		present: true,
+	}
+	staleService := identity.NewService(staleStore)
+	if _, err := staleService.Load(context.Background()); err != nil {
+		t.Fatalf("Load stale identity: %v", err)
+	}
+	calls := 0
+	due := []domain.CertificateStatus{{ID: "stale", Issuer: "letsencrypt"}}
+	_, failed := renewDueCertificateItems(context.Background(), RenewalOptions{
+		Identity: func(context.Context) (identity.Identity, bool, error) {
+			return identity.Identity{Role: domain.TopologyRolePrimary, LeadershipGeneration: 3, LatestKnownGeneration: 3}, true, nil
+		},
+		IdentityLease: staleService,
+	}, due, func(context.Context, domain.CertificateStatus) (RenewResult, error) {
+		calls++
+		return RenewResult{}, nil
+	})
+	if failed != 0 || calls != 0 {
+		t.Fatalf("stale lease failed=%d calls=%d", failed, calls)
+	}
+
+	unloaded := identity.NewService(&renewalLeaseStore{})
+	_, failed = renewDueCertificateItems(context.Background(), RenewalOptions{
+		Identity: func(context.Context) (identity.Identity, bool, error) {
+			return identity.Identity{Role: domain.TopologyRolePrimary, LeadershipGeneration: 1, LatestKnownGeneration: 1}, true, nil
+		},
+		IdentityLease: unloaded,
+	}, due, func(context.Context, domain.CertificateStatus) (RenewResult, error) {
+		calls++
+		return RenewResult{}, nil
+	})
+	if failed != 0 || calls != 0 {
+		t.Fatalf("unloaded lease failed=%d calls=%d", failed, calls)
+	}
+}
+
 func TestRenewalWorkItemsNeverInvokeIssuerWhenLeaseForbidsCurrentRole(t *testing.T) {
 	service := newRenewalIdentityService(t, domain.TopologyRoleNode)
 	calls := 0

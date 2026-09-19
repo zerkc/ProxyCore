@@ -218,7 +218,10 @@ func runServerWithNodeConverter(ctx context.Context, cfg config.Config, logger *
 		publicationOptions := httpserver.EnrollmentSnapshotPublicationHandlerOptions{
 			Store: phase2Store, Identity: identitySvc,
 		}
-		supervisor, err = newEnrollmentWorkflowTLSSupervisorWithHandlers(cfg, identitySvc, configStore, workflow, logger, &publicationOptions, &snapshotByTokenOptions)
+		acknowledgementOptions := httpserver.EnrollmentSnapshotAcknowledgementHandlerOptions{
+			Store: phase2Store, Identity: identitySvc,
+		}
+		supervisor, err = newEnrollmentWorkflowTLSSupervisorWithHandlersAndAcknowledgement(cfg, identitySvc, configStore, workflow, logger, &publicationOptions, &snapshotByTokenOptions, &acknowledgementOptions)
 		if err != nil {
 			logEnrollmentTLSFailure(logger, "supervisor unavailable")
 			supervisor = nil
@@ -659,6 +662,7 @@ type enrollmentWorkflowTLSListenerFactory struct {
 	now             func() time.Time
 	publication     *httpserver.EnrollmentSnapshotPublicationHandlerOptions
 	snapshotByToken *httpserver.EnrollmentSnapshotByTokenHandlerOptions
+	acknowledgement *httpserver.EnrollmentSnapshotAcknowledgementHandlerOptions
 }
 
 func newEnrollmentWorkflowTLSListenerFactory(identityCurrent enrollment.EnrollmentTLSIdentityCurrent, workflow httpserver.EnrollmentWorkflowHandlerOptions, logger *log.Logger) *enrollmentWorkflowTLSListenerFactory {
@@ -725,6 +729,12 @@ func (f *enrollmentWorkflowTLSListenerFactory) Listen(ctx context.Context, addre
 		snapshotByToken := httpserver.NewEnrollmentSnapshotByTokenHandler(snapshotByTokenOptions)
 		handler = httpserver.NewEnrollmentSnapshotByTokenMux(snapshotByToken, handler)
 	}
+	if f.acknowledgement != nil {
+		acknowledgementOptions := *f.acknowledgement
+		acknowledgementOptions.Certificate = certificate
+		acknowledgement := httpserver.NewEnrollmentSnapshotAcknowledgementHandler(acknowledgementOptions)
+		handler = httpserver.NewEnrollmentSnapshotAcknowledgementMux(acknowledgement, handler)
+	}
 	server, err := f.newServer(listener, handler, provider)
 	if err != nil || server == nil {
 		_ = listener.Close()
@@ -744,11 +754,16 @@ func newEnrollmentWorkflowTLSSupervisor(cfg config.Config, identityService *iden
 }
 
 func newEnrollmentWorkflowTLSSupervisorWithHandlers(cfg config.Config, identityService *identity.Service, configStore *configuration.Store, workflow httpserver.EnrollmentWorkflowHandlerOptions, logger *log.Logger, publication *httpserver.EnrollmentSnapshotPublicationHandlerOptions, snapshotByToken *httpserver.EnrollmentSnapshotByTokenHandlerOptions) (*enrollment.EnrollmentTLSSupervisor, error) {
+	return newEnrollmentWorkflowTLSSupervisorWithHandlersAndAcknowledgement(cfg, identityService, configStore, workflow, logger, publication, snapshotByToken, nil)
+}
+
+func newEnrollmentWorkflowTLSSupervisorWithHandlersAndAcknowledgement(cfg config.Config, identityService *identity.Service, configStore *configuration.Store, workflow httpserver.EnrollmentWorkflowHandlerOptions, logger *log.Logger, publication *httpserver.EnrollmentSnapshotPublicationHandlerOptions, snapshotByToken *httpserver.EnrollmentSnapshotByTokenHandlerOptions, acknowledgement *httpserver.EnrollmentSnapshotAcknowledgementHandlerOptions) (*enrollment.EnrollmentTLSSupervisor, error) {
 	identityCurrent := &enrollmentTLSIdentityAdapter{service: identityService, logger: logger}
 	configurationStore := &enrollmentTLSConfigurationAdapter{store: configStore, logger: logger}
 	factory := newEnrollmentWorkflowTLSListenerFactory(identityCurrent, workflow, logger)
 	factory.publication = publication
 	factory.snapshotByToken = snapshotByToken
+	factory.acknowledgement = acknowledgement
 	return enrollment.NewEnrollmentTLSSupervisor(enrollment.EnrollmentTLSSupervisorOptions{
 		Identity:        identityCurrent,
 		Configuration:   configurationStore,
