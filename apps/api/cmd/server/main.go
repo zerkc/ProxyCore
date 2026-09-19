@@ -17,6 +17,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/zerkc/ProxyCore/apps/api/internal/auth"
+	"github.com/zerkc/ProxyCore/apps/api/internal/cluster"
 	"github.com/zerkc/ProxyCore/apps/api/internal/config"
 	"github.com/zerkc/ProxyCore/apps/api/internal/configuration"
 	"github.com/zerkc/ProxyCore/apps/api/internal/domain"
@@ -103,6 +104,8 @@ func runServerWithNodeConverter(ctx context.Context, cfg config.Config, logger *
 	var identityResult identity.Identity
 	var nodeConverter *enrollment.NodeConverter
 	var tokenAuthority httpserver.EnrollmentTokenAuthority
+	var snapshotClient *syncpublication.SnapshotClient
+	var localKEKLoader *cluster.LocalKEKLoader
 	options := []httpserver.Option{
 		httpserver.WithUpdateChecker(update.NewChecker(update.CheckerOptions{
 			CurrentVersion: version.Version,
@@ -163,6 +166,12 @@ func runServerWithNodeConverter(ctx context.Context, cfg config.Config, logger *
 			identityResult.LeadershipGeneration,
 		)
 		phase2Store = configuration.NewPhase2StoreWithMasterKey(pool, cfg.MasterKeyBase64)
+		snapshotClient = syncpublication.NewSnapshotClient(syncpublication.SnapshotClientOptions{
+			CanonicalizeURL: enrollment.CanonicalizePrimaryURL,
+		})
+		localKEKLoader = cluster.NewLocalKEKLoader(cluster.LocalKEKLoaderOptions{
+			Pool: pool, Store: cluster.NewStore(cfg.MasterKeyBase64), Identity: identitySvc,
+		})
 		tokenAuthority = httpserver.NewEnrollmentTokenAuthority(phase2Store, identitySvc, httpserver.EnrollmentTokenAuthorityOptions{
 			List: func(ctx context.Context, ownerID string) ([]httpserver.EnrollmentTokenRecord, error) {
 				return listEnrollmentTokens(ctx, pool, ownerID)
@@ -195,8 +204,11 @@ func runServerWithNodeConverter(ctx context.Context, cfg config.Config, logger *
 		if tokenAuthority != nil {
 			workflow.VerifyToken = tokenAuthority.Verify
 		}
+		wireEnrollmentWorkflowDependencies(&workflow, snapshotClient, localKEKLoader)
 		var err error
-		supervisor, err = newEnrollmentWorkflowTLSSupervisor(cfg, identitySvc, configStore, workflow, logger)
+		supervisor, err = newEnrollmentWorkflowTLSSupervisor(cfg, identitySvc, configStore, workflow, logger, httpserver.EnrollmentSnapshotPublicationHandlerOptions{
+			Store: phase2Store, Identity: identitySvc,
+		})
 		if err != nil {
 			logEnrollmentTLSFailure(logger, "supervisor unavailable")
 			supervisor = nil
@@ -443,6 +455,28 @@ func redactedEnrollmentTLSError(err error) string {
 	}
 }
 
+func wireEnrollmentWorkflowDependencies(workflow *httpserver.EnrollmentWorkflowHandlerOptions, client *syncpublication.SnapshotClient, loader *cluster.LocalKEKLoader) {
+	if workflow == nil {
+		return
+	}
+	if client != nil {
+		workflow.FetchSnapshot = func(ctx context.Context, primaryURL, credential string) (*snapshot.Envelope, error) {
+			body, err := client.FetchSnapshot(ctx, primaryURL, []byte(credential))
+			if err != nil {
+				return nil, err
+			}
+			envelope, err := snapshot.Unmarshal(body)
+			if err != nil {
+				return nil, syncpublication.ErrSnapshotClientInvalid
+			}
+			return &envelope, nil
+		}
+	}
+	if loader != nil {
+		workflow.Validator = httpserver.NewLocalKEKSnapshotValidator(loader)
+	}
+}
+
 func nodeConverterEnabled(args []string) bool {
 	for _, arg := range args {
 		if arg == "--enable-node-converter" || arg == "--enable-node-converter=true" {
@@ -509,12 +543,13 @@ func localEnrollmentIdentityProvider(service *identity.Service) func(context.Con
 }
 
 type enrollmentWorkflowTLSListenerFactory struct {
-	identity  enrollment.EnrollmentTLSIdentityCurrent
-	workflow  httpserver.EnrollmentWorkflowHandlerOptions
-	logger    *log.Logger
-	listen    func(string, string) (net.Listener, error)
-	newServer func(net.Listener, http.Handler, *enrollment.TLSCertificateProvider) (enrollment.EnrollmentTLSListener, error)
-	now       func() time.Time
+	identity    enrollment.EnrollmentTLSIdentityCurrent
+	workflow    httpserver.EnrollmentWorkflowHandlerOptions
+	logger      *log.Logger
+	listen      func(string, string) (net.Listener, error)
+	newServer   func(net.Listener, http.Handler, *enrollment.TLSCertificateProvider) (enrollment.EnrollmentTLSListener, error)
+	now         func() time.Time
+	publication *httpserver.EnrollmentSnapshotPublicationHandlerOptions
 }
 
 func newEnrollmentWorkflowTLSListenerFactory(identityCurrent enrollment.EnrollmentTLSIdentityCurrent, workflow httpserver.EnrollmentWorkflowHandlerOptions, logger *log.Logger) *enrollmentWorkflowTLSListenerFactory {
@@ -563,13 +598,18 @@ func (f *enrollmentWorkflowTLSListenerFactory) Listen(ctx context.Context, addre
 		logEnrollmentTLSFailure(f.logger, "identity proof signer unavailable")
 		return nil, enrollment.ErrEnrollmentTLSBind
 	}
+	certificate := func(ctx context.Context) (*x509.Certificate, error) {
+		return provider.Certificate(ctx)
+	}
 	handler := httpserver.NewEnrollmentIdentityMux(httpserver.EnrollmentIdentityHandlerOptions{
-		Signer: signer,
-		Certificate: func(ctx context.Context) (*x509.Certificate, error) {
-			return provider.Certificate(ctx)
-		},
-		Workflow: &f.workflow,
+		Signer: signer, Certificate: certificate, Workflow: &f.workflow,
 	})
+	if f.publication != nil {
+		publicationOptions := *f.publication
+		publicationOptions.Certificate = certificate
+		publication := httpserver.NewEnrollmentSnapshotPublicationHandler(publicationOptions)
+		handler = httpserver.NewEnrollmentSnapshotPublicationMux(publication, handler)
+	}
 	server, err := f.newServer(listener, handler, provider)
 	if err != nil || server == nil {
 		_ = listener.Close()
@@ -579,10 +619,13 @@ func (f *enrollmentWorkflowTLSListenerFactory) Listen(ctx context.Context, addre
 	return server, nil
 }
 
-func newEnrollmentWorkflowTLSSupervisor(cfg config.Config, identityService *identity.Service, configStore *configuration.Store, workflow httpserver.EnrollmentWorkflowHandlerOptions, logger *log.Logger) (*enrollment.EnrollmentTLSSupervisor, error) {
+func newEnrollmentWorkflowTLSSupervisor(cfg config.Config, identityService *identity.Service, configStore *configuration.Store, workflow httpserver.EnrollmentWorkflowHandlerOptions, logger *log.Logger, publication ...httpserver.EnrollmentSnapshotPublicationHandlerOptions) (*enrollment.EnrollmentTLSSupervisor, error) {
 	identityCurrent := &enrollmentTLSIdentityAdapter{service: identityService, logger: logger}
 	configurationStore := &enrollmentTLSConfigurationAdapter{store: configStore, logger: logger}
 	factory := newEnrollmentWorkflowTLSListenerFactory(identityCurrent, workflow, logger)
+	if len(publication) > 0 {
+		factory.publication = &publication[0]
+	}
 	return enrollment.NewEnrollmentTLSSupervisor(enrollment.EnrollmentTLSSupervisorOptions{
 		Identity:        identityCurrent,
 		Configuration:   configurationStore,

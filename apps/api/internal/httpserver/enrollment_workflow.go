@@ -10,6 +10,8 @@ import (
 	"net/url"
 	"time"
 
+	"github.com/google/uuid"
+	"github.com/zerkc/ProxyCore/apps/api/internal/cluster"
 	"github.com/zerkc/ProxyCore/apps/api/internal/domain"
 	"github.com/zerkc/ProxyCore/apps/api/internal/enrollment"
 	replicationsnapshot "github.com/zerkc/ProxyCore/apps/api/internal/snapshot"
@@ -27,6 +29,35 @@ var (
 	ErrEnrollmentWorkflowUnavailable = errors.New("enrollment workflow unavailable")
 	ErrEnrollmentWorkflowDenied      = errors.New("enrollment workflow denied")
 )
+
+// SnapshotKEKLoader is the request boundary for the locally persisted cluster
+// KEK. Implementations return a fresh caller-owned key for every validation.
+type SnapshotKEKLoader interface {
+	LoadLocalKEK(context.Context) (*cluster.KEK, uuid.UUID, error)
+}
+
+// NewLocalKEKSnapshotValidator adapts the local loader to the existing
+// workflow validator seam without retaining a process-wide KEK. Each Validate
+// call owns and destroys exactly one freshly loaded key.
+func NewLocalKEKSnapshotValidator(loader SnapshotKEKLoader) EnrollmentSnapshotValidator {
+	return localKEKSnapshotValidator{loader: loader}
+}
+
+type localKEKSnapshotValidator struct {
+	loader SnapshotKEKLoader
+}
+
+func (v localKEKSnapshotValidator) Validate(ctx context.Context, envelope replicationsnapshot.Envelope) replicationsnapshot.ValidationResult {
+	if v.loader == nil {
+		return replicationsnapshot.ValidationResult{Issues: []replicationsnapshot.ValidationIssue{{Code: "NO_KEY", Field: "kek", Message: "local cluster KEK unavailable"}}}
+	}
+	kek, _, err := v.loader.LoadLocalKEK(ctx)
+	if err != nil || kek == nil {
+		return replicationsnapshot.ValidationResult{Issues: []replicationsnapshot.ValidationIssue{{Code: "NO_KEY", Field: "kek", Message: "local cluster KEK unavailable"}}}
+	}
+	defer kek.Destroy()
+	return replicationsnapshot.NewValidator(kek).Validate(ctx, envelope)
+}
 
 // EnrollmentSnapshotFetcher is the transport boundary for the authenticated
 // PRIMARY exchange. Implementations receive the token only in memory and must

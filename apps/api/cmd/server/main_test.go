@@ -12,11 +12,13 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/zerkc/ProxyCore/apps/api/internal/cluster"
 	"github.com/zerkc/ProxyCore/apps/api/internal/configuration"
 	"github.com/zerkc/ProxyCore/apps/api/internal/domain"
 	"github.com/zerkc/ProxyCore/apps/api/internal/enrollment"
 	"github.com/zerkc/ProxyCore/apps/api/internal/httpserver"
 	"github.com/zerkc/ProxyCore/apps/api/internal/identity"
+	syncpublication "github.com/zerkc/ProxyCore/apps/api/internal/sync"
 )
 
 type startupIdentityStore struct {
@@ -219,6 +221,22 @@ func TestEnrollmentWorkflowTLSListenerFactoryWiresWorkflowMux(t *testing.T) {
 	gotHandler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/health", nil))
 	if recorder.Code != http.StatusNotFound {
 		t.Fatalf("ordinary route status=%d, want %d", recorder.Code, http.StatusNotFound)
+	}
+}
+
+func TestWireEnrollmentWorkflowDependenciesProvidesTransportAndValidator(t *testing.T) {
+	workflow := httpserver.EnrollmentWorkflowHandlerOptions{}
+	wireEnrollmentWorkflowDependencies(&workflow, syncpublication.NewSnapshotClient(syncpublication.SnapshotClientOptions{}), cluster.NewLocalKEKLoader(cluster.LocalKEKLoaderOptions{}))
+	if workflow.FetchSnapshot == nil || workflow.Validator == nil {
+		t.Fatalf("workflow dependencies fetcher=%v validator=%v, want both wired", workflow.FetchSnapshot != nil, workflow.Validator != nil)
+	}
+}
+
+func TestWireEnrollmentWorkflowDependenciesPreservesLegacyNilPath(t *testing.T) {
+	workflow := httpserver.EnrollmentWorkflowHandlerOptions{}
+	wireEnrollmentWorkflowDependencies(&workflow, nil, nil)
+	if workflow.FetchSnapshot != nil || workflow.Validator != nil {
+		t.Fatalf("legacy workflow dependencies fetcher=%v validator=%v, want both nil", workflow.FetchSnapshot != nil, workflow.Validator != nil)
 	}
 }
 
