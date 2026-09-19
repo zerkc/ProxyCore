@@ -205,11 +205,14 @@ func runServerWithNodeConverter(ctx context.Context, cfg config.Config, logger *
 			workflow.VerifyToken = tokenAuthority.Verify
 		}
 		wireEnrollmentWorkflowDependencies(&workflow, snapshotClient, localKEKLoader)
+		snapshotByTokenKeyLoader := &snapshotByTokenClusterKeyLoader{pool: pool, store: cluster.NewStore(cfg.MasterKeyBase64), identity: identitySvc}
 		snapshotByTokenOptions := httpserver.EnrollmentSnapshotByTokenHandlerOptions{
-			Identity:    snapshotByTokenIdentitySource{service: identitySvc},
-			ParseToken:  httpserver.ParseHTTPEnrollmentToken,
-			VerifyToken: workflow.VerifyToken,
-			Now:         time.Now,
+			Store:            productionSnapshotByTokenStore(phase2Store),
+			Identity:         snapshotByTokenIdentitySource{service: identitySvc},
+			ParseToken:       httpserver.ParseHTTPEnrollmentToken,
+			VerifyToken:      workflow.VerifyToken,
+			ClusterKeyLoader: snapshotByTokenKeyLoader.Load,
+			Now:              time.Now,
 		}
 		var err error
 		publicationOptions := httpserver.EnrollmentSnapshotPublicationHandlerOptions{
@@ -570,6 +573,81 @@ func (s snapshotByTokenIdentitySource) Current() (current identity.Identity, loa
 		}
 	}()
 	return s.service.Current(), true
+}
+
+type snapshotByTokenStoreReader interface {
+	ReadSnapshotPublicationByToken(context.Context, string, configuration.SnapshotPublicationIdentityRecord) ([]byte, error)
+}
+
+type snapshotByTokenStoreAdapter struct {
+	store snapshotByTokenStoreReader
+}
+
+func (s snapshotByTokenStoreAdapter) ReadSnapshotPublicationByToken(ctx context.Context, selector string, current configuration.SnapshotPublicationIdentityRecord) ([]byte, error) {
+	if s.store == nil {
+		return nil, httpserver.ErrSnapshotByTokenUnavailable
+	}
+	body, err := s.store.ReadSnapshotPublicationByToken(ctx, selector, current)
+	switch {
+	case errors.Is(err, configuration.ErrNoPublishableSnapshot):
+		return nil, httpserver.ErrNoPublishableSnapshot
+	case errors.Is(err, configuration.ErrSnapshotByTokenUnauthenticated):
+		return nil, httpserver.ErrSnapshotByTokenUnauthenticated
+	case errors.Is(err, configuration.ErrSnapshotByTokenGone):
+		return nil, httpserver.ErrSnapshotByTokenGone
+	case errors.Is(err, configuration.ErrSnapshotByTokenDenied):
+		return nil, httpserver.ErrSnapshotByTokenDenied
+	case errors.Is(err, configuration.ErrSnapshotByTokenUnavailable):
+		return nil, httpserver.ErrSnapshotByTokenUnavailable
+	case err != nil:
+		return nil, httpserver.ErrSnapshotByTokenUnavailable
+	default:
+		return body, nil
+	}
+}
+
+func productionSnapshotByTokenStore(store *configuration.PgPhase2Store) httpserver.SnapshotByTokenStore {
+	if store == nil {
+		return nil
+	}
+	return snapshotByTokenStoreAdapter{store: store}
+}
+
+type snapshotByTokenClusterKeyLoader struct {
+	pool     *pgxpool.Pool
+	store    *cluster.Store
+	identity *identity.Service
+}
+
+func (l *snapshotByTokenClusterKeyLoader) Load(ctx context.Context) (httpserver.SnapshotByTokenKeyMaterial, error) {
+	if l == nil || ctx == nil || l.pool == nil || l.store == nil || l.identity == nil {
+		return nil, httpserver.ErrSnapshotByTokenUnavailable
+	}
+	current, loaded := (snapshotByTokenIdentitySource{service: l.identity}).Current()
+	if !loaded || current.ClusterKeyID == nil ||
+		(current.Role != domain.TopologyRolePrimary && current.Role != domain.TopologyRolePrimaryWithNodes) {
+		return nil, httpserver.ErrSnapshotByTokenUnavailable
+	}
+	tx, err := l.pool.Begin(ctx)
+	if err != nil {
+		return nil, httpserver.ErrSnapshotByTokenUnavailable
+	}
+	defer tx.Rollback(ctx)
+	material, err := l.store.LoadOrCreate(ctx, tx, current.ClusterKeyID)
+	keyBytes := material.CopyBytes()
+	keyUsable := len(keyBytes) > 0
+	for index := range keyBytes {
+		keyBytes[index] = 0
+	}
+	if err != nil || material.ID != *current.ClusterKeyID || !keyUsable {
+		material.Destroy()
+		return nil, httpserver.ErrSnapshotByTokenUnavailable
+	}
+	if err := tx.Commit(ctx); err != nil {
+		material.Destroy()
+		return nil, httpserver.ErrSnapshotByTokenUnavailable
+	}
+	return &material, nil
 }
 
 type enrollmentWorkflowTLSListenerFactory struct {

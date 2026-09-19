@@ -3,6 +3,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"errors"
 	"io"
@@ -280,11 +283,11 @@ func TestWireEnrollmentWorkflowDependenciesSelectsTokenTransport(t *testing.T) {
 	}
 	if observed[0].method != http.MethodPost || observed[0].path != "/api/topology/sync/snapshot-by-token" ||
 		string(observed[0].body) != `{"token":"`+token+`"}` || observed[0].auth != "" {
-		t.Fatalf("token request=%+v", observed[0])
+		t.Fatalf("token request method=%q path=%q authLen=%d bodyLen=%d bodyHash=%x", observed[0].method, observed[0].path, len(observed[0].auth), len(observed[0].body), sha256.Sum256(observed[0].body))
 	}
 	if observed[1].method != http.MethodGet || observed[1].path != "/api/topology/sync/snapshot" ||
 		observed[1].auth != "Bearer "+credential.BearerCopy() {
-		t.Fatalf("node request=%+v", observed[1])
+		t.Fatalf("node request method=%q path=%q authLen=%d", observed[1].method, observed[1].path, len(observed[1].auth))
 	}
 }
 
@@ -292,6 +295,103 @@ type snapshotRoundTripperMain func(*http.Request) (*http.Response, error)
 
 func (f snapshotRoundTripperMain) RoundTrip(request *http.Request) (*http.Response, error) {
 	return f(request)
+}
+
+type snapshotByTokenStoreReaderFunc func(context.Context, string, configuration.SnapshotPublicationIdentityRecord) ([]byte, error)
+
+func (f snapshotByTokenStoreReaderFunc) ReadSnapshotPublicationByToken(ctx context.Context, selector string, identity configuration.SnapshotPublicationIdentityRecord) ([]byte, error) {
+	return f(ctx, selector, identity)
+}
+
+type snapshotByTokenMainIdentity struct {
+	current identity.Identity
+}
+
+func (s snapshotByTokenMainIdentity) Current() (identity.Identity, bool) {
+	return s.current, true
+}
+
+type snapshotByTokenMainMaterial struct{}
+
+func (snapshotByTokenMainMaterial) CopyBytes() []byte { return []byte{1} }
+func (snapshotByTokenMainMaterial) Destroy()          {}
+
+func TestProductionSnapshotByTokenStoreIsNonNil(t *testing.T) {
+	store := productionSnapshotByTokenStore(&configuration.PgPhase2Store{})
+	if store == nil {
+		t.Fatal("production snapshot-by-token store is nil")
+	}
+}
+
+func TestProductionSnapshotByTokenStoreMapsConfigurationSentinels(t *testing.T) {
+	cases := []struct {
+		name string
+		from error
+		to   error
+	}{
+		{name: "unauthenticated", from: configuration.ErrSnapshotByTokenUnauthenticated, to: httpserver.ErrSnapshotByTokenUnauthenticated},
+		{name: "gone", from: configuration.ErrSnapshotByTokenGone, to: httpserver.ErrSnapshotByTokenGone},
+		{name: "denied", from: configuration.ErrSnapshotByTokenDenied, to: httpserver.ErrSnapshotByTokenDenied},
+		{name: "unavailable", from: configuration.ErrSnapshotByTokenUnavailable, to: httpserver.ErrSnapshotByTokenUnavailable},
+		{name: "not ready", from: configuration.ErrNoPublishableSnapshot, to: httpserver.ErrNoPublishableSnapshot},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			adapter := snapshotByTokenStoreAdapter{store: snapshotByTokenStoreReaderFunc(func(context.Context, string, configuration.SnapshotPublicationIdentityRecord) ([]byte, error) {
+				return nil, test.from
+			})}
+			_, err := adapter.ReadSnapshotPublicationByToken(context.Background(), "selector", configuration.SnapshotPublicationIdentityRecord{})
+			if !errors.Is(err, test.to) {
+				t.Fatalf("error=%v want %v", err, test.to)
+			}
+		})
+	}
+}
+
+func TestProductionSnapshotByTokenStorePassesExactBytes(t *testing.T) {
+	want := []byte(`{"published":"canonical"}`)
+	adapter := snapshotByTokenStoreAdapter{store: snapshotByTokenStoreReaderFunc(func(context.Context, string, configuration.SnapshotPublicationIdentityRecord) ([]byte, error) {
+		return append([]byte(nil), want...), nil
+	})}
+	got, err := adapter.ReadSnapshotPublicationByToken(context.Background(), "selector", configuration.SnapshotPublicationIdentityRecord{})
+	if err != nil || !bytes.Equal(got, want) {
+		t.Fatalf("body=%q err=%v want=%q", got, err, want)
+	}
+}
+
+func TestProductionSnapshotByTokenTransportReturnsExactBytes(t *testing.T) {
+	selector := strings.Repeat("a", 32)
+	token := "pcenr1_" + selector + "_" + base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x42}, 32))
+	want := []byte(`{"published":"canonical"}`)
+	adapter := snapshotByTokenStoreAdapter{store: snapshotByTokenStoreReaderFunc(func(_ context.Context, gotSelector string, _ configuration.SnapshotPublicationIdentityRecord) ([]byte, error) {
+		if gotSelector != selector {
+			t.Fatalf("selector=%q want %q", gotSelector, selector)
+		}
+		return append([]byte(nil), want...), nil
+	})}
+	current := identity.Identity{
+		InstallationID: domain.NewInstallationID(), NodeID: domain.NewNodeID(), Role: domain.TopologyRolePrimary,
+		LeadershipGeneration: 1, LatestKnownGeneration: 1, ClusterKeyID: func() *uuid.UUID { id := uuid.New(); return &id }(),
+	}
+	handler := httpserver.NewEnrollmentSnapshotByTokenHandler(httpserver.EnrollmentSnapshotByTokenHandlerOptions{
+		Store: adapter, Identity: snapshotByTokenMainIdentity{current: current},
+		Certificate: func(context.Context) (*x509.Certificate, error) {
+			return &x509.Certificate{DNSNames: []string{"primary.example"}}, nil
+		},
+		ParseToken:  httpserver.ParseHTTPEnrollmentToken,
+		VerifyToken: func(context.Context, string) error { return nil },
+		ClusterKeyLoader: func(context.Context) (httpserver.SnapshotByTokenKeyMaterial, error) {
+			return snapshotByTokenMainMaterial{}, nil
+		},
+	})
+	request := httptest.NewRequest(http.MethodPost, httpserver.EnrollmentSnapshotByTokenPath, bytes.NewBufferString(`{"token":"`+token+`"}`))
+	request.Host = "primary.example:3443"
+	request.TLS = &tls.ConnectionState{Version: tls.VersionTLS13, HandshakeComplete: true, ServerName: "primary.example"}
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !bytes.Equal(response.Body.Bytes(), want) {
+		t.Fatalf("status=%d body=%q want status=%d body=%q", response.Code, response.Body.Bytes(), http.StatusOK, want)
+	}
 }
 
 func TestEnrollmentWorkflowTLSListenerFactoryMountsSnapshotByTokenRoute(t *testing.T) {
