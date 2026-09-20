@@ -162,7 +162,7 @@ func TestValidateRejectsEscapingDBTablePath(t *testing.T) {
 func validEncryptionMetadata() *Encryption {
 	return &Encryption{
 		Cipher:          CipherAES256GCM,
-		Kdf:             "pbkdf2-sha256",
+		Kdf:             KDFPBKDF2HMACSHA256,
 		Params:          Params{N: 1, R: 1, P: 1},
 		Salt:            base64.RawURLEncoding.EncodeToString([]byte("0123456789abcdef")),
 		VerificationTag: base64.RawURLEncoding.EncodeToString([]byte("fedcba9876543210")),
@@ -183,6 +183,20 @@ func TestValidateAcceptsOptionalEncryptionMetadata(t *testing.T) {
 			t.Fatalf("Validate(valid encryption): %v", err)
 		}
 	})
+}
+
+func TestValidateRejectsLegacyEncryptionKdf(t *testing.T) {
+	manifest := testManifest()
+	manifest.Encryption = validEncryptionMetadata()
+	manifest.Encryption.Kdf = "pbkdf2-sha256"
+
+	err := Validate(manifest)
+	if err == nil {
+		t.Fatal("Validate accepted the legacy encryption KDF label")
+	}
+	if !strings.Contains(err.Error(), KDFPBKDF2HMACSHA256) {
+		t.Fatalf("error = %q, want accepted KDF label %q", err, KDFPBKDF2HMACSHA256)
+	}
 }
 
 func TestValidateReportsEachInvalidEncryptionFieldOnce(t *testing.T) {

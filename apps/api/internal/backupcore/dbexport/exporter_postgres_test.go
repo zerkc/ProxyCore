@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/netip"
-	"os"
 	"reflect"
 	"testing"
 	"time"
@@ -19,13 +18,13 @@ import (
 
 func openExporterTestPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	url := os.Getenv("PGX_TEST_DATABASE_URL")
-	if url == "" {
-		t.Skip("PGX_TEST_DATABASE_URL is not set")
+	url, ok := testDatabaseURL()
+	if !ok {
+		t.Skip("no test database URL is set")
 	}
 	config, err := pgxpool.ParseConfig(url)
 	if err != nil {
-		t.Fatalf("parse PGX_TEST_DATABASE_URL: %v", err)
+		t.Fatalf("parse test database URL: %v", err)
 	}
 	config.MaxConns = 4
 	pool, err := pgxpool.NewWithConfig(context.Background(), config)

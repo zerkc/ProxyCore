@@ -92,8 +92,8 @@ func validateEncryption(encryption *Encryption) error {
 	if encryption.Cipher != CipherAES256GCM {
 		return fmt.Errorf("encryption.cipher: must be %q", CipherAES256GCM)
 	}
-	if encryption.Kdf != "pbkdf2-sha256" {
-		return fmt.Errorf("encryption.kdf: must be %q", "pbkdf2-sha256")
+	if encryption.Kdf != KDFPBKDF2HMACSHA256 {
+		return fmt.Errorf("encryption.kdf: must be %q", KDFPBKDF2HMACSHA256)
 	}
 	if encryption.Params.N <= 0 {
 		return fmt.Errorf("encryption.params.n: must be positive")

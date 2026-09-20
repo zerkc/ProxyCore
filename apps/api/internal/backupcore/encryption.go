@@ -5,6 +5,10 @@ import "encoding/json"
 // CipherAES256GCM is the only cipher used for an encrypted backup bundle.
 const CipherAES256GCM = "aes-256-gcm"
 
+// KDFPBKDF2HMACSHA256 is the only key-derivation function accepted for an
+// encrypted backup bundle.
+const KDFPBKDF2HMACSHA256 = "pbkdf2-hmac-sha256"
+
 // Params contains the integer work parameters recorded for the key derivation
 // function. The exact KDF policy is selected by the caller and identified by
 // Encryption.Kdf.
@@ -31,6 +35,9 @@ type Encryption struct {
 // NewEncryption constructs encryption metadata and pins the cipher to the
 // bundle format's AES-256-GCM value.
 func NewEncryption(kdf string, params Params, salt, verificationTag string) *Encryption {
+	if kdf == "" {
+		kdf = KDFPBKDF2HMACSHA256
+	}
 	return &Encryption{
 		Kdf:             kdf,
 		Params:          params,
