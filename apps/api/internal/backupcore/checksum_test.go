@@ -61,3 +61,33 @@ func TestComputeEntryChecksumsReturnsOpenError(t *testing.T) {
 		t.Fatalf("error = %v, want wrapped %v", err, wantErr)
 	}
 }
+
+type closeTrackingReader struct {
+	io.Reader
+	closed *bool
+}
+
+func (r *closeTrackingReader) Close() error {
+	*r.closed = true
+	return nil
+}
+
+func TestComputeEntryChecksumsClosesReaderWhenOpenReturnsReaderAndError(t *testing.T) {
+	wantErr := errors.New("open failed after allocating reader")
+	closed := false
+	_, err := ComputeEntryChecksums([]NamedFile{{
+		Path: "db/users.json",
+		Open: func() (io.ReadCloser, error) {
+			return &closeTrackingReader{Reader: strings.NewReader("unused"), closed: &closed}, wantErr
+		},
+	}})
+	if err == nil {
+		t.Fatal("ComputeEntryChecksums accepted an opener error")
+	}
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("error = %v, want wrapped %v", err, wantErr)
+	}
+	if !closed {
+		t.Fatal("ComputeEntryChecksums did not close the reader returned with an opener error")
+	}
+}

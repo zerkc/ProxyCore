@@ -29,6 +29,11 @@ func ComputeEntryChecksums(files []NamedFile) (map[string]string, error) {
 		}
 		reader, err := file.Open()
 		if err != nil {
+			// Open may return both a partially allocated reader and an error;
+			// release that reader before propagating the opener error.
+			if reader != nil {
+				_ = reader.Close()
+			}
 			return nil, fmt.Errorf("open %q: %w", file.Path, err)
 		}
 		if reader == nil {

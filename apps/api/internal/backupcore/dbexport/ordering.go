@@ -267,7 +267,6 @@ func topologicalOrder(tables []string, edges []tableEdge) ([]string, error) {
 				ready = append(ready, child)
 			}
 		}
-		sort.Strings(ready)
 	}
 	if len(result) == len(tables) {
 		return result, nil

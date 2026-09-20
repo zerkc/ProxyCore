@@ -1,6 +1,7 @@
 package backupcore
 
 import (
+	"encoding/base64"
 	"encoding/hex"
 	"fmt"
 	"path"
@@ -52,6 +53,16 @@ func Validate(m Manifest) error {
 	if m.DBTables == nil {
 		return fmt.Errorf("missing required manifest key %q", "dbTables")
 	}
+	if m.Encryption != nil {
+		if err := validateEncryption(m.Encryption); err != nil {
+			return err
+		}
+	}
+	for _, tablePath := range m.DBTables {
+		if escapesBundleRoot(tablePath) {
+			return fmt.Errorf("db table path escapes bundle root: %q", tablePath)
+		}
+	}
 	if len(m.duplicateChecksumPaths) > 0 {
 		return fmt.Errorf("duplicate entry checksum path %q", m.duplicateChecksumPaths[0])
 	}
@@ -74,12 +85,66 @@ func Validate(m Manifest) error {
 	return nil
 }
 
+func validateEncryption(encryption *Encryption) error {
+	if encryption == nil {
+		return nil
+	}
+	if encryption.Cipher != CipherAES256GCM {
+		return fmt.Errorf("encryption.cipher: must be %q", CipherAES256GCM)
+	}
+	if encryption.Kdf != "pbkdf2-sha256" {
+		return fmt.Errorf("encryption.kdf: must be %q", "pbkdf2-sha256")
+	}
+	if encryption.Params.N <= 0 {
+		return fmt.Errorf("encryption.params.n: must be positive")
+	}
+	if encryption.Params.R <= 0 {
+		return fmt.Errorf("encryption.params.r: must be positive")
+	}
+	if encryption.Params.P <= 0 {
+		return fmt.Errorf("encryption.params.p: must be positive")
+	}
+	if salt, err := decodeBase64URL(encryption.Salt); err != nil {
+		return fmt.Errorf("encryption.salt: must be base64url-decodable: %w", err)
+	} else if len(salt) != 16 {
+		return fmt.Errorf("encryption.salt: must decode to 16 bytes")
+	}
+	if tag, err := decodeBase64URL(encryption.VerificationTag); err != nil {
+		return fmt.Errorf("encryption.verificationTag: must be base64url-decodable: %w", err)
+	} else if len(tag) != 16 {
+		return fmt.Errorf("encryption.verificationTag: must decode to 16 bytes")
+	}
+	return nil
+}
+
+func decodeBase64URL(value string) ([]byte, error) {
+	decoded, err := base64.RawURLEncoding.DecodeString(value)
+	if err == nil {
+		return decoded, nil
+	}
+	return base64.URLEncoding.DecodeString(value)
+}
+
 func escapesBundleRoot(value string) bool {
-	if value == "" || path.IsAbs(value) || strings.Contains(value, `\`) {
+	if value == "" || path.IsAbs(value) || strings.Contains(value, `\`) || containsWindowsDriveRoot(value) {
 		return true
 	}
 	for _, segment := range strings.Split(value, "/") {
 		if segment == ".." {
+			return true
+		}
+	}
+	return false
+}
+
+func containsWindowsDriveRoot(value string) bool {
+	for index := 0; index+2 < len(value); index++ {
+		if index > 0 && value[index-1] != '/' {
+			continue
+		}
+		letter := value[index]
+		if ((letter >= 'a' && letter <= 'z') || (letter >= 'A' && letter <= 'Z')) &&
+			value[index+1] == ':' && (value[index+2] == '/' || value[index+2] == '\\') {
 			return true
 		}
 	}

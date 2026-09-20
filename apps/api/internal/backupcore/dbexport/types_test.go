@@ -79,7 +79,7 @@ func TestCoerceRegisteredCodecFallsBackToString(t *testing.T) {
 	}
 }
 
-func TestCoerceBigintUsesFloat64JSONSafeNumber(t *testing.T) {
+func TestCoerceBigintUsesJSONSafeNumberOrDecimalString(t *testing.T) {
 	const exact = int64(1<<53 - 1)
 	got, err := coerceValueForOID(pgtype.Int8OID, exact, nil)
 	if err != nil {
@@ -89,13 +89,12 @@ func TestCoerceBigintUsesFloat64JSONSafeNumber(t *testing.T) {
 		t.Fatalf("exact bigint = %#v, want %#v", got, float64(exact))
 	}
 
-	// 2^53+1 cannot be represented by float64 and therefore rounds to 2^53.
-	const rounded = int64(1<<53 + 1)
-	got, err = coerceValueForOID(pgtype.Int8OID, rounded, nil)
+	const large = int64(1<<53 + 1)
+	got, err = coerceValueForOID(pgtype.Int8OID, large, nil)
 	if err != nil {
-		t.Fatalf("coerceValueForOID rounded bigint: %v", err)
+		t.Fatalf("coerceValueForOID large bigint: %v", err)
 	}
-	if got != float64(1<<53) {
-		t.Fatalf("rounded bigint = %#v, want %#v", got, float64(1<<53))
+	if got != "9007199254740993" {
+		t.Fatalf("large bigint = %#v, want decimal string %q", got, "9007199254740993")
 	}
 }

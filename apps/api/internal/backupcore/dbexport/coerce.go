@@ -380,19 +380,31 @@ func coerceBool(value any) (any, error) {
 	}
 }
 
+// BigintAboveFloat64Safe returns a JSON-safe number through 2^53 and a
+// decimal string above that boundary. This keeps exported JSON values as
+// lossless JSON Numbers within the IEEE-754 integer-safe range and as decimal
+// digit strings for larger PostgreSQL integers.
+func BigintAboveFloat64Safe(value int64) any {
+	const maxJSONSafeInteger = int64(1 << 53)
+	if value >= -maxJSONSafeInteger && value <= maxJSONSafeInteger {
+		return float64(value)
+	}
+	return strconv.FormatInt(value, 10)
+}
+
 func coerceNumber(value any) (any, error) {
 	var number float64
 	switch value := value.(type) {
 	case int:
-		number = float64(value)
+		return BigintAboveFloat64Safe(int64(value)), nil
 	case int8:
-		number = float64(value)
+		return BigintAboveFloat64Safe(int64(value)), nil
 	case int16:
-		number = float64(value)
+		return BigintAboveFloat64Safe(int64(value)), nil
 	case int32:
-		number = float64(value)
+		return BigintAboveFloat64Safe(int64(value)), nil
 	case int64:
-		number = float64(value)
+		return BigintAboveFloat64Safe(value), nil
 	case uint:
 		number = float64(value)
 	case uint8:
@@ -429,17 +441,17 @@ func coerceNumber(value any) (any, error) {
 		if !value.Valid {
 			return nil, nil
 		}
-		number = float64(value.Int16)
+		return BigintAboveFloat64Safe(int64(value.Int16)), nil
 	case pgtype.Int4:
 		if !value.Valid {
 			return nil, nil
 		}
-		number = float64(value.Int32)
+		return BigintAboveFloat64Safe(int64(value.Int32)), nil
 	case pgtype.Int8:
 		if !value.Valid {
 			return nil, nil
 		}
-		number = float64(value.Int64)
+		return BigintAboveFloat64Safe(value.Int64), nil
 	case pgtype.Float4:
 		if !value.Valid {
 			return nil, nil
@@ -468,7 +480,5 @@ func coerceNumber(value any) (any, error) {
 	if math.IsNaN(number) || math.IsInf(number, 0) {
 		return strconv.FormatFloat(number, 'g', -1, 64), nil
 	}
-	// PostgreSQL integer values are intentionally represented as float64 here:
-	// JSON has no integer type, and integers below 2^53 remain lossless.
 	return number, nil
 }

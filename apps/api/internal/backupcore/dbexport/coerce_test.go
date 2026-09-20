@@ -130,7 +130,13 @@ func TestCoerceRowsJSONRoundTrip(t *testing.T) {
 
 func TestCoerceRowsBigintBoundaries(t *testing.T) {
 	fields := []pgconn.FieldDescription{{Name: "value", DataTypeOID: pgtype.Int8OID}}
-	rows := newFakeRows(fields, []any{int64(1<<53 - 1)}, []any{int64(1<<53 + 1)})
+	rows := newFakeRows(
+		fields,
+		[]any{int64(1<<53 - 1)},
+		[]any{int64(1 << 53)},
+		[]any{int64(1<<53 + 1)},
+		[]any{int64(-(1<<53 + 1))},
+	)
 	got, err := coerceRows(rows)
 	if err != nil {
 		t.Fatalf("coerceRows: %v", err)
@@ -138,9 +144,14 @@ func TestCoerceRowsBigintBoundaries(t *testing.T) {
 	if got[0]["value"] != float64(1<<53-1) {
 		t.Fatalf("exact bigint = %#v, want %#v", got[0]["value"], float64(1<<53-1))
 	}
-	// Values above the IEEE-754 integer-safe range round to the nearest float64.
 	if got[1]["value"] != float64(1<<53) {
-		t.Fatalf("rounded bigint = %#v, want %#v", got[1]["value"], float64(1<<53))
+		t.Fatalf("upper safe bigint = %#v, want %#v", got[1]["value"], float64(1<<53))
+	}
+	if got[2]["value"] != "9007199254740993" {
+		t.Fatalf("large positive bigint = %#v, want decimal string %q", got[2]["value"], "9007199254740993")
+	}
+	if got[3]["value"] != "-9007199254740993" {
+		t.Fatalf("large negative bigint = %#v, want decimal string %q", got[3]["value"], "-9007199254740993")
 	}
 }
 
@@ -167,5 +178,29 @@ func TestCoerceNumericValueFromPgtype(t *testing.T) {
 	}
 	if got != float64(123.456) {
 		t.Fatalf("numeric = %#v, want %#v", got, float64(123.456))
+	}
+}
+
+func TestCoerceValueConvertsCharacterTypesToStrings(t *testing.T) {
+	tests := []struct {
+		name string
+		oid  uint32
+		in   any
+	}{
+		{name: "varchar", oid: pgtype.VarcharOID, in: "varchar value"},
+		{name: "bpchar", oid: pgtype.BPCharOID, in: "bpchar value"},
+		{name: "qchar", oid: pgtype.QCharOID, in: "qchar value"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := coerceValueForOID(tt.oid, tt.in, nil)
+			if err != nil {
+				t.Fatalf("coerceValueForOID: %v", err)
+			}
+			if got != tt.in {
+				t.Fatalf("value = %#v (%T), want %#v (%T)", got, got, tt.in, tt.in)
+			}
+		})
 	}
 }
