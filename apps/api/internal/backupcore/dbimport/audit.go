@@ -49,6 +49,7 @@ func (e *PostgresAuditEmitter) EmitBackupImport(ctx context.Context, actorID str
 	if e.Now != nil {
 		now = e.Now
 	}
+	createdAt := now().UTC().Truncate(time.Microsecond)
 	_, err = e.Pool.Exec(ctx, `
 		insert into audit_events (
 			id, actor_user_id, action, resource_type, resource_id,
@@ -57,7 +58,7 @@ func (e *PostgresAuditEmitter) EmitBackupImport(ctx context.Context, actorID str
 			$1, $2, $3, $4, $5,
 			null, $6::jsonb, $7, $8, $9
 		)
-	`, uuid.NewString(), nilOrUUID(actorID), action, "backup", nilOrUUID(""), string(serialized), "", result, now().UTC())
+	`, uuid.NewString(), nilOrUUID(actorID), action, "backup", nilOrUUID(""), string(serialized), "", result, createdAt)
 	return err
 }
 

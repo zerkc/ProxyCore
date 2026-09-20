@@ -206,11 +206,12 @@ func TestImportPostgresConcurrentUsesAdvisoryLock(t *testing.T) {
 	if _, err := lockTx.Exec(ctx, `select pg_advisory_xact_lock(hashtextextended('backup.import', 0))`); err != nil {
 		t.Fatalf("hold import lock: %v", err)
 	}
-	engine, err := New(Options{Pool: pool, MasterKeyBase64: testMasterKey(0x61), EnvRestorePath: t.TempDir() + "/env", CandidateRoot: t.TempDir(), EnvMode: "0600"})
+	masterKey := testMasterKey(0x61)
+	engine, err := New(Options{Pool: pool, MasterKeyBase64: masterKey, EnvRestorePath: t.TempDir() + "/env", CandidateRoot: t.TempDir(), EnvMode: "0600"})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	if _, err := engine.Import(ctx, newImportArchive(t, nil), nil, false); !errors.Is(err, ErrImportAlreadyInProgress) {
+	if _, err := engine.Import(ctx, newImportArchiveWithSecrets(t, masterKey), nil, false); !errors.Is(err, ErrImportAlreadyInProgress) {
 		t.Fatalf("Import(held lock) = %v, want ErrImportAlreadyInProgress", err)
 	}
 }

@@ -3,10 +3,14 @@ package dbimport
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/zerkc/ProxyCore/apps/api/internal/httpserver"
+	"github.com/zerkc/ProxyCore/apps/api/internal/secrets"
 )
 
 func TestPostgresAuditEmitterWritesBackupImport(t *testing.T) {
@@ -65,8 +69,9 @@ func TestPostgresAuditEmitterWritesBackupImport(t *testing.T) {
 	if resourceID != nil || beforeValue != nil || correlationID != "" || result != "success" {
 		t.Fatalf("event metadata = resource=%v before=%q correlation=%q result=%q", resourceID, beforeValue, correlationID, result)
 	}
-	if !createdAt.Equal(fixedNow.UTC()) {
-		t.Fatalf("created_at = %s, want %s", createdAt, fixedNow.UTC())
+	wantCreatedAt := fixedNow.UTC().Truncate(time.Microsecond)
+	if !createdAt.Equal(wantCreatedAt) {
+		t.Fatalf("created_at = %s, want %s", createdAt, wantCreatedAt)
 	}
 
 	var after map[string]any
@@ -75,6 +80,58 @@ func TestPostgresAuditEmitterWritesBackupImport(t *testing.T) {
 	}
 	if len(after) != 3 || after["bundleSha256Prefix"] != "0123456789abcdef" || after["dryRun"] != false || after["success"] != true {
 		t.Fatalf("after_value = %#v, want only bundle prefix, dryRun, and success", after)
+	}
+}
+
+func TestImportPostgresMasterKeyMismatchEmitsFailureAudit(t *testing.T) {
+	pool := openImportTestPool(t)
+	ctx := context.Background()
+	actorID := uuid.NewString()
+	if _, err := pool.Exec(ctx, `
+		insert into users (id, username, password_hash, role, active, password_change_required)
+		values ($1, $2, $3, 'owner', true, false)
+	`, actorID, "audit-master-key-"+actorID, "fixture-hash"); err != nil {
+		t.Fatalf("insert audit actor: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `delete from audit_events where actor_user_id = $1`, actorID)
+		_, _ = pool.Exec(context.Background(), `delete from users where id = $1`, actorID)
+	})
+
+	correctKey := testMasterKey(0x31)
+	ciphertext, err := secrets.EncryptSecret("fixture", correctKey)
+	if err != nil {
+		t.Fatalf("EncryptSecret: %v", err)
+	}
+	archive := newImportArchive(t, map[string][]byte{
+		"db/secrets.json": []byte(`[{"ciphertext":"` + ciphertext + `"}]`),
+	})
+	engine, err := New(Options{
+		Pool:            pool,
+		MasterKeyBase64: testMasterKey(0x32),
+		EnvRestorePath:  t.TempDir() + "/env",
+		CandidateRoot:   t.TempDir(),
+		Audit:           &PostgresAuditEmitter{Pool: pool},
+		EnvMode:         "0600",
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := engine.Import(WithActorID(ctx, actorID), archive, nil, false); !errors.Is(err, httpserver.ErrMasterKeyMismatch) {
+		t.Fatalf("Import(wrong master key) = %v, want ErrMasterKeyMismatch", err)
+	}
+
+	var count int
+	var result string
+	if err := pool.QueryRow(ctx, `
+		select count(*), coalesce(max(result), '')
+		from audit_events
+		where actor_user_id = $1 and action = 'backup.import'
+	`, actorID).Scan(&count, &result); err != nil {
+		t.Fatalf("query failed import audit: %v", err)
+	}
+	if count != 1 || result != "failure" {
+		t.Fatalf("failed import audit = count %d result %q, want one failure", count, result)
 	}
 }
 

@@ -11,6 +11,7 @@ func TestSentinelErrorsRoundTripThroughWrapping(t *testing.T) {
 		ErrChecksumMismatch,
 		ErrImportAlreadyInProgress,
 		ErrInvalidEnvMode,
+		ErrNoSecretsInBundle,
 	} {
 		t.Run(sentinel.Error(), func(t *testing.T) {
 			wrapped := fmt.Errorf("import failed: %w", sentinel)

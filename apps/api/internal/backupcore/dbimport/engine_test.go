@@ -69,17 +69,19 @@ func TestImportDryRunDoesNotWriteFilesOrApply(t *testing.T) {
 	candidateRoot := t.TempDir()
 	apply := &recordingApply{}
 	audit := &recordingAudit{}
+	masterKey := encodeMasterKeyForTest(t, bytes.Repeat([]byte{0x42}, 32))
 	engine, err := New(Options{
-		EnvRestorePath: envPath,
-		CandidateRoot:  candidateRoot,
-		Apply:          apply,
-		Audit:          audit,
-		EnvMode:        "0644",
+		MasterKeyBase64: masterKey,
+		EnvRestorePath:  envPath,
+		CandidateRoot:   candidateRoot,
+		Apply:           apply,
+		Audit:           audit,
+		EnvMode:         "0644",
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	report, err := engine.Import(context.Background(), newImportArchive(t, nil), nil, true)
+	report, err := engine.Import(context.Background(), newImportArchiveWithSecrets(t, masterKey), nil, true)
 	if err != nil {
 		t.Fatalf("Import(dry-run): %v", err)
 	}
@@ -109,6 +111,17 @@ func TestImportRejectsMissingManifestAsCorruptArchive(t *testing.T) {
 	if !errors.Is(err, zipextract.ErrCorruptArchive) {
 		t.Fatalf("Import(missing manifest) = %v, want ErrCorruptArchive", err)
 	}
+}
+
+func newImportArchiveWithSecrets(t *testing.T, masterKey string) *testArchive {
+	t.Helper()
+	ciphertext, err := secrets.EncryptSecret("dry-run-secret", masterKey)
+	if err != nil {
+		t.Fatalf("EncryptSecret: %v", err)
+	}
+	return newImportArchive(t, map[string][]byte{
+		"db/secrets.json": []byte(`[{"ciphertext":"` + ciphertext + `"}]`),
+	})
 }
 
 func encodeMasterKeyForTest(t *testing.T, key []byte) string {

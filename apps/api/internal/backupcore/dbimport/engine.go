@@ -32,6 +32,7 @@ type Options struct {
 	Now             func() time.Time
 	Apply           ApplyTrigger
 	Audit           AuditEmitter
+	AuditActorID    string
 	EnvMode         string
 }
 
@@ -44,6 +45,7 @@ type Engine struct {
 	now             func() time.Time
 	apply           ApplyTrigger
 	audit           AuditEmitter
+	auditActorID    string
 	envMode         os.FileMode
 }
 
@@ -88,6 +90,7 @@ func New(opts Options) (*Engine, error) {
 		now:             now,
 		apply:           opts.Apply,
 		audit:           opts.Audit,
+		auditActorID:    opts.AuditActorID,
 		envMode:         envMode,
 	}, nil
 }
@@ -104,6 +107,21 @@ func (e *Engine) Import(ctx context.Context, archive zipextract.Archive, passphr
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	var audit AuditEmitter
+	actorID := ""
+	if e != nil {
+		audit = e.audit
+		actorID = e.auditActorID
+		if actorID == "" {
+			actorID = actorIDFromContext(ctx)
+		}
+	}
+	bundleSHA256 := ""
+	success := false
+	defer func() {
+		finalizeAudit(audit, actorID, bundleSHA256, dryRun, success)
+	}()
+
 	if e == nil || archive == nil {
 		return report, zipextract.ErrCorruptArchive
 	}
@@ -135,6 +153,7 @@ func (e *Engine) Import(ctx context.Context, archive zipextract.Archive, passphr
 		CertsToRestore:    certificatePaths(indexed, manifest.Certs),
 		AppliedPostImport: false,
 	}
+	bundleSHA256 = report.BundleSHA256
 
 	if err := verifyArchiveChecksums(ctx, indexed, manifest); err != nil {
 		return report, err
@@ -149,9 +168,7 @@ func (e *Engine) Import(ctx context.Context, archive zipextract.Archive, passphr
 	previews := previewTables(payloads)
 	if dryRun {
 		report.Tables = previews
-		if err := e.emitAudit(ctx, actorIDFromContext(ctx), report.BundleSHA256, true, true); err != nil {
-			return report, err
-		}
+		success = true
 		return report, nil
 	}
 	if e.pool == nil {
@@ -182,20 +199,15 @@ func (e *Engine) Import(ctx context.Context, archive zipextract.Archive, passphr
 	report.Tables = previews
 
 	if err := restoreFiles(ctx, indexed, manifest, e.envRestorePath, e.candidateRoot, e.revisionID, e.envMode); err != nil {
-		_ = e.emitAudit(ctx, actorIDFromContext(ctx), report.BundleSHA256, false, false)
 		return report, err
 	}
-	actorID := actorIDFromContext(ctx)
 	if e.apply != nil {
 		if err := e.apply.Trigger(ctx, actorID); err != nil {
-			_ = e.emitAudit(ctx, actorID, report.BundleSHA256, false, false)
 			return report, err
 		}
 		report.AppliedPostImport = true
 	}
-	if err := e.emitAudit(ctx, actorID, report.BundleSHA256, false, true); err != nil {
-		return report, err
-	}
+	success = true
 	return report, nil
 }
 
@@ -221,11 +233,10 @@ func previewTables(payloads []tablePayload) []TablePreview {
 	return previews
 }
 
-func (e *Engine) emitAudit(ctx context.Context, actorID, bundleSHA256 string, dryRun, success bool) error {
-	if e.audit == nil {
-		return nil
+func finalizeAudit(audit AuditEmitter, actor string, sha string, dryRun, success bool) {
+	if audit != nil {
+		_ = audit.EmitBackupImport(context.Background(), actor, sha, dryRun, success)
 	}
-	return e.audit.EmitBackupImport(ctx, actorID, bundleSHA256, dryRun, success)
 }
 
 func actorIDFromContext(ctx context.Context) string {
