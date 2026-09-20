@@ -79,7 +79,8 @@ func (s *Server) handleBackupExport(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/zip")
-	w.Header().Set("Content-Disposition", `attachment; filename="proxycore-backup-`+time.Now().UTC().Format(time.RFC3339)+`.zip"`)
+	// Use a colon-free timestamp so the generated backup filename is safe on Windows.
+	w.Header().Set("Content-Disposition", `attachment; filename="proxycore-backup-`+time.Now().UTC().Format("2006-01-02T15-04-05Z")+`.zip"`)
 	w.Header().Add("Trailer", "Audit-Version")
 	tracked := &backupResponseWriter{ResponseWriter: w}
 	manifestSHA256Hex, exportErr := s.backupExporter.Export(r.Context(), tracked, passphrase)

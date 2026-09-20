@@ -11,6 +11,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -150,7 +151,10 @@ func TestBackupExportHappyPath(t *testing.T) {
 		t.Fatalf("content type=%q", got)
 	}
 	contentDisposition := result.Header.Get("Content-Disposition")
-	if !strings.HasPrefix(contentDisposition, `attachment; filename="proxycore-backup-`) || !strings.HasSuffix(contentDisposition, `.zip"`) {
+	if strings.Contains(contentDisposition, ":") {
+		t.Fatalf("content disposition contains colon: %q", contentDisposition)
+	}
+	if !regexp.MustCompile(`^attachment; filename="proxycore-backup-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}Z\.zip"$`).MatchString(contentDisposition) {
 		t.Fatalf("content disposition=%q", contentDisposition)
 	}
 	if got := result.Trailer.Get("Audit-Version"); got != strings.ToLower(manifestSHA) {
