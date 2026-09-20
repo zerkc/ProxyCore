@@ -255,23 +255,7 @@ func TestImportPostgresApplyFailureIsReportedAfterCommit(t *testing.T) {
 
 func openImportTestPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	url := os.Getenv("PGX_TEST_DATABASE_URL")
-	if url == "" {
-		url = os.Getenv("DATABASE_URL")
-	}
-	if url == "" {
-		t.Skip("no test database URL is set")
-	}
-	config, err := pgxpool.ParseConfig(url)
-	if err != nil {
-		t.Fatalf("parse database URL: %v", err)
-	}
-	config.MaxConns = 8
-	pool, err := pgxpool.NewWithConfig(context.Background(), config)
-	if err != nil {
-		t.Fatalf("create pool: %v", err)
-	}
-	t.Cleanup(pool.Close)
+	pool := dbexport.NewTestPoolFromEnv(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	if err := pool.Ping(ctx); err != nil {
