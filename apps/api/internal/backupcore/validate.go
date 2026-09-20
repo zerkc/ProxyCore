@@ -4,8 +4,6 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
-	"path"
-	"strings"
 	"time"
 )
 
@@ -59,7 +57,7 @@ func Validate(m Manifest) error {
 		}
 	}
 	for _, tablePath := range m.DBTables {
-		if escapesBundleRoot(tablePath) {
+		if EscapesBundleRoot(tablePath) {
 			return fmt.Errorf("db table path escapes bundle root: %q", tablePath)
 		}
 	}
@@ -67,7 +65,7 @@ func Validate(m Manifest) error {
 		return fmt.Errorf("duplicate entry checksum path %q", m.duplicateChecksumPaths[0])
 	}
 	for entryPath, checksum := range m.EntryChecksums {
-		if escapesBundleRoot(entryPath) {
+		if EscapesBundleRoot(entryPath) {
 			return fmt.Errorf("entry checksum path escapes bundle root: %q", entryPath)
 		}
 		if len(checksum) != 64 {
@@ -78,7 +76,7 @@ func Validate(m Manifest) error {
 		}
 	}
 	for _, certPath := range m.Certs {
-		if escapesBundleRoot(certPath) {
+		if EscapesBundleRoot(certPath) {
 			return fmt.Errorf("certificate path escapes bundle root: %q", certPath)
 		}
 	}
@@ -123,30 +121,4 @@ func decodeBase64URL(value string) ([]byte, error) {
 		return decoded, nil
 	}
 	return base64.URLEncoding.DecodeString(value)
-}
-
-func escapesBundleRoot(value string) bool {
-	if value == "" || path.IsAbs(value) || strings.Contains(value, `\`) || containsWindowsDriveRoot(value) {
-		return true
-	}
-	for _, segment := range strings.Split(value, "/") {
-		if segment == ".." {
-			return true
-		}
-	}
-	return false
-}
-
-func containsWindowsDriveRoot(value string) bool {
-	for index := 0; index+2 < len(value); index++ {
-		if index > 0 && value[index-1] != '/' {
-			continue
-		}
-		letter := value[index]
-		if ((letter >= 'a' && letter <= 'z') || (letter >= 'A' && letter <= 'Z')) &&
-			value[index+1] == ':' && (value[index+2] == '/' || value[index+2] == '\\') {
-			return true
-		}
-	}
-	return false
 }
