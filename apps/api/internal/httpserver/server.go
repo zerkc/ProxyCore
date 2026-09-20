@@ -32,6 +32,8 @@ type Server struct {
 	updaterClient    UpdaterClient
 	identitySvc      *identity.Service
 	enrollmentTokens EnrollmentTokenAuthority
+	backupExporter   BackupExporter
+	backupImporter   BackupImporter
 }
 
 type Option func(*Server)
@@ -78,6 +80,13 @@ func WithIdentityService(svc *identity.Service) Option {
 func WithEnrollmentTokenAuthority(authority EnrollmentTokenAuthority) Option {
 	return func(s *Server) {
 		s.enrollmentTokens = authority
+	}
+}
+
+func WithBackup(exporter BackupExporter, importer BackupImporter) Option {
+	return func(s *Server) {
+		s.backupExporter = exporter
+		s.backupImporter = importer
 	}
 }
 
@@ -184,6 +193,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("DELETE /api/certificates/{certificateId}", s.handleDeleteCertificate)
 	s.mux.HandleFunc("POST /api/certificates", s.handleIssueCertificate)
 	s.mux.HandleFunc("GET /api/acme-challenge/{token}", s.handleAcmeChallenge)
+	s.mux.HandleFunc("POST /api/backup/export", s.handleBackupExport)
+	s.mux.HandleFunc("POST /api/backup/import", s.handleBackupImport)
 
 	s.mux.Handle("/", s.spaHandler())
 }
