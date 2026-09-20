@@ -2,6 +2,7 @@ package dbexport
 
 import (
 	"context"
+	"net/url"
 	"os"
 	"testing"
 
@@ -19,18 +20,23 @@ func testDatabaseURL() (string, bool) {
 }
 
 // NewTestPoolFromEnv returns a *pgxpool.Pool based on PGX_TEST_DATABASE_URL
-// (preferred) or DATABASE_URL. It forces sslmode=disable and clears any
-// inherited TLS configuration so local disposable Postgres containers work
-// out of the box. The pool uses at most 8 connections. The caller MUST
-// call pool.Close when done.
+// (preferred) or DATABASE_URL. It rewrites the URL to strip any inherited
+// libpq sslmode-related options and force sslmode=disable, then clears
+// TLSConfig and Fallbacks on the parsed config as belt-and-braces. This
+// keeps local disposable Postgres containers reachable regardless of
+// what the caller's env variable ships with. We avoid setting
+// sslmode via ConnConfig.RuntimeParams because PostgreSQL rejects it
+// as an unrecognized configuration parameter at startup. The pool
+// uses at most 8 connections. The caller MUST call pool.Close when done.
 func NewTestPoolFromEnv(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	url, ok := testDatabaseURL()
+	rawURL, ok := testDatabaseURL()
 	if !ok {
 		t.Skip("no test database URL is set")
 	}
 
-	config, err := pgxpool.ParseConfig(url)
+	cleanURL := disableSSLInURL(rawURL)
+	config, err := pgxpool.ParseConfig(cleanURL)
 	if err != nil {
 		t.Fatalf("parse test database URL: %v", err)
 	}
@@ -44,4 +50,23 @@ func NewTestPoolFromEnv(t *testing.T) *pgxpool.Pool {
 	}
 	t.Cleanup(pool.Close)
 	return pool
+}
+
+// disableSSLInURL drops any libpq sslmode-related query parameters from
+// the connection string and forces sslmode=disable so local disposable
+// Postgres containers are always reached over plain TCP. If the URL
+// cannot be parsed, it is returned unchanged and the caller surfaces
+// the parse error (which is what we want for malformed URLs).
+func disableSSLInURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return raw
+	}
+	q := u.Query()
+	for _, k := range []string{"sslmode", "sslrootcert", "sslkey", "sslcert"} {
+		q.Del(k)
+	}
+	q.Set("sslmode", "disable")
+	u.RawQuery = q.Encode()
+	return u.String()
 }
