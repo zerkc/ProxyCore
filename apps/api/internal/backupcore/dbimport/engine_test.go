@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -154,3 +155,106 @@ func (a *testArchive) Close() error {
 }
 
 var _ zipextract.Archive = (*testArchive)(nil)
+
+func TestApplyDoesNotMarkApplied_FlagTrue(t *testing.T) {
+	pool := openImportTestPool(t)
+	masterKey := testMasterKey(0x91)
+	apply := &recordingApply{}
+	engine, err := New(Options{
+		Pool:                    pool,
+		MasterKeyBase64:         masterKey,
+		EnvRestorePath:          filepath.Join(t.TempDir(), "env"),
+		CandidateRoot:           t.TempDir(),
+		Apply:                   apply,
+		ApplyDoesNotMarkApplied: true,
+		EnvMode:                 "0600",
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	report, err := engine.Import(WithActorID(context.Background(), "owner-flag-true"), newApplyTestArchive(t, masterKey), nil, false)
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	if apply.calls != 1 {
+		t.Fatalf("apply calls = %d, want 1", apply.calls)
+	}
+	if report.AppliedPostImport {
+		t.Fatal("AppliedPostImport = true, want false when marker suppression is enabled")
+	}
+}
+
+func TestApplyDoesNotMarkApplied_FlagFalse(t *testing.T) {
+	pool := openImportTestPool(t)
+	masterKey := testMasterKey(0x92)
+	apply := &recordingApply{}
+	engine, err := New(Options{
+		Pool:            pool,
+		MasterKeyBase64: masterKey,
+		EnvRestorePath:  filepath.Join(t.TempDir(), "env"),
+		CandidateRoot:   t.TempDir(),
+		Apply:           apply,
+		EnvMode:         "0600",
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	report, err := engine.Import(context.Background(), newApplyTestArchive(t, masterKey), nil, false)
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	if apply.calls != 1 {
+		t.Fatalf("apply calls = %d, want 1", apply.calls)
+	}
+	if !report.AppliedPostImport {
+		t.Fatal("AppliedPostImport = false, want true by default")
+	}
+}
+
+func TestApplyNil_AlwaysFalse(t *testing.T) {
+	for _, flag := range []bool{false, true} {
+		t.Run(fmt.Sprintf("flag_%t", flag), func(t *testing.T) {
+			pool := openImportTestPool(t)
+			masterKey := testMasterKey(byte(0x93 + btoi(flag)))
+			engine, err := New(Options{
+				Pool:                    pool,
+				MasterKeyBase64:         masterKey,
+				EnvRestorePath:          filepath.Join(t.TempDir(), "env"),
+				CandidateRoot:           t.TempDir(),
+				ApplyDoesNotMarkApplied: flag,
+				EnvMode:                 "0600",
+			})
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+
+			report, err := engine.Import(context.Background(), newApplyTestArchive(t, masterKey), nil, false)
+			if err != nil {
+				t.Fatalf("Import: %v", err)
+			}
+			if report.AppliedPostImport {
+				t.Fatal("AppliedPostImport = true with nil Apply trigger")
+			}
+		})
+	}
+}
+
+func newApplyTestArchive(t *testing.T, masterKey string) *testArchive {
+	t.Helper()
+	ciphertext, err := secrets.EncryptSecret("apply-flag", masterKey)
+	if err != nil {
+		t.Fatalf("EncryptSecret: %v", err)
+	}
+	return newImportArchive(t, map[string][]byte{
+		"db/secrets.json": []byte(`[{"id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","purpose":"apply-flag","ciphertext":"` + ciphertext + `","created_at":"2026-01-02T03:04:05Z","updated_at":"2026-01-02T03:04:05Z"}]`),
+	})
+}
+
+func btoi(value bool) byte {
+	if value {
+		return 1
+	}
+	return 0
+}

@@ -24,29 +24,31 @@ type AuditEmitter interface {
 }
 
 type Options struct {
-	Pool            *pgxpool.Pool
-	MasterKeyBase64 string
-	EnvRestorePath  string
-	CandidateRoot   string
-	NewRevisionID   string
-	Now             func() time.Time
-	Apply           ApplyTrigger
-	Audit           AuditEmitter
-	AuditActorID    string
-	EnvMode         string
+	Pool                    *pgxpool.Pool
+	MasterKeyBase64         string
+	EnvRestorePath          string
+	CandidateRoot           string
+	NewRevisionID           string
+	Now                     func() time.Time
+	Apply                   ApplyTrigger
+	Audit                   AuditEmitter
+	AuditActorID            string
+	EnvMode                 string
+	ApplyDoesNotMarkApplied bool
 }
 
 type Engine struct {
-	pool            *pgxpool.Pool
-	masterKeyBase64 string
-	envRestorePath  string
-	candidateRoot   string
-	revisionID      string
-	now             func() time.Time
-	apply           ApplyTrigger
-	audit           AuditEmitter
-	auditActorID    string
-	envMode         os.FileMode
+	pool                    *pgxpool.Pool
+	masterKeyBase64         string
+	envRestorePath          string
+	candidateRoot           string
+	revisionID              string
+	now                     func() time.Time
+	apply                   ApplyTrigger
+	audit                   AuditEmitter
+	auditActorID            string
+	envMode                 os.FileMode
+	applyDoesNotMarkApplied bool
 }
 
 // actorIDContextKey lets the HTTP composition layer carry the authenticated
@@ -82,16 +84,17 @@ func New(opts Options) (*Engine, error) {
 		now = time.Now
 	}
 	return &Engine{
-		pool:            opts.Pool,
-		masterKeyBase64: opts.MasterKeyBase64,
-		envRestorePath:  opts.EnvRestorePath,
-		candidateRoot:   opts.CandidateRoot,
-		revisionID:      revisionID,
-		now:             now,
-		apply:           opts.Apply,
-		audit:           opts.Audit,
-		auditActorID:    opts.AuditActorID,
-		envMode:         envMode,
+		pool:                    opts.Pool,
+		masterKeyBase64:         opts.MasterKeyBase64,
+		envRestorePath:          opts.EnvRestorePath,
+		candidateRoot:           opts.CandidateRoot,
+		revisionID:              revisionID,
+		now:                     now,
+		apply:                   opts.Apply,
+		audit:                   opts.Audit,
+		auditActorID:            opts.AuditActorID,
+		envMode:                 envMode,
+		applyDoesNotMarkApplied: opts.ApplyDoesNotMarkApplied,
 	}, nil
 }
 
@@ -205,7 +208,9 @@ func (e *Engine) Import(ctx context.Context, archive zipextract.Archive, passphr
 		if err := e.apply.Trigger(ctx, actorID); err != nil {
 			return report, err
 		}
-		report.AppliedPostImport = true
+		if !e.applyDoesNotMarkApplied {
+			report.AppliedPostImport = true
+		}
 	}
 	success = true
 	return report, nil

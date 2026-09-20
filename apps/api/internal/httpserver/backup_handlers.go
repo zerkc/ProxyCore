@@ -12,14 +12,27 @@ import (
 	"github.com/zerkc/ProxyCore/apps/api/internal/auth"
 )
 
-// BackupExporter is the HTTP boundary for a streaming backup export.
-type BackupExporter interface {
+// BackupExporter is the HTTP boundary for a streaming backup export. It is
+// intentionally opaque for compatibility with the original response-writer
+// adapter; the handler accepts both that shape and the io.Writer adapter used
+// by production backupcore composition.
+type BackupExporter interface{}
+
+type streamingBackupExporter interface {
+	Export(ctx context.Context, w io.Writer, passphrase []byte) (manifestSHA256Hex string, err error)
+}
+
+type responseBackupExporter interface {
 	Export(ctx context.Context, w http.ResponseWriter, passphrase []byte) (manifestSHA256Hex string, err error)
 }
 
 // BackupImporter is the HTTP boundary for a backup import.
 type BackupImporter interface {
 	Import(ctx context.Context, body io.Reader, size int64, passphrase []byte, dryRun bool) (ImportReport, error)
+}
+
+type actorBackupImporter interface {
+	ImportWithActorID(ctx context.Context, body io.Reader, size int64, passphrase []byte, dryRun bool, actorID string) (ImportReport, error)
 }
 
 // ImportReport describes the changes an import would make or made.
@@ -83,7 +96,7 @@ func (s *Server) handleBackupExport(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Disposition", `attachment; filename="proxycore-backup-`+time.Now().UTC().Format("2006-01-02T15-04-05Z")+`.zip"`)
 	w.Header().Add("Trailer", "Audit-Version")
 	tracked := &backupResponseWriter{ResponseWriter: w}
-	manifestSHA256Hex, exportErr := s.backupExporter.Export(r.Context(), tracked, passphrase)
+	manifestSHA256Hex, exportErr := callBackupExport(s.backupExporter, r.Context(), tracked, passphrase)
 	if exportErr != nil {
 		if tracked.wroteHeader {
 			if s.log != nil {
@@ -108,7 +121,8 @@ func (s *Server) handleBackupExport(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleBackupImport(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireUser(w, r, auth.RoleOwner); !ok {
+	user, ok := s.requireUser(w, r, auth.RoleOwner)
+	if !ok {
 		return
 	}
 	if s.backupImporter == nil {
@@ -148,12 +162,28 @@ func (s *Server) handleBackupImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	report, err := s.backupImporter.Import(r.Context(), file, header.Size, passphrase, dryRun)
+	var report ImportReport
+	if actorImporter, ok := s.backupImporter.(actorBackupImporter); ok {
+		report, err = actorImporter.ImportWithActorID(r.Context(), file, header.Size, passphrase, dryRun, user.ID)
+	} else {
+		report, err = s.backupImporter.Import(r.Context(), file, header.Size, passphrase, dryRun)
+	}
 	if err != nil {
 		writeBackupImportError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, report)
+}
+
+func callBackupExport(exporter BackupExporter, ctx context.Context, tracked *backupResponseWriter, passphrase []byte) (string, error) {
+	switch typed := exporter.(type) {
+	case streamingBackupExporter:
+		return typed.Export(ctx, tracked, passphrase)
+	case responseBackupExporter:
+		return typed.Export(ctx, tracked, passphrase)
+	default:
+		return "", errors.New("backup exporter does not implement a supported export signature")
+	}
 }
 
 func parseBackupDryRun(r *http.Request) (bool, error) {
@@ -216,7 +246,10 @@ func writeBackupImportError(w http.ResponseWriter, err error) {
 
 func isBackupMaxBytesError(err error) bool {
 	var maxBytesError *http.MaxBytesError
-	return errors.As(err, &maxBytesError) || strings.Contains(strings.ToLower(err.Error()), "request body too large")
+	message := strings.ToLower(err.Error())
+	return errors.As(err, &maxBytesError) ||
+		strings.Contains(message, "request body too large") ||
+		strings.Contains(message, "body exceeds configured limit")
 }
 
 func backupErrorIs(err, sentinel error) bool {
