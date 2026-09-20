@@ -184,6 +184,7 @@ func runServerWithNodeConverter(ctx context.Context, cfg config.Config, logger *
 		}
 	}
 
+	// FB-8: pass PostgresAuditEmitter as Options.Audit in WithBackup call.
 	server := &http.Server{
 		Addr:              cfg.Addr,
 		Handler:           httpserver.New(cfg, logger, options...).Handler(),
