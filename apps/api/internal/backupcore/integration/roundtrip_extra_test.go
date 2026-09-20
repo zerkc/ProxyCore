@@ -40,13 +40,40 @@ func TestRoundTripTriangulation(t *testing.T) {
 	})
 
 	t.Run("master-key mismatch", func(t *testing.T) {
-		fixture := newRoundTripFixture(t, nil)
+		fixture := newRoundTripFixtureWithWipeAfterExport(t, nil, false)
+		before := captureConfigRowCounts(t, fixture.pool)
+		if !equalSnapshots(before, fixture.counts) {
+			t.Fatalf("master-key-mismatch: expected the pre-import database to contain the exported fixture: before=%v fixture=%v", before, fixture.counts)
+		}
+
 		wrongKey := randomMasterKey(t)
 		_, _, err := importFixture(fixture, wrongKey, nil)
 		if !errors.Is(err, httpserver.ErrMasterKeyMismatch) {
 			t.Fatalf("master-key-mismatch: error=%v, want ErrMasterKeyMismatch", err)
 		}
-		assertWiped(t, "master-key-mismatch", fixture.pool)
+
+		after := captureConfigRowCounts(t, fixture.pool)
+		assertConfigRowCountsUnchanged(t, "master-key-mismatch", before, after)
+	})
+
+	t.Run("master-key mismatch with non-empty bundle (captured pre/post counts)", func(t *testing.T) {
+		fixture := newRoundTripFixtureWithWipeAfterExport(t, nil, false)
+		tables := []string{"users", "zones", "certificates"}
+		before := captureConfigRowCounts(t, fixture.pool, tables...)
+		for _, table := range tables {
+			if before[table] == 0 {
+				t.Fatalf("master-key-mismatch-non-empty: expected %s to contain fixture rows", table)
+			}
+		}
+
+		wrongKey := randomMasterKey(t)
+		_, _, err := importFixture(fixture, wrongKey, nil)
+		if !errors.Is(err, httpserver.ErrMasterKeyMismatch) {
+			t.Fatalf("master-key-mismatch-non-empty: error=%v, want ErrMasterKeyMismatch", err)
+		}
+
+		after := captureConfigRowCounts(t, fixture.pool, tables...)
+		assertConfigRowCountsUnchanged(t, "master-key-mismatch-non-empty", before, after, tables...)
 	})
 
 	t.Run("concurrent import", func(t *testing.T) {

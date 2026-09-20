@@ -90,6 +90,10 @@ func TestRoundTrip(t *testing.T) {
 }
 
 func newRoundTripFixture(t *testing.T, passphrase []byte) *roundTripFixture {
+	return newRoundTripFixtureWithWipeAfterExport(t, passphrase, true)
+}
+
+func newRoundTripFixtureWithWipeAfterExport(t *testing.T, passphrase []byte, wipeAfterExport bool) *roundTripFixture {
 	t.Helper()
 	pool, databaseURL := openIntegrationPool(t)
 	wipeConfig(t, pool)
@@ -107,7 +111,9 @@ func newRoundTripFixture(t *testing.T, passphrase []byte) *roundTripFixture {
 	if err != nil {
 		t.Fatalf("export fixture: %v", err)
 	}
-	wipeConfig(t, pool)
+	if wipeAfterExport {
+		wipeConfig(t, pool)
+	}
 
 	return &roundTripFixture{
 		pool:                 pool,
@@ -228,13 +234,9 @@ func assertDatabaseSnapshot(t *testing.T, name string, pool *pgxpool.Pool, wantC
 func snapshotDatabase(t *testing.T, pool *pgxpool.Pool) (map[string]int, map[string]string) {
 	t.Helper()
 	ctx := context.Background()
-	counts := make(map[string]int, len(configTables))
+	counts := captureConfigRowCounts(t, pool)
 	checksums := make(map[string]string, len(configTables))
 	for _, table := range configTables {
-		var count int
-		if err := pool.QueryRow(ctx, "select count(*) from "+quoteIdentifier(table)).Scan(&count); err != nil {
-			t.Fatalf("count %s: %v", table, err)
-		}
 		rows, err := pool.Query(ctx, "select * from "+quoteIdentifier(table)+" order by 1")
 		if err != nil {
 			t.Fatalf("query %s: %v", table, err)
@@ -248,10 +250,44 @@ func snapshotDatabase(t *testing.T, pool *pgxpool.Pool) (map[string]int, map[str
 			t.Fatalf("marshal %s snapshot: %v", table, err)
 		}
 		digest := sha256.Sum256(encoded)
-		counts[table] = count
 		checksums[table] = hex.EncodeToString(digest[:])
 	}
 	return counts, checksums
+}
+
+// captureConfigRowCounts records only database row counts so rejected imports
+// can be compared before and after the import attempt without relying on a wipe.
+func captureConfigRowCounts(t *testing.T, pool *pgxpool.Pool, tables ...string) map[string]int {
+	t.Helper()
+	if len(tables) == 0 {
+		tables = configTables
+	}
+	ctx := context.Background()
+	counts := make(map[string]int, len(tables))
+	for _, table := range tables {
+		var count int
+		if err := pool.QueryRow(ctx, "select count(*) from "+quoteIdentifier(table)).Scan(&count); err != nil {
+			t.Fatalf("count %s: %v", table, err)
+		}
+		counts[table] = count
+	}
+	return counts
+}
+
+// assertConfigRowCountsUnchanged proves a rejected import made no row-count
+// changes, checking all 16 config tables unless a focused subset is supplied.
+func assertConfigRowCountsUnchanged(t *testing.T, name string, before, after map[string]int, tables ...string) {
+	t.Helper()
+	if len(tables) == 0 {
+		tables = configTables
+	}
+	for _, table := range tables {
+		beforeCount, beforeOK := before[table]
+		afterCount, afterOK := after[table]
+		if !beforeOK || !afterOK || beforeCount != afterCount {
+			t.Fatalf("%s: %s row count changed: before=%d after=%d", name, table, beforeCount, afterCount)
+		}
+	}
 }
 
 func quoteIdentifier(value string) string {
