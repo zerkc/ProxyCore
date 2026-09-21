@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -59,6 +60,7 @@ type roundTripFixture struct {
 	revisionID           string
 	counts               map[string]int
 	checksums            map[string]string
+	preExportCounts      map[string]int
 	certFiles            map[string][]byte
 	passphrase           []byte
 }
@@ -106,11 +108,19 @@ func newRoundTripFixtureWithWipeAfterExport(t *testing.T, passphrase []byte, wip
 	certFiles := writeIntegrationCertificates(t, candidateRoot, integrationAppliedRevision)
 	insertIntegrationFixture(t, pool, masterKey)
 
-	counts, checksums := snapshotDatabase(t, pool)
+	preExportCounts, checksums := snapshotDatabase(t, pool)
+	if preExportCounts["secrets"] != 5 {
+		t.Fatalf("export fixture: pre-export secrets rows=%d, want 5", preExportCounts["secrets"])
+	}
 	bundle, _, err := exportAll(context.Background(), pool, envPath, candidateRoot, masterKey, passphrase)
 	if err != nil {
 		t.Fatalf("export fixture: %v", err)
 	}
+	counts, bundleChecksums := snapshotBundle(t, bundle, passphrase)
+	if counts["secrets"] != 6 {
+		t.Fatalf("export fixture: bundle secrets rows=%d, want 6 including master-key marker", counts["secrets"])
+	}
+	checksums["secrets"] = bundleChecksums["secrets"]
 	if wipeAfterExport {
 		wipeConfig(t, pool)
 	}
@@ -127,6 +137,7 @@ func newRoundTripFixtureWithWipeAfterExport(t *testing.T, passphrase []byte, wip
 		revisionID:           integrationRestoreRevision,
 		counts:               counts,
 		checksums:            checksums,
+		preExportCounts:      preExportCounts,
 		certFiles:            certFiles,
 		passphrase:           append([]byte(nil), passphrase...),
 	}
@@ -253,6 +264,92 @@ func snapshotDatabase(t *testing.T, pool *pgxpool.Pool) (map[string]int, map[str
 		checksums[table] = hex.EncodeToString(digest[:])
 	}
 	return counts, checksums
+}
+
+func snapshotBundle(t *testing.T, bundle []byte, passphrase []byte) (map[string]int, map[string]string) {
+	t.Helper()
+	archive, err := zipextract.Open(context.Background(), bytes.NewReader(bundle), passphrase)
+	if err != nil {
+		t.Fatalf("open bundle snapshot: %v", err)
+	}
+	defer archive.Close()
+
+	files, err := archive.Files(context.Background())
+	if err != nil {
+		t.Fatalf("list bundle snapshot: %v", err)
+	}
+	byPath := make(map[string]zipextract.File, len(files))
+	for _, file := range files {
+		byPath[file.Path] = file
+	}
+
+	counts := make(map[string]int, len(configTables))
+	checksums := make(map[string]string, len(configTables))
+	for _, table := range configTables {
+		file, ok := byPath["db/"+table+".json"]
+		if !ok {
+			t.Fatalf("bundle snapshot: missing table %s", table)
+		}
+		reader, err := file.Open()
+		if err != nil {
+			t.Fatalf("open bundle table %s: %v", table, err)
+		}
+		data, readErr := io.ReadAll(reader)
+		closeErr := reader.Close()
+		if err := errors.Join(readErr, closeErr); err != nil {
+			t.Fatalf("read bundle table %s: %v", table, err)
+		}
+
+		decoder := json.NewDecoder(bytes.NewReader(data))
+		decoder.UseNumber()
+		var rows []map[string]any
+		if err := decoder.Decode(&rows); err != nil {
+			t.Fatalf("decode bundle table %s: %v", table, err)
+		}
+		if err := normalizeBundleSnapshotRows(table, rows); err != nil {
+			t.Fatalf("normalize bundle table %s: %v", table, err)
+		}
+		counts[table] = len(rows)
+		encoded, err := json.Marshal(rows)
+		if err != nil {
+			t.Fatalf("marshal bundle table %s snapshot: %v", table, err)
+		}
+		digest := sha256.Sum256(encoded)
+		checksums[table] = hex.EncodeToString(digest[:])
+	}
+	return counts, checksums
+}
+
+func normalizeBundleSnapshotRows(table string, rows []map[string]any) error {
+	if table != "secrets" {
+		return nil
+	}
+	for _, row := range rows {
+		encodedID, ok := row["id"].(string)
+		if !ok {
+			return fmt.Errorf("secret id is %T, want string", row["id"])
+		}
+		id, err := uuid.Parse(encodedID)
+		if err != nil {
+			return fmt.Errorf("parse secret id: %w", err)
+		}
+		row["id"] = [16]byte(id)
+		if row["purpose"] != dbexport.BackupMasterKeyMarkerPurpose {
+			continue
+		}
+		for _, column := range []string{"created_at", "updated_at"} {
+			value, ok := row[column].(string)
+			if !ok {
+				return fmt.Errorf("marker %s is %T, want string", column, row[column])
+			}
+			parsed, err := time.Parse(time.RFC3339Nano, value)
+			if err != nil {
+				return fmt.Errorf("parse marker %s: %w", column, err)
+			}
+			row[column] = parsed.UTC().Truncate(time.Microsecond).Format(time.RFC3339Nano)
+		}
+	}
+	return nil
 }
 
 // captureConfigRowCounts records only database row counts so rejected imports

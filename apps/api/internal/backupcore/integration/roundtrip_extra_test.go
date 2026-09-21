@@ -42,8 +42,8 @@ func TestRoundTripTriangulation(t *testing.T) {
 	t.Run("master-key mismatch", func(t *testing.T) {
 		fixture := newRoundTripFixtureWithWipeAfterExport(t, nil, false)
 		before := captureConfigRowCounts(t, fixture.pool)
-		if !equalSnapshots(before, fixture.counts) {
-			t.Fatalf("master-key-mismatch: expected the pre-import database to contain the exported fixture: before=%v fixture=%v", before, fixture.counts)
+		if !equalSnapshots(before, fixture.preExportCounts) {
+			t.Fatalf("master-key-mismatch: expected the pre-import database to contain the exported fixture: before=%v fixture=%v", before, fixture.preExportCounts)
 		}
 
 		wrongKey := randomMasterKey(t)
