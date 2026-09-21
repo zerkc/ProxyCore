@@ -34,10 +34,11 @@ func TestBackupExporterRejectsNilPool(t *testing.T) {
 func TestBackupExporterPostgresRawRoundTrip(t *testing.T) {
 	fixture := newHTTPExportFixture(t)
 	exporter := &BackupExporter{
-		Pool:     fixture.pool,
-		Identity: staticIdentitySource{},
-		Version:  "test-exporter",
-		Now:      func() time.Time { return time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC) },
+		Pool:            fixture.pool,
+		Identity:        staticIdentitySource{},
+		Version:         "test-exporter",
+		Now:             func() time.Time { return time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC) },
+		MasterKeyBase64: fixture.masterKey,
 	}
 	var bundle bytes.Buffer
 	digest, err := exporter.Export(context.Background(), &bundle, nil)

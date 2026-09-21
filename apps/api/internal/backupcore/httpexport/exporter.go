@@ -11,6 +11,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -33,10 +35,11 @@ type IdentitySource interface {
 // BackupExporter composes host and database snapshot readers into the HTTP
 // backup archive without buffering the complete archive in memory.
 type BackupExporter struct {
-	Pool     *pgxpool.Pool
-	Identity IdentitySource
-	Version  string
-	Now      func() time.Time
+	Pool            *pgxpool.Pool
+	Identity        IdentitySource
+	Version         string
+	Now             func() time.Time
+	MasterKeyBase64 string
 }
 
 var _ httpserver.BackupExporter = (*BackupExporter)(nil)
@@ -144,6 +147,10 @@ func (e *BackupExporter) Export(ctx context.Context, w io.Writer, passphrase []b
 	if err != nil {
 		return "", fmt.Errorf("read env snapshot: %w", err)
 	}
+	masterKeyBase64, err := resolveMasterKey(e.MasterKeyBase64, envFile)
+	if err != nil {
+		return "", err
+	}
 	if err := entries.Add(envFile.Path, envFile.Size, envFile.Open); err != nil {
 		return "", fmt.Errorf("write env snapshot: %w", err)
 	}
@@ -167,7 +174,10 @@ func (e *BackupExporter) Export(ctx context.Context, w io.Writer, passphrase []b
 		}
 	}
 
-	databaseReport, err := dbexport.New(e.Pool, dbexport.ExporterOptions{Now: now}).Export(ctx, entries)
+	databaseReport, err := dbexport.New(e.Pool, dbexport.ExporterOptions{
+		Now:             now,
+		MasterKeyBase64: masterKeyBase64,
+	}).Export(ctx, entries)
 	if err != nil {
 		return "", fmt.Errorf("export database: %w", err)
 	}
@@ -195,4 +205,40 @@ func (e *BackupExporter) Export(ctx context.Context, w io.Writer, passphrase []b
 
 	digest := sha256.Sum256(manifestBytes)
 	return hex.EncodeToString(digest[:]), nil
+}
+
+func resolveMasterKey(explicit string, envFile backupcore.NamedFile) (string, error) {
+	if value := strings.TrimSpace(explicit); value != "" {
+		return value, nil
+	}
+	if value := strings.TrimSpace(os.Getenv("PROXYCORE_MASTER_KEY_BASE64")); value != "" {
+		return value, nil
+	}
+	if envFile.Open == nil {
+		return "", errors.New("httpexport: runtime master key is not configured")
+	}
+	reader, err := envFile.Open()
+	if err != nil {
+		return "", fmt.Errorf("read runtime master key: %w", err)
+	}
+	if reader == nil {
+		return "", errors.New("read runtime master key: env opener returned nil reader")
+	}
+	data, readErr := io.ReadAll(reader)
+	closeErr := reader.Close()
+	if err := errors.Join(readErr, closeErr); err != nil {
+		return "", fmt.Errorf("read runtime master key: %w", err)
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(strings.TrimPrefix(line, "export "))
+		key, value, ok := strings.Cut(line, "=")
+		if !ok || strings.TrimSpace(key) != "PROXYCORE_MASTER_KEY_BASE64" {
+			continue
+		}
+		value = strings.Trim(strings.TrimSpace(value), "\"'")
+		if value != "" {
+			return value, nil
+		}
+	}
+	return "", errors.New("httpexport: runtime master key is not configured")
 }

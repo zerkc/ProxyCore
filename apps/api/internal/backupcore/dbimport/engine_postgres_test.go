@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -27,8 +28,8 @@ import (
 func TestImportPostgresMasterKeyMismatchDoesNotWrite(t *testing.T) {
 	pool := openImportTestPool(t)
 	ctx := context.Background()
-	marker := fmt.Sprintf("dbimport-marker-%d", time.Now().UnixNano())
-	if _, err := pool.Exec(ctx, `insert into installation_settings (id) values ($1)`, marker); err != nil {
+	dbMarker := fmt.Sprintf("dbimport-marker-%d", time.Now().UnixNano())
+	if _, err := pool.Exec(ctx, `insert into installation_settings (id) values ($1)`, dbMarker); err != nil {
 		t.Fatalf("seed marker: %v", err)
 	}
 
@@ -38,8 +39,12 @@ func TestImportPostgresMasterKeyMismatchDoesNotWrite(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EncryptSecret: %v", err)
 	}
+	markerCiphertext, err := secrets.EncryptSecret("proxycore-backup-master-key", correctKey)
+	if err != nil {
+		t.Fatalf("EncryptSecret(marker): %v", err)
+	}
 	archive := newImportArchive(t, map[string][]byte{
-		"db/secrets.json": []byte(`[ {"id":"11111111-1111-4111-8111-111111111111","purpose":"fixture","ciphertext":"` + ciphertext + `","created_at":"2026-01-02T03:04:05Z","updated_at":"2026-01-02T03:04:05Z"} ]`),
+		"db/secrets.json": []byte(`[ {"id":"00000000-0000-0000-0000-000000000000","purpose":"__backup_master_key_marker__","ciphertext":"` + markerCiphertext + `","created_at":"2026-01-02T03:04:05Z","updated_at":"2026-01-02T03:04:05Z"},{"id":"11111111-1111-4111-8111-111111111111","purpose":"fixture","ciphertext":"` + ciphertext + `","created_at":"2026-01-02T03:04:05Z","updated_at":"2026-01-02T03:04:05Z"} ]`),
 	})
 
 	engine, err := New(Options{
@@ -56,7 +61,7 @@ func TestImportPostgresMasterKeyMismatchDoesNotWrite(t *testing.T) {
 		t.Fatalf("Import(wrong master key) = %v, want ErrMasterKeyMismatch", err)
 	}
 	var count int
-	if err := pool.QueryRow(ctx, `select count(*) from installation_settings where id = $1`, marker).Scan(&count); err != nil {
+	if err := pool.QueryRow(ctx, `select count(*) from installation_settings where id = $1`, dbMarker).Scan(&count); err != nil {
 		t.Fatalf("check marker: %v", err)
 	}
 	if count != 1 {
@@ -72,9 +77,13 @@ func TestImportPostgresHappyRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EncryptSecret: %v", err)
 	}
+	marker, err := secrets.EncryptSecret("proxycore-backup-master-key", masterKey)
+	if err != nil {
+		t.Fatalf("EncryptSecret(marker): %v", err)
+	}
 	archive := newImportArchive(t, map[string][]byte{
 		"db/users.json":   []byte(`[ {"id":"44444444-4444-4444-8444-444444444444","username":"backup-owner","password_hash":"scrypt$16384$8$1$aa$bb","role":"owner","active":true,"password_change_required":false,"created_at":"2026-01-02T03:04:05Z","updated_at":"2026-01-02T03:04:05Z"} ]`),
-		"db/secrets.json": []byte(`[ {"id":"22222222-2222-4222-8222-222222222222","purpose":"round-trip","ciphertext":"` + ciphertext + `","created_at":"2026-01-02T03:04:05Z","updated_at":"2026-01-02T03:04:05Z"} ]`),
+		"db/secrets.json": []byte(`[ {"id":"00000000-0000-0000-0000-000000000000","purpose":"__backup_master_key_marker__","ciphertext":"` + marker + `","created_at":"2026-01-02T03:04:05Z","updated_at":"2026-01-02T03:04:05Z"},{"id":"22222222-2222-4222-8222-222222222222","purpose":"round-trip","ciphertext":"` + ciphertext + `","created_at":"2026-01-02T03:04:05Z","updated_at":"2026-01-02T03:04:05Z"} ]`),
 	})
 	envPath := t.TempDir() + "/env"
 	candidateRoot := t.TempDir()
@@ -224,8 +233,12 @@ func TestImportPostgresApplyFailureIsReportedAfterCommit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EncryptSecret: %v", err)
 	}
+	marker, err := secrets.EncryptSecret("proxycore-backup-master-key", masterKey)
+	if err != nil {
+		t.Fatalf("EncryptSecret(marker): %v", err)
+	}
 	archive := newImportArchive(t, map[string][]byte{
-		"db/secrets.json": []byte(`[ {"id":"33333333-3333-4333-8333-333333333333","purpose":"apply-failure","ciphertext":"` + ciphertext + `","created_at":"2026-01-02T03:04:05Z","updated_at":"2026-01-02T03:04:05Z"} ]`),
+		"db/secrets.json": []byte(`[ {"id":"00000000-0000-0000-0000-000000000000","purpose":"__backup_master_key_marker__","ciphertext":"` + marker + `","created_at":"2026-01-02T03:04:05Z","updated_at":"2026-01-02T03:04:05Z"},{"id":"33333333-3333-4333-8333-333333333333","purpose":"apply-failure","ciphertext":"` + ciphertext + `","created_at":"2026-01-02T03:04:05Z","updated_at":"2026-01-02T03:04:05Z"} ]`),
 	})
 	applyErr := errors.New("apply failed")
 	apply := &recordingApply{err: applyErr}
@@ -289,6 +302,9 @@ func newImportArchive(t *testing.T, overrides map[string][]byte) *testArchive {
 	for path, data := range overrides {
 		entries[path] = data
 	}
+	if data, ok := entries["db/secrets.json"]; ok {
+		entries["db/secrets.json"] = addLegacyMasterKeyMarker(data)
+	}
 	entries["env/env"] = []byte("PROXYCORE_MASTER_KEY_BASE64=fixture\n")
 	entries["certs/site.crt"] = []byte("certificate")
 
@@ -331,6 +347,24 @@ func newImportArchive(t *testing.T, overrides map[string][]byte) *testArchive {
 		archiveFiles = append(archiveFiles, archiveFile(path, entries[path]))
 	}
 	return &testArchive{files: archiveFiles}
+}
+
+func addLegacyMasterKeyMarker(data []byte) []byte {
+	var rows []map[string]any
+	if err := json.Unmarshal(data, &rows); err != nil || len(rows) == 0 {
+		return data
+	}
+	for _, row := range rows {
+		if _, ok := row["purpose"]; ok {
+			return data
+		}
+	}
+	rows[0]["purpose"] = dbexport.BackupMasterKeyMarkerPurpose
+	normalized, err := json.Marshal(rows)
+	if err != nil {
+		return data
+	}
+	return normalized
 }
 
 func testMasterKey(fill byte) string {

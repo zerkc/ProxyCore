@@ -55,9 +55,10 @@ func TestBackupImporterRoundTripValidation(t *testing.T) {
 func TestBackupImporterPostgresRoundTrip(t *testing.T) {
 	fixture := newHTTPExportFixture(t)
 	exporter := &BackupExporter{
-		Pool:     fixture.pool,
-		Identity: staticIdentitySource{},
-		Version:  "test-exporter",
+		Pool:            fixture.pool,
+		Identity:        staticIdentitySource{},
+		Version:         "test-exporter",
+		MasterKeyBase64: fixture.masterKey,
 	}
 	var rawBundle bytes.Buffer
 	if _, err := exporter.Export(context.Background(), &rawBundle, nil); err != nil {
@@ -161,9 +162,13 @@ func newImporterTestBundle(t *testing.T, masterKey string, passphrase []byte) []
 	if err != nil {
 		t.Fatalf("EncryptSecret: %v", err)
 	}
+	marker, err := secrets.EncryptSecret("proxycore-backup-master-key", masterKey)
+	if err != nil {
+		t.Fatalf("EncryptSecret(marker): %v", err)
+	}
 	entries := map[string][]byte{
 		"env/env":         []byte("PROXYCORE_MASTER_KEY_BASE64=fixture\n"),
-		"db/secrets.json": []byte(`[{"ciphertext":"` + ciphertext + `"}]`),
+		"db/secrets.json": []byte(`[{"id":"00000000-0000-0000-0000-000000000000","purpose":"__backup_master_key_marker__","ciphertext":"` + marker + `","created_at":"2026-01-02T03:04:05Z","updated_at":"2026-01-02T03:04:05Z"},{"id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","purpose":"fixture","ciphertext":"` + ciphertext + `","created_at":"2026-01-02T03:04:05Z","updated_at":"2026-01-02T03:04:05Z"}]`),
 	}
 	for _, table := range dbexport.DefaultConfigTables {
 		path := "db/" + table + ".json"

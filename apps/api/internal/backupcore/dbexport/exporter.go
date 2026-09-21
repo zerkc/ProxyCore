@@ -12,19 +12,34 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/zerkc/ProxyCore/apps/api/internal/secrets"
+)
+
+const (
+	// BackupMasterKeyMarkerID is reserved for the bundle-only master-key marker.
+	BackupMasterKeyMarkerID = "00000000-0000-0000-0000-000000000000"
+	// BackupMasterKeyMarkerPurpose identifies the row used for deterministic
+	// master-key verification during import.
+	BackupMasterKeyMarkerPurpose = "__backup_master_key_marker__"
+	// BackupMasterKeyMarkerPlaintext is the known plaintext authenticated by
+	// the marker ciphertext.
+	BackupMasterKeyMarkerPlaintext = "proxycore-backup-master-key"
 )
 
 // ExporterOptions controls the database tables selected by an Exporter.
 type ExporterOptions struct {
-	Tables []string
-	Now    func() time.Time
+	Tables          []string
+	Now             func() time.Time
+	MasterKeyBase64 string
 }
 
 // Exporter streams configuration table rows into one JSON array per table.
 type Exporter struct {
-	pool   *pgxpool.Pool
-	tables []string
-	now    func() time.Time
+	pool            *pgxpool.Pool
+	tables          []string
+	now             func() time.Time
+	masterKeyBase64 string
 }
 
 func New(pool *pgxpool.Pool, opts ExporterOptions) *Exporter {
@@ -36,7 +51,12 @@ func New(pool *pgxpool.Pool, opts ExporterOptions) *Exporter {
 	if now == nil {
 		now = time.Now
 	}
-	return &Exporter{pool: pool, tables: tables, now: now}
+	return &Exporter{
+		pool:            pool,
+		tables:          tables,
+		now:             now,
+		masterKeyBase64: opts.MasterKeyBase64,
+	}
 }
 
 func (e *Exporter) Export(ctx context.Context, w ZipWriter) (ExportReport, error) {
@@ -89,6 +109,15 @@ func (e *Exporter) Export(ctx context.Context, w ZipWriter) (ExportReport, error
 }
 
 func (e *Exporter) exportTable(ctx context.Context, w ZipWriter, table string) (int, int64, error) {
+	var prefix map[string]any
+	if table == "secrets" {
+		var err error
+		prefix, err = e.masterKeyMarker()
+		if err != nil {
+			return 0, 0, err
+		}
+	}
+
 	conn, err := e.pool.Acquire(ctx)
 	if err != nil {
 		return 0, 0, fmt.Errorf("acquire connection: %w", err)
@@ -116,7 +145,7 @@ func (e *Exporter) exportTable(ctx context.Context, w ZipWriter, table string) (
 		reader, writer := io.Pipe()
 		stream = &countingReadCloser{Reader: reader, count: &bytesWritten}
 		go func() {
-			err := encodeRows(ctx, rows, writer, &rowCount)
+			err := encodeRowsWithPrefix(ctx, rows, writer, &rowCount, prefix)
 			rows.Close()
 			if err != nil {
 				_ = writer.CloseWithError(err)
@@ -150,24 +179,15 @@ func (e *Exporter) exportTable(ctx context.Context, w ZipWriter, table string) (
 }
 
 func encodeRows(ctx context.Context, rows pgx.Rows, dst io.Writer, rowCount *int) error {
+	return encodeRowsWithPrefix(ctx, rows, dst, rowCount, nil)
+}
+
+func encodeRowsWithPrefix(ctx context.Context, rows pgx.Rows, dst io.Writer, rowCount *int, prefix map[string]any) error {
 	if _, err := io.WriteString(dst, "["); err != nil {
 		return err
 	}
 	first := true
-	fields := rows.FieldDescriptions()
-	for rows.Next() {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		raw := rows.RawValues()
-		values, err := rows.Values()
-		if err != nil {
-			return fmt.Errorf("read row values: %w", err)
-		}
-		row, err := coerceRow(fields, values, raw, rows)
-		if err != nil {
-			return err
-		}
+	writeRow := func(row map[string]any) error {
 		encoded, err := json.Marshal(row)
 		if err != nil {
 			return fmt.Errorf("encode row JSON: %w", err)
@@ -182,12 +202,62 @@ func encodeRows(ctx context.Context, rows pgx.Rows, dst io.Writer, rowCount *int
 		}
 		first = false
 		(*rowCount)++
+		return nil
+	}
+	if prefix != nil {
+		if err := writeRow(prefix); err != nil {
+			return err
+		}
+	}
+
+	fields := rows.FieldDescriptions()
+	for rows.Next() {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		raw := rows.RawValues()
+		values, err := rows.Values()
+		if err != nil {
+			return fmt.Errorf("read row values: %w", err)
+		}
+		row, err := coerceRow(fields, values, raw, rows)
+		if err != nil {
+			return err
+		}
+		// A prior import may have persisted the reserved marker row. Keep the
+		// bundle deterministic by emitting exactly the newly encrypted marker.
+		if prefix != nil && row["purpose"] == BackupMasterKeyMarkerPurpose {
+			continue
+		}
+		if err := writeRow(row); err != nil {
+			return err
+		}
 	}
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("read rows: %w", err)
 	}
 	_, err := io.WriteString(dst, "]")
 	return err
+}
+
+func (e *Exporter) masterKeyMarker() (map[string]any, error) {
+	masterKey := e.masterKeyBase64
+	ciphertext, err := secrets.EncryptSecret(BackupMasterKeyMarkerPlaintext, masterKey)
+	if err != nil {
+		return nil, fmt.Errorf("encrypt backup master-key marker: %w", err)
+	}
+	now := time.Now
+	if e != nil && e.now != nil {
+		now = e.now
+	}
+	timestamp := now().UTC().Format(time.RFC3339Nano)
+	return map[string]any{
+		"id":         BackupMasterKeyMarkerID,
+		"purpose":    BackupMasterKeyMarkerPurpose,
+		"ciphertext": ciphertext,
+		"created_at": timestamp,
+		"updated_at": timestamp,
+	}, nil
 }
 
 // countingReadCloser records the bytes consumed by the ZipWriter without

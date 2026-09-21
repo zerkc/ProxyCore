@@ -41,15 +41,15 @@ func TestNewValidatesEnvModeAndAllocatesRevision(t *testing.T) {
 	}
 }
 
-func TestVerifyMasterKeyUsesFirstSecretCiphertext(t *testing.T) {
+func TestVerifyMasterKeyEngineUsesSentinelCiphertext(t *testing.T) {
 	key := bytes.Repeat([]byte{0x42}, 32)
 	masterKey := encodeMasterKeyForTest(t, key)
-	ciphertext, err := secrets.EncryptSecret("secret-value", masterKey)
+	ciphertext, err := secrets.EncryptSecret("proxycore-backup-master-key", masterKey)
 	if err != nil {
 		t.Fatalf("EncryptSecret: %v", err)
 	}
 	files := map[string]zipextract.File{
-		"db/secrets.json": archiveFile("db/secrets.json", []byte(`[{"ciphertext":"`+ciphertext+`"}]`)),
+		"db/secrets.json": archiveFile("db/secrets.json", []byte(`[{"id":"00000000-0000-0000-0000-000000000000","purpose":"__backup_master_key_marker__","ciphertext":"`+ciphertext+`","created_at":"2026-01-02T03:04:05Z","updated_at":"2026-01-02T03:04:05Z"}]`)),
 	}
 
 	if err := verifyMasterKey(context.Background(), files, masterKey); err != nil {
@@ -59,7 +59,7 @@ func TestVerifyMasterKeyUsesFirstSecretCiphertext(t *testing.T) {
 		t.Fatalf("verifyMasterKey(wrong key) = %v, want ErrMasterKeyMismatch", err)
 	}
 
-	files["db/secrets.json"] = archiveFile("db/secrets.json", []byte(`[{"ciphertext":"not-a-ciphertext"}]`))
+	files["db/secrets.json"] = archiveFile("db/secrets.json", []byte(`[{"purpose":"__backup_master_key_marker__","ciphertext":"not-a-ciphertext"}]`))
 	if err := verifyMasterKey(context.Background(), files, masterKey); !errors.Is(err, httpserver.ErrMasterKeyMismatch) {
 		t.Fatalf("verifyMasterKey(malformed ciphertext) = %v, want ErrMasterKeyMismatch", err)
 	}
@@ -116,12 +116,12 @@ func TestImportRejectsMissingManifestAsCorruptArchive(t *testing.T) {
 
 func newImportArchiveWithSecrets(t *testing.T, masterKey string) *testArchive {
 	t.Helper()
-	ciphertext, err := secrets.EncryptSecret("dry-run-secret", masterKey)
+	ciphertext, err := secrets.EncryptSecret("proxycore-backup-master-key", masterKey)
 	if err != nil {
 		t.Fatalf("EncryptSecret: %v", err)
 	}
 	return newImportArchive(t, map[string][]byte{
-		"db/secrets.json": []byte(`[{"ciphertext":"` + ciphertext + `"}]`),
+		"db/secrets.json": []byte(`[{"id":"00000000-0000-0000-0000-000000000000","purpose":"__backup_master_key_marker__","ciphertext":"` + ciphertext + `","created_at":"2026-01-02T03:04:05Z","updated_at":"2026-01-02T03:04:05Z"}]`),
 	})
 }
 
@@ -247,8 +247,12 @@ func newApplyTestArchive(t *testing.T, masterKey string) *testArchive {
 	if err != nil {
 		t.Fatalf("EncryptSecret: %v", err)
 	}
+	marker, err := secrets.EncryptSecret("proxycore-backup-master-key", masterKey)
+	if err != nil {
+		t.Fatalf("EncryptSecret(marker): %v", err)
+	}
 	return newImportArchive(t, map[string][]byte{
-		"db/secrets.json": []byte(`[{"id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","purpose":"apply-flag","ciphertext":"` + ciphertext + `","created_at":"2026-01-02T03:04:05Z","updated_at":"2026-01-02T03:04:05Z"}]`),
+		"db/secrets.json": []byte(`[{"id":"00000000-0000-0000-0000-000000000000","purpose":"__backup_master_key_marker__","ciphertext":"` + marker + `","created_at":"2026-01-02T03:04:05Z","updated_at":"2026-01-02T03:04:05Z"},{"id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","purpose":"apply-flag","ciphertext":"` + ciphertext + `","created_at":"2026-01-02T03:04:05Z","updated_at":"2026-01-02T03:04:05Z"}]`),
 	})
 }
 

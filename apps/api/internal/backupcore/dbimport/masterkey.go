@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 
+	"github.com/zerkc/ProxyCore/apps/api/internal/backupcore/dbexport"
 	"github.com/zerkc/ProxyCore/apps/api/internal/backupcore/zipextract"
 	"github.com/zerkc/ProxyCore/apps/api/internal/httpserver"
 	"github.com/zerkc/ProxyCore/apps/api/internal/secrets"
@@ -31,9 +32,26 @@ func verifyMasterKey(ctx context.Context, files map[string]zipextract.File, mast
 	if len(rows) == 0 {
 		return ErrNoSecretsInBundle
 	}
-	ciphertext, ok := rows[0]["ciphertext"].(string)
-	if !ok || ciphertext == "" {
-		return httpserver.ErrMasterKeyMismatch
+
+	var ciphertext string
+	markerCount := 0
+	for _, row := range rows {
+		purpose, ok := row["purpose"].(string)
+		if !ok || purpose != dbexport.BackupMasterKeyMarkerPurpose {
+			continue
+		}
+		markerCount++
+		if markerCount > 1 {
+			return httpserver.ErrMasterKeyMismatch
+		}
+		var okCiphertext bool
+		ciphertext, okCiphertext = row["ciphertext"].(string)
+		if !okCiphertext || ciphertext == "" {
+			return httpserver.ErrMasterKeyMismatch
+		}
+	}
+	if markerCount == 0 {
+		return ErrNoSecretsInBundle
 	}
 	if _, err := secrets.DecryptSecret(ciphertext, masterKeyBase64); err != nil {
 		return httpserver.ErrMasterKeyMismatch
