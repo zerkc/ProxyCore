@@ -60,7 +60,7 @@ func (c *namedFileCollector) Add(path string, size int64, open func() (io.ReadCl
 // exportAll is deliberately kept in the integration package. It composes the
 // real host reader, database exporter, and ZIP writer without adding a second
 // production orchestration boundary before the REST layer exists.
-func exportAll(ctx context.Context, pool *pgxpool.Pool, env, candidateRoot string, passphrase []byte) ([]byte, httpserver.ImportReport, error) {
+func exportAll(ctx context.Context, pool *pgxpool.Pool, env, candidateRoot, masterKeyBase64 string, passphrase []byte) ([]byte, httpserver.ImportReport, error) {
 	var emptyReport httpserver.ImportReport
 	if ctx == nil {
 		ctx = context.Background()
@@ -70,7 +70,7 @@ func exportAll(ctx context.Context, pool *pgxpool.Pool, env, candidateRoot strin
 	}
 
 	h := hostread.New(pool, hostread.Config{EnvPath: env, CandidateRoot: candidateRoot})
-	ex := dbexport.New(pool, dbexport.ExporterOptions{})
+	ex := dbexport.New(pool, dbexport.ExporterOptions{MasterKeyBase64: masterKeyBase64})
 
 	var bundle bytes.Buffer
 	zw, err := zipwriter.OpenEncrypted(&bundle, passphrase)

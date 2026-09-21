@@ -107,7 +107,7 @@ func newRoundTripFixtureWithWipeAfterExport(t *testing.T, passphrase []byte, wip
 	insertIntegrationFixture(t, pool, masterKey)
 
 	counts, checksums := snapshotDatabase(t, pool)
-	bundle, _, err := exportAll(context.Background(), pool, envPath, candidateRoot, passphrase)
+	bundle, _, err := exportAll(context.Background(), pool, envPath, candidateRoot, masterKey, passphrase)
 	if err != nil {
 		t.Fatalf("export fixture: %v", err)
 	}
