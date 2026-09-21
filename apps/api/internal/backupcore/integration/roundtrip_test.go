@@ -569,21 +569,22 @@ func insertIntegrationFixture(t *testing.T, pool *pgxpool.Pool, masterKey string
 
 func openIntegrationPool(t *testing.T) (*pgxpool.Pool, string) {
 	t.Helper()
+	if dockerURL, stop, started := startDisposablePostgres(t); started {
+		t.Cleanup(stop)
+		t.Log("using disposable postgres:17-alpine")
+		return buildIntegrationPool(t, dockerURL), dockerURL
+	}
 	envURL, ok := testDatabaseURL()
 	if !ok {
-		t.Skip("skipping backupcore integration: dbtestenv.TestDatabaseURL() is unset")
+		t.Skip("skipping backupcore integration: neither docker nor DATABASE_URL/PGX_TEST_DATABASE_URL is available")
 	}
-	actualURL := envURL
-	stopContainer := func() {}
-	if dockerURL, stop, started := startDisposablePostgres(t); started {
-		actualURL = dockerURL
-		stopContainer = stop
-		t.Cleanup(stopContainer)
-		t.Log("using disposable postgres:17-alpine")
-	} else {
-		t.Log("using env-provided test database URL")
-	}
-	config, err := pgxpool.ParseConfig(actualURL)
+	t.Log("using env-provided test database URL")
+	return buildIntegrationPool(t, envURL), envURL
+}
+
+func buildIntegrationPool(t *testing.T, url string) *pgxpool.Pool {
+	t.Helper()
+	config, err := pgxpool.ParseConfig(url)
 	if err != nil {
 		t.Fatalf("parse integration database URL: %v", err)
 	}
@@ -606,7 +607,7 @@ func openIntegrationPool(t *testing.T) (*pgxpool.Pool, string) {
 	if err := ensureIntegrationSchema(context.Background(), pool); err != nil {
 		t.Fatalf("ensure integration schema: %v", err)
 	}
-	return pool, actualURL
+	return pool
 }
 
 func ensureIntegrationSchema(ctx context.Context, pool *pgxpool.Pool) error {
