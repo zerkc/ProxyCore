@@ -91,6 +91,27 @@ func TestRoundTrip(t *testing.T) {
 	assertRestoredFiles(t, "round-trip", fixture)
 }
 
+func TestOpenIntegrationPoolUsesIsolatedSchemaForEnvFallback(t *testing.T) {
+	if os.Getenv("DATABASE_URL") == "" {
+		t.Skip("DATABASE_URL is required for the forced environment fallback")
+	}
+	t.Setenv("PGX_TEST_DATABASE_URL", "")
+	// LookPath must fail even on hosts with Docker installed; restore PATH at cleanup.
+	t.Setenv("PATH", t.TempDir())
+	pool, _ := openIntegrationPool(t)
+	var schema string
+	if err := pool.QueryRow(context.Background(), `select current_schema()`).Scan(&schema); err != nil {
+		t.Fatalf("read integration schema: %v", err)
+	}
+	if schema == "" || schema == "public" {
+		t.Fatalf("integration fallback schema=%q, want a non-public schema", schema)
+	}
+	var name string
+	if err := pool.QueryRow(context.Background(), `select column_name from information_schema.columns where table_schema = current_schema() and table_name = 'resolver_pools' and column_name = 'name'`).Scan(&name); err != nil {
+		t.Fatalf("integration fallback resolver_pools.name: %v", err)
+	}
+}
+
 func newRoundTripFixture(t *testing.T, passphrase []byte) *roundTripFixture {
 	return newRoundTripFixtureWithWipeAfterExport(t, passphrase, true)
 }
@@ -594,7 +615,7 @@ func buildIntegrationPool(t *testing.T, url string) *pgxpool.Pool {
 		t.Fatalf("create integration database pool: %v", err)
 	}
 	t.Cleanup(pool.Close)
-	pingCtx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	pingCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	for {
 		if err := pool.Ping(pingCtx); err == nil {
@@ -604,6 +625,11 @@ func buildIntegrationPool(t *testing.T, url string) *pgxpool.Pool {
 		}
 		time.Sleep(250 * time.Millisecond)
 	}
+	basePool := pool
+	pool, _, cleanupSchema := dbexport.PerTestSchema(t, basePool)
+	basePool.Close()
+	t.Cleanup(pool.Close)
+	t.Cleanup(cleanupSchema)
 	if err := ensureIntegrationSchema(context.Background(), pool); err != nil {
 		t.Fatalf("ensure integration schema: %v", err)
 	}
@@ -664,6 +690,7 @@ func startDisposablePostgres(t *testing.T) (string, func(), bool) {
 		"-e", "POSTGRES_PASSWORD=proxycore",
 		"-e", "POSTGRES_DB=proxycore",
 		"-p", "127.0.0.1::5432",
+		"--tmpfs", "/var/lib/postgresql/data:rw,size=1g",
 		"postgres:17-alpine")
 	output, err := cmd.Output()
 	if err != nil {
@@ -674,9 +701,21 @@ func startDisposablePostgres(t *testing.T) (string, func(), bool) {
 		return "", nil, false
 	}
 	stop := func() {
+		if t.Failed() {
+			inspectCtx, inspectCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			inspect, inspectErr := exec.CommandContext(inspectCtx, "docker", "inspect", "--format", `state={{.State.Status}} error={{.State.Error}} ports={{json .NetworkSettings.Ports}}`, containerID).CombinedOutput()
+			inspectCancel()
+			t.Logf("integration container %s inspect: %s (error: %v)", containerID, strings.TrimSpace(string(inspect)), inspectErr)
+			logsCtx, logsCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			logs, logsErr := exec.CommandContext(logsCtx, "docker", "logs", "--tail", "100", containerID).CombinedOutput()
+			logsCancel()
+			t.Logf("integration container %s last 100 log lines: %s (error: %v)", containerID, strings.TrimSpace(string(logs)), logsErr)
+		}
 		stopCtx, stopCancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer stopCancel()
-		_ = exec.CommandContext(stopCtx, "docker", "stop", containerID).Run()
+		if output, err := exec.CommandContext(stopCtx, "docker", "stop", containerID).CombinedOutput(); err != nil {
+			t.Logf("stop integration container %s: %v (%s)", containerID, err, strings.TrimSpace(string(output)))
+		}
 	}
 	portCtx, portCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer portCancel()

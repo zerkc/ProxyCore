@@ -81,6 +81,17 @@ func TestBackupExporterPostgresRawRoundTrip(t *testing.T) {
 	}
 }
 
+func TestBackupExporterFixtureUsesIsolatedSchema(t *testing.T) {
+	fixture := newHTTPExportFixture(t)
+	var schema string
+	if err := fixture.pool.QueryRow(context.Background(), `select current_schema()`).Scan(&schema); err != nil {
+		t.Fatalf("read fixture schema: %v", err)
+	}
+	if schema == "" || schema == "public" {
+		t.Fatalf("fixture schema=%q, want a non-public schema", schema)
+	}
+}
+
 type staticIdentitySource struct{}
 
 func (staticIdentitySource) InstallationIDString() string { return "installation-test" }
@@ -95,7 +106,7 @@ type httpExportFixture struct {
 
 func newHTTPExportFixture(t *testing.T) *httpExportFixture {
 	t.Helper()
-	pool := dbexport.NewTestPoolFromEnv(t)
+	pool := dbexport.NewTestPoolFromEnvWithSchema(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	if err := pool.Ping(ctx); err != nil {

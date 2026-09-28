@@ -4,9 +4,11 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"net/url"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -20,6 +22,51 @@ func testDatabaseURL() (string, bool) {
 		return url, true
 	}
 	return "", false
+}
+
+// AcquireImportTestGate serializes only the dbimport and httpexport test processes
+// sharing one database. Its session lock is separate from the product import lock.
+// Keep the returned release function until after m.Run; closing the connection
+// releases the lock. Callers release it before os.Exit (LIFO process cleanup).
+func AcquireImportTestGate() (func() error, error) {
+	rawURL, ok := testDatabaseURL()
+	if !ok {
+		return func() error { return nil }, nil
+	}
+	config, err := pgx.ParseConfig(disableSSLInURL(rawURL))
+	if err != nil {
+		return nil, fmt.Errorf("parse test database URL: %w", err)
+	}
+	config.TLSConfig = nil
+	config.Fallbacks = nil
+	ctx, cancel := context.WithTimeout(context.Background(), 11*time.Minute)
+	defer cancel()
+	conn, err := pgx.ConnectConfig(ctx, config)
+	if err != nil {
+		return nil, fmt.Errorf("connect import test gate: %w", err)
+	}
+	const gateNamespace int32 = 0x50584354
+	const gateKey int32 = 0x494d504f
+	for {
+		var acquired bool
+		if err := conn.QueryRow(ctx, "select pg_try_advisory_lock($1, $2)", gateNamespace, gateKey).Scan(&acquired); err != nil {
+			_ = conn.Close(context.Background())
+			return nil, fmt.Errorf("acquire import test gate: %w", err)
+		}
+		if acquired {
+			return func() error {
+				closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				return conn.Close(closeCtx)
+			}, nil
+		}
+		select {
+		case <-ctx.Done():
+			_ = conn.Close(context.Background())
+			return nil, fmt.Errorf("acquire import test gate: %w", ctx.Err())
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
 }
 
 // NewTestPoolFromEnv returns a *pgxpool.Pool based on PGX_TEST_DATABASE_URL
@@ -59,17 +106,18 @@ func NewTestPoolFromEnv(t *testing.T) *pgxpool.Pool {
 // from the current test. The schema is dropped automatically during cleanup.
 func NewTestPoolFromEnvWithSchema(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	pool := NewTestPoolFromEnv(t)
-	_, cleanup := PerTestSchema(t, pool)
+	basePool := NewTestPoolFromEnv(t)
+	pool, _, cleanup := PerTestSchema(t, basePool)
+	basePool.Close()
+	t.Cleanup(pool.Close)
 	t.Cleanup(cleanup)
 	return pool
 }
 
-// PerTestSchema creates and selects a schema derived from t.Name. It resets
-// the pool after changing its connection configuration so existing idle
-// connections also receive the new search_path. Call cleanup when the test is
-// finished; the helper intentionally does not register it automatically.
-func PerTestSchema(t *testing.T, pool *pgxpool.Pool) (schema string, cleanup func()) {
+// PerTestSchema creates a schema derived from t.Name and returns a new pool
+// configured to select it. The caller closes the base pool after this returns,
+// then registers the new pool's Close before cleanup so cleanup runs first.
+func PerTestSchema(t *testing.T, pool *pgxpool.Pool) (isolated *pgxpool.Pool, schema string, cleanup func()) {
 	t.Helper()
 	if pool == nil {
 		t.Fatal("PerTestSchema called with nil pool")
@@ -82,17 +130,22 @@ func PerTestSchema(t *testing.T, pool *pgxpool.Pool) (schema string, cleanup fun
 		t.Fatalf("create per-test schema %q: %v", schema, err)
 	}
 	config := pool.Config()
-	if config.ConnConfig.RuntimeParams == nil {
-		config.ConnConfig.RuntimeParams = map[string]string{}
+	runtimeParams := make(map[string]string, len(config.ConnConfig.RuntimeParams)+1)
+	for key, value := range config.ConnConfig.RuntimeParams {
+		runtimeParams[key] = value
 	}
-	config.ConnConfig.RuntimeParams["search_path"] = schema
-	pool.Reset()
+	runtimeParams["search_path"] = schema
+	config.ConnConfig.RuntimeParams = runtimeParams
+	isolated, err := pgxpool.NewWithConfig(ctx, config)
+	if err != nil {
+		t.Fatalf("create isolated pool for schema %q: %v", schema, err)
+	}
 	cleanup = func() {
-		if _, err := pool.Exec(context.Background(), "drop schema if exists "+ident+" cascade"); err != nil {
+		if _, err := isolated.Exec(context.Background(), "drop schema if exists "+ident+" cascade"); err != nil {
 			t.Logf("drop per-test schema %q: %v", schema, err)
 		}
 	}
-	return schema, cleanup
+	return isolated, schema, cleanup
 }
 
 // disableSSLInURL drops any libpq sslmode-related query parameters from
