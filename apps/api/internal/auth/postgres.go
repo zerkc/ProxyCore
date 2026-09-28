@@ -59,10 +59,21 @@ func (s *PostgresStore) EnsureSchema(ctx context.Context) error {
 			created_at timestamptz not null default now()
 		);`,
 	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("ensure auth schema: begin transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `select pg_advisory_xact_lock(hashtextextended('proxycore.auth.ensure_schema.' || coalesce(current_schema(), ''), 0))`); err != nil {
+		return fmt.Errorf("ensure auth schema: acquire schema lock: %w", err)
+	}
 	for _, statement := range statements {
-		if _, err := s.pool.Exec(ctx, statement); err != nil {
+		if _, err := tx.Exec(ctx, statement); err != nil {
 			return fmt.Errorf("ensure auth schema: %w", err)
 		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("ensure auth schema: commit: %w", err)
 	}
 	return nil
 }
