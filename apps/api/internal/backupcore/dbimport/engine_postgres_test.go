@@ -268,7 +268,7 @@ func TestImportPostgresApplyFailureIsReportedAfterCommit(t *testing.T) {
 
 func openImportTestPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	pool := dbexport.NewTestPoolFromEnv(t)
+	pool := dbexport.NewTestPoolFromEnvWithSchema(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	if err := pool.Ping(ctx); err != nil {
