@@ -50,7 +50,9 @@ jobs:
           POSTGRES_DB: proxycore
         ports:
           - 5432:5432
+        # Test DB data is disposable; overlay fsync/checkpoint I/O caused suite timeouts.
         options: >-
+          --tmpfs /var/lib/postgresql/data:rw,size=1g
           --health-cmd "pg_isready -U proxycore -d proxycore"
           --health-interval 5s
           --health-timeout 5s

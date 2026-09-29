@@ -17,6 +17,8 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/zerkc/ProxyCore/apps/api/internal/auth"
+	"github.com/zerkc/ProxyCore/apps/api/internal/backupcore/dbimport"
+	"github.com/zerkc/ProxyCore/apps/api/internal/backupcore/httpexport"
 	"github.com/zerkc/ProxyCore/apps/api/internal/cluster"
 	"github.com/zerkc/ProxyCore/apps/api/internal/config"
 	"github.com/zerkc/ProxyCore/apps/api/internal/configuration"
@@ -182,6 +184,25 @@ func runServerWithNodeConverter(ctx context.Context, cfg config.Config, logger *
 		if nodeConverter != nil {
 			logger.Printf("node converter ready for role=%s", identityResult.Role)
 		}
+	}
+
+	if pool != nil && cfg.MasterKeyBase64 != "" {
+		exporter := &httpexport.BackupExporter{
+			Pool:     pool,
+			Identity: httpexport.NewIdentitySource(identitySvc),
+			Version:  version.Version,
+			Now:      time.Now,
+		}
+		importer := &httpexport.BackupImporter{
+			Pool:            pool,
+			MasterKeyBase64: cfg.MasterKeyBase64,
+			EnvMode:         "0600",
+			Apply:           httpexport.NewApplyTrigger(configStore),
+			Audit:           &dbimport.PostgresAuditEmitter{Pool: pool},
+			Now:             time.Now,
+			BodyLimit:       4 << 30,
+		}
+		options = append(options, httpserver.WithBackup(exporter, importer))
 	}
 
 	server := &http.Server{

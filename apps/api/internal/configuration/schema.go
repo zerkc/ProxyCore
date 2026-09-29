@@ -12,14 +12,16 @@ import (
 // from the Drizzle migrate one-shot). Requires the users table to already exist
 // (see auth.PostgresStore.EnsureSchema) for the actor foreign keys.
 func EnsureSchema(ctx context.Context, pool *pgxpool.Pool) error {
+	// Parallel schema bootstraps can surface a concurrent CREATE TYPE race as
+	// unique_violation (23505), rather than duplicate_object (42710).
 	statements := []string{
-		`do $$ begin create type proxycore_record_type as enum ('A','AAAA','CNAME','TXT','MX','SRV'); exception when duplicate_object then null; end $$;`,
-		`do $$ begin create type proxycore_stream_protocol as enum ('tcp','udp'); exception when duplicate_object then null; end $$;`,
-		`do $$ begin create type proxycore_certificate_issuer as enum ('self-signed','uploaded','letsencrypt'); exception when duplicate_object then null; end $$;`,
-		`do $$ begin create type proxycore_certificate_challenge as enum ('none','http-01','dns-01'); exception when duplicate_object then null; end $$;`,
-		`do $$ begin create type proxycore_certificate_status as enum ('pending','issued','active','expired','failed'); exception when duplicate_object then null; end $$;`,
-		`do $$ begin create type proxycore_job_status as enum ('queued','validating','applying','applied','failed','rolled-back'); exception when duplicate_object then null; end $$;`,
-		`do $$ begin create type proxycore_job_target as enum ('coredns','nginx','combined','certificate'); exception when duplicate_object then null; end $$;`,
+		`do $$ begin create type proxycore_record_type as enum ('A','AAAA','CNAME','TXT','MX','SRV'); exception when duplicate_object or unique_violation then null; end $$;`,
+		`do $$ begin create type proxycore_stream_protocol as enum ('tcp','udp'); exception when duplicate_object or unique_violation then null; end $$;`,
+		`do $$ begin create type proxycore_certificate_issuer as enum ('self-signed','uploaded','letsencrypt'); exception when duplicate_object or unique_violation then null; end $$;`,
+		`do $$ begin create type proxycore_certificate_challenge as enum ('none','http-01','dns-01'); exception when duplicate_object or unique_violation then null; end $$;`,
+		`do $$ begin create type proxycore_certificate_status as enum ('pending','issued','active','expired','failed'); exception when duplicate_object or unique_violation then null; end $$;`,
+		`do $$ begin create type proxycore_job_status as enum ('queued','validating','applying','applied','failed','rolled-back'); exception when duplicate_object or unique_violation then null; end $$;`,
+		`do $$ begin create type proxycore_job_target as enum ('coredns','nginx','combined','certificate'); exception when duplicate_object or unique_violation then null; end $$;`,
 		`create table if not exists installation_settings (
 			id text primary key,
 			ingress_ipv4 text,
@@ -143,7 +145,7 @@ func EnsureSchema(ctx context.Context, pool *pgxpool.Pool) error {
 			'primary-with-nodes',
 			'node',
 			'stale-primary'
-		); exception when duplicate_object then null; end $$;`,
+		); exception when duplicate_object or unique_violation then null; end $$;`,
 		`create table if not exists installation_identity (
 			id text primary key,
 			installation_id uuid not null,
@@ -185,10 +187,27 @@ func EnsureSchema(ctx context.Context, pool *pgxpool.Pool) error {
 		`create unique index if not exists applied_snapshots_content_hash_idx on applied_snapshots (content_hash);`,
 	}
 	statements = append(statements, phase2SchemaContract().Statements...)
+	conn, err := pool.Acquire(ctx)
+	if err != nil {
+		return fmt.Errorf("ensure configuration schema: acquire connection: %w", err)
+	}
+	defer conn.Release()
+
+	tx, err := conn.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("ensure configuration schema: begin transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `select pg_advisory_xact_lock(hashtextextended('proxycore.configuration.ensure_schema.' || coalesce(current_schema(), ''), 0))`); err != nil {
+		return fmt.Errorf("ensure configuration schema: acquire schema lock: %w", err)
+	}
 	for _, statement := range statements {
-		if _, err := pool.Exec(ctx, statement); err != nil {
+		if _, err := tx.Exec(ctx, statement); err != nil {
 			return fmt.Errorf("ensure configuration schema: %w", err)
 		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("ensure configuration schema: commit: %w", err)
 	}
 	return nil
 }
