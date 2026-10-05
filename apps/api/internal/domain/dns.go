@@ -133,9 +133,7 @@ func validateRecordSet(records []DNSRecord, options RecordSetOptions) []DNSRecor
 				proxied++
 			}
 		}
-		if hasCNAME && len(group) > 1 {
-			panic(fmt.Errorf("CNAME cannot coexist with other records for %s", name))
-		}
+		assertDomain(!hasCNAME || len(group) <= 1, "CNAME cannot coexist with other records for "+name, "CNAME_COEXISTENCE")
 		assertDomain(proxied <= 1, "Only one record may be proxied for "+name, "PROXY_HOST_CONFLICT")
 	}
 	return normalized
