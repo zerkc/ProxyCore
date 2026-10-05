@@ -43,6 +43,16 @@ func NewSQLiteRecordWriteStore(writer *sqlitedb.Writer, secretWriter sqliteSecre
 // PG quirks kept on purpose: the sibling records are indexed by the caller's
 // zone id spelling (an uppercase alias sees none), and the conflict update never
 // rewrites zone_id, so reusing an id from another zone updates that row in place.
+//
+// Body ids follow PG's uuid cast (observed on postgres:17): sqliteUpsertRecord
+// canonicalizes uppercase, braced, hyphen-less and grouped spellings through
+// ParseUUIDLookupText, so an alias updates the stored row in place. Siblings are
+// still matched by the caller's spelling like PG, so an alias row is upserted
+// twice (as a sibling, then as the new record, which wins); the final row is
+// correct and no duplicate row or id can appear, so the quirk is replicated.
+// A malformed id fails closed at the same point as PG's cast (after validation
+// and the secret write) with "invalid UUID lookup text" instead of PG's
+// "invalid input syntax for type uuid"; the transaction, secret included, rolls back.
 func (s *SQLiteRecordWriteStore) AddRecord(ctx context.Context, zoneID string, input domain.DNSRecordInput, actorUserID string) (AutoApplyResult[domain.DNSRecord], error) {
 	var result AutoApplyResult[domain.DNSRecord]
 	err := s.writer.Write(ctx, func(v sqlitedb.WriteValue) error {
@@ -176,6 +186,10 @@ func sqliteCertificatesByID(v sqlitedb.WriteValue) ([]domain.CertificateStatus, 
 
 // sqliteUpsertRecord keeps created_at and zone_id on conflict, like PG.
 func sqliteUpsertRecord(v sqlitedb.WriteValue, zoneID string, record domain.DNSRecord) error {
+	storedID, err := sqlitedb.ParseUUIDLookupText(record.ID)
+	if err != nil {
+		return err
+	}
 	valueJSON, err := json.Marshal(record.Value)
 	if err != nil {
 		return err
@@ -205,7 +219,7 @@ func sqliteUpsertRecord(v sqlitedb.WriteValue, zoneID string, record domain.DNSR
 			proxy_settings = excluded.proxy_settings,
 			comment = excluded.comment,
 			updated_at = excluded.updated_at`,
-		record.ID, zoneID, record.Name, record.Type, string(valueJSON), ttl,
+		storedID, zoneID, record.Name, record.Type, string(valueJSON), ttl,
 		sqliteBool(record.Enabled), sqliteBool(record.Proxied), proxyJSON, nullablePtr(record.Comment),
 		v.Timestamp(), v.Timestamp())
 	return err

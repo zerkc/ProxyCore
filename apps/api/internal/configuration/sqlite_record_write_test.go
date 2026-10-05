@@ -583,3 +583,190 @@ func TestSQLiteAddRecordIndependentContention(t *testing.T) {
 		t.Fatal("expected both records, revisions, and jobs")
 	}
 }
+
+const recordOtherZoneRowID = "eeeeeeee-0000-4000-8000-000000000003"
+
+// seedBodyIDFixture holds two rows in the target zone and one in another zone.
+func seedBodyIDFixture(t *testing.T) *recordFixture {
+	t.Helper()
+	f := newRecordFixture(t)
+	f.seedRecord(t, recordExistID, recordZoneID, "a.example.test", "192.0.2.1")
+	f.seedRecord(t, recordExistID2, recordZoneID, "b.example.test", "192.0.2.2")
+	f.seedRecord(t, recordOtherZoneRowID, recordZoneID2, "c.other.test", "192.0.2.3")
+	return f
+}
+
+type bodyIDRow struct{ id, zone, name, value string }
+
+func bodyIDRows(t *testing.T, f *recordFixture) []bodyIDRow {
+	t.Helper()
+	rows, err := f.db.Query(`select id,zone_id,name,value from dns_records order by id`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var all []bodyIDRow
+	for rows.Next() {
+		var r bodyIDRow
+		if err := rows.Scan(&r.id, &r.zone, &r.name, &r.value); err != nil {
+			t.Fatal(err)
+		}
+		all = append(all, r)
+	}
+	return all
+}
+
+// PG observed against postgres:17 (T50 follow-up): a body id is cast to uuid, so
+// uppercase, braced, hyphen-less and 4-digit-group spellings are all accepted and
+// canonicalized in storage. Siblings are matched by the caller's spelling, so an
+// alias of an existing id does not find it: the stored row then appears twice in
+// the upsert set (once as a sibling, once as the new record), the new record is
+// written last and wins, and the returned id keeps the caller's spelling.
+func TestSQLiteAddRecordBodyIDAliasesMirrorPostgres(t *testing.T) {
+	upperExist := strings.ToUpper(recordExistID)
+	cases := []struct {
+		name, id, recordName string
+		wantRows             []bodyIDRow
+	}{
+		{"uppercase existing id updates in place", upperExist, "a", []bodyIDRow{
+			{recordExistID, recordZoneID, "a.example.test", `"192.0.2.50"`},
+			{recordExistID2, recordZoneID, "b.example.test", `"192.0.2.2"`},
+			{recordOtherZoneRowID, recordZoneID2, "c.other.test", `"192.0.2.3"`}}},
+		{"uppercase existing id renamed in place", upperExist, "renamed", []bodyIDRow{
+			{recordExistID, recordZoneID, "renamed.example.test", `"192.0.2.50"`},
+			{recordExistID2, recordZoneID, "b.example.test", `"192.0.2.2"`},
+			{recordOtherZoneRowID, recordZoneID2, "c.other.test", `"192.0.2.3"`}}},
+		{"hyphen-less existing id", strings.ReplaceAll(recordExistID, "-", ""), "a", []bodyIDRow{
+			{recordExistID, recordZoneID, "a.example.test", `"192.0.2.50"`},
+			{recordExistID2, recordZoneID, "b.example.test", `"192.0.2.2"`},
+			{recordOtherZoneRowID, recordZoneID2, "c.other.test", `"192.0.2.3"`}}},
+		{"braced existing id", "{" + recordExistID + "}", "a", []bodyIDRow{
+			{recordExistID, recordZoneID, "a.example.test", `"192.0.2.50"`},
+			{recordExistID2, recordZoneID, "b.example.test", `"192.0.2.2"`},
+			{recordOtherZoneRowID, recordZoneID2, "c.other.test", `"192.0.2.3"`}}},
+		{"4-digit-group existing id", "eeee-eeee-0000-4000-8000-0000-0000-0001", "a", []bodyIDRow{
+			{recordExistID, recordZoneID, "a.example.test", `"192.0.2.50"`},
+			{recordExistID2, recordZoneID, "b.example.test", `"192.0.2.2"`},
+			{recordOtherZoneRowID, recordZoneID2, "c.other.test", `"192.0.2.3"`}}},
+		{"uppercase non-existing id inserts canonical", "EEEEEEEE-0000-4000-8000-0000000000FF", "x", []bodyIDRow{
+			{recordExistID, recordZoneID, "a.example.test", `"192.0.2.1"`},
+			{recordExistID2, recordZoneID, "b.example.test", `"192.0.2.2"`},
+			{recordOtherZoneRowID, recordZoneID2, "c.other.test", `"192.0.2.3"`},
+			{"eeeeeeee-0000-4000-8000-0000000000ff", recordZoneID, "x.example.test", `"192.0.2.50"`}}},
+		{"braced non-existing id inserts canonical", "{eeeeeeee-0000-4000-8000-0000000000ff}", "x", []bodyIDRow{
+			{recordExistID, recordZoneID, "a.example.test", `"192.0.2.1"`},
+			{recordExistID2, recordZoneID, "b.example.test", `"192.0.2.2"`},
+			{recordOtherZoneRowID, recordZoneID2, "c.other.test", `"192.0.2.3"`},
+			{"eeeeeeee-0000-4000-8000-0000000000ff", recordZoneID, "x.example.test", `"192.0.2.50"`}}},
+		{"hyphen-less non-existing id inserts canonical", "eeeeeeee00004000800000000000ffff", "x", []bodyIDRow{
+			{recordExistID, recordZoneID, "a.example.test", `"192.0.2.1"`},
+			{recordExistID2, recordZoneID, "b.example.test", `"192.0.2.2"`},
+			{recordOtherZoneRowID, recordZoneID2, "c.other.test", `"192.0.2.3"`},
+			{"eeeeeeee-0000-4000-8000-00000000ffff", recordZoneID, "x.example.test", `"192.0.2.50"`}}},
+		{"other-zone id lowercase keeps its zone", recordOtherZoneRowID, "x", []bodyIDRow{
+			{recordExistID, recordZoneID, "a.example.test", `"192.0.2.1"`},
+			{recordExistID2, recordZoneID, "b.example.test", `"192.0.2.2"`},
+			{recordOtherZoneRowID, recordZoneID2, "x.example.test", `"192.0.2.50"`}}},
+		{"other-zone id uppercase keeps its zone", strings.ToUpper(recordOtherZoneRowID), "x", []bodyIDRow{
+			{recordExistID, recordZoneID, "a.example.test", `"192.0.2.1"`},
+			{recordExistID2, recordZoneID, "b.example.test", `"192.0.2.2"`},
+			{recordOtherZoneRowID, recordZoneID2, "x.example.test", `"192.0.2.50"`}}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := seedBodyIDFixture(t)
+			input := recordA(tc.recordName, "192.0.2.50")
+			input.ID = tc.id
+			got, err := f.store.AddRecord(createZoneContext(t), recordZoneID, input, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Value.ID != tc.id {
+				t.Fatalf("returned id = %q, want the caller spelling %q", got.Value.ID, tc.id)
+			}
+			if rows := bodyIDRows(t, f); !reflect.DeepEqual(rows, tc.wantRows) {
+				t.Fatalf("rows = %+v", rows)
+			}
+			if enqueueCount(t, f.db, "apply_jobs") != 1 || enqueueCount(t, f.db, "config_revisions") != 1 {
+				t.Fatal("expected exactly one revision and apply job")
+			}
+		})
+	}
+}
+
+func TestSQLiteAddRecordMalformedBodyIDFailsClosedWithoutOrphans(t *testing.T) {
+	// PG fails with "invalid input syntax for type uuid" at the upsert cast; the
+	// SQLite store fails with the shared "invalid UUID lookup text" class at the
+	// same point (after validation), and nothing at all is left behind. PG was observed
+	// for "not-a-uuid" and a 30-digit id; the padded and unterminated-brace cases
+	// follow the shared parser, which rejects them like PG's uuid input.
+	for _, id := range []string{"not-a-uuid", "eeeeeeee00004000800000000000ff", " " + recordExistID, recordExistID + " ", "{" + recordExistID} {
+		for _, withSecret := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%q/secret=%v", id, withSecret), func(t *testing.T) {
+				f := seedBodyIDFixture(t)
+				input := recordA("x", "192.0.2.50")
+				if withSecret {
+					input = recordProxied(map[string]any{"username": "alice", "password": recordPassword})
+				}
+				input.ID = id
+				before := recordState(t, f.db)
+				err := recordExpectRollback(t, f, before, input, createZoneContext(t))
+				if err.Error() != "invalid UUID lookup text" {
+					t.Fatalf("error = %q", err)
+				}
+				if enqueueCount(t, f.db, "secrets") != 0 {
+					t.Fatal("secret survived a failed AddRecord")
+				}
+			})
+		}
+	}
+}
+
+func TestSQLiteAddRecordAliasWithSecretCommitsAtomically(t *testing.T) {
+	f := seedBodyIDFixture(t)
+	input := recordProxied(map[string]any{"username": "alice", "password": recordPassword})
+	input.ID = strings.ToUpper(recordExistID)
+	got, err := f.store.AddRecord(createZoneContext(t), recordZoneID, input, "")
+	if err != nil || got.Value.ID != input.ID {
+		t.Fatal(got, err)
+	}
+	var count int
+	if err := f.db.QueryRow(`select count(*) from dns_records where lower(id)=?`, recordExistID).Scan(&count); err != nil || count != 1 || enqueueCount(t, f.db, "secrets") != 1 || enqueueCount(t, f.db, "dns_records") != 3 {
+		t.Fatal("alias must update in place and keep its secret", count, err)
+	}
+}
+
+func TestSQLiteAddRecordBlankPasswordAcceptsSecretOfAnyPurpose(t *testing.T) {
+	// PG only checks that the secret exists; purpose is not restricted.
+	f := newRecordFixture(t)
+	other, err := f.secrets.Put(createZoneContext(t), "some-other-purpose", "synthetic")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := f.store.AddRecord(createZoneContext(t), recordZoneID, recordProxied(map[string]any{"username": "alice", "passwordSecretId": other}), "")
+	if err != nil || got.Value.Proxy["basicAuth"].(map[string]any)["passwordSecretId"] != other || enqueueCount(t, f.db, "secrets") != 1 {
+		t.Fatal(got, err)
+	}
+}
+
+func TestSQLiteAddRecordAliasDoesNotInheritExistingPasswordSecret(t *testing.T) {
+	// Siblings are matched by the caller's spelling (as in PG), so an alias id
+	// finds no existing proxy settings and a blank password cannot be inherited,
+	// while the canonical spelling inherits it.
+	f := newRecordFixture(t)
+	first := recordProxied(map[string]any{"username": "alice", "password": recordPassword})
+	created, err := f.store.AddRecord(createZoneContext(t), recordZoneID, first, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	blank := recordProxied(map[string]any{"username": "alice"})
+	blank.ID = strings.ToUpper(created.Value.ID)
+	before := recordState(t, f.db)
+	if err := recordExpectRollback(t, f, before, blank, createZoneContext(t)); err.Error() != "Basic Auth password is required" {
+		t.Fatalf("error = %q", err)
+	}
+	blank.ID = created.Value.ID
+	if _, err := f.store.AddRecord(createZoneContext(t), recordZoneID, blank, ""); err != nil {
+		t.Fatal(err)
+	}
+}
