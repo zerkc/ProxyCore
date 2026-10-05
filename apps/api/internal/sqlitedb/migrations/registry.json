@@ -1,0 +1,38 @@
+[
+  {
+    "version": 1,
+    "name": "auth_session_audit",
+    "file": "001_auth.sql",
+    "checksum": "6c8a0dd51d25d1f7850f8a27577fa9d704c25ab6fcbd9f7725bab3c694824da2"
+  },
+  {
+    "version": 2,
+    "name": "configuration_core",
+    "file": "002_configuration_core.sql",
+    "checksum": "c25cd7bf8d4eeda4ccee9449561189f4be9157dc5341f7c60b5f0550fd141680"
+  },
+  {
+    "version": 3,
+    "name": "certificate_product",
+    "file": "003_certificate_product.sql",
+    "checksum": "64ad4355f3cc64b74d8ab4be5de644debbde258cf6f5b70e90f04f612073370b"
+  },
+  {
+    "version": 4,
+    "name": "operational_product",
+    "file": "004_operational_product.sql",
+    "checksum": "c6c57fb904694b998d03e6c534979281f4bb33bb73f685fa2c278a1953f50747"
+  },
+  {
+    "version": 5,
+    "name": "continuity_product",
+    "file": "005_continuity_product.sql",
+    "checksum": "c3af7d310b121f22310a0f92ce3be789caaf8b9683eb99902383a0b6887ca690"
+  },
+  {
+    "version": 6,
+    "name": "enrollment_product",
+    "file": "006_enrollment_product.sql",
+    "checksum": "13e0a5f1e6a3577054f9420aec9ef97996d935ae54ce367f53e90c373ddbab93"
+  }
+]
