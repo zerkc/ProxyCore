@@ -277,6 +277,15 @@ func snapshotDatabase(t *testing.T, pool *pgxpool.Pool) (map[string]int, map[str
 		if err != nil {
 			t.Fatalf("collect %s: %v", table, err)
 		}
+		// pgx returns timestamptz values in the host timezone; the exported bundle
+		// holds the same instants as UTC, so normalize to keep checksums comparable.
+		for _, row := range values {
+			for column, value := range row {
+				if ts, ok := value.(time.Time); ok {
+					row[column] = ts.UTC()
+				}
+			}
+		}
 		encoded, err := json.Marshal(values)
 		if err != nil {
 			t.Fatalf("marshal %s snapshot: %v", table, err)
