@@ -100,7 +100,7 @@ func runServerWithNodeConverter(ctx context.Context, cfg config.Config, logger *
 	}
 
 	var pool *pgxpool.Pool
-	var phase2Store *configuration.PgPhase2Store
+	var phase2Store phase2Backend
 	var configStore *configuration.Store
 	var identitySvc *identity.Service
 	var identityResult identity.Identity
@@ -527,7 +527,11 @@ func nodeConverterEnabled(args []string) bool {
 	return false
 }
 
-func buildNodeConverter(enabled bool, configStore *configuration.Store, identitySvc *identity.Service, logger *log.Logger) *enrollment.NodeConverter {
+func buildNodeConverter(enabled bool, configStore nodeConverterStore, identitySvc *identity.Service, logger *log.Logger) *enrollment.NodeConverter {
+	// A typed-nil *configuration.Store must keep meaning "no store".
+	if concrete, ok := configStore.(*configuration.Store); ok && concrete == nil {
+		configStore = nil
+	}
 	if !enabled || configStore == nil || identitySvc == nil || !nodeConverterRoleEligible(identitySvc) {
 		return nil
 	}
@@ -630,8 +634,8 @@ func (s snapshotByTokenStoreAdapter) ReadSnapshotPublicationByToken(ctx context.
 	}
 }
 
-func productionSnapshotByTokenStore(store *configuration.PgPhase2Store) httpserver.SnapshotByTokenStore {
-	if store == nil {
+func productionSnapshotByTokenStore(store snapshotByTokenStoreReader) httpserver.SnapshotByTokenStore {
+	if concrete, ok := store.(*configuration.PgPhase2Store); store == nil || (ok && concrete == nil) {
 		return nil
 	}
 	return snapshotByTokenStoreAdapter{store: store}
@@ -765,7 +769,7 @@ func (f *enrollmentWorkflowTLSListenerFactory) Listen(ctx context.Context, addre
 	return server, nil
 }
 
-func newEnrollmentWorkflowTLSSupervisor(cfg config.Config, identityService *identity.Service, configStore *configuration.Store, workflow httpserver.EnrollmentWorkflowHandlerOptions, logger *log.Logger, publication ...httpserver.EnrollmentSnapshotPublicationHandlerOptions) (*enrollment.EnrollmentTLSSupervisor, error) {
+func newEnrollmentWorkflowTLSSupervisor(cfg config.Config, identityService *identity.Service, configStore enrollmentTLSConfigurationStore, workflow httpserver.EnrollmentWorkflowHandlerOptions, logger *log.Logger, publication ...httpserver.EnrollmentSnapshotPublicationHandlerOptions) (*enrollment.EnrollmentTLSSupervisor, error) {
 	var publicationOptions *httpserver.EnrollmentSnapshotPublicationHandlerOptions
 	if len(publication) > 0 {
 		copy := publication[0]
@@ -774,11 +778,11 @@ func newEnrollmentWorkflowTLSSupervisor(cfg config.Config, identityService *iden
 	return newEnrollmentWorkflowTLSSupervisorWithHandlers(cfg, identityService, configStore, workflow, logger, publicationOptions, nil)
 }
 
-func newEnrollmentWorkflowTLSSupervisorWithHandlers(cfg config.Config, identityService *identity.Service, configStore *configuration.Store, workflow httpserver.EnrollmentWorkflowHandlerOptions, logger *log.Logger, publication *httpserver.EnrollmentSnapshotPublicationHandlerOptions, snapshotByToken *httpserver.EnrollmentSnapshotByTokenHandlerOptions) (*enrollment.EnrollmentTLSSupervisor, error) {
+func newEnrollmentWorkflowTLSSupervisorWithHandlers(cfg config.Config, identityService *identity.Service, configStore enrollmentTLSConfigurationStore, workflow httpserver.EnrollmentWorkflowHandlerOptions, logger *log.Logger, publication *httpserver.EnrollmentSnapshotPublicationHandlerOptions, snapshotByToken *httpserver.EnrollmentSnapshotByTokenHandlerOptions) (*enrollment.EnrollmentTLSSupervisor, error) {
 	return newEnrollmentWorkflowTLSSupervisorWithHandlersAndAcknowledgement(cfg, identityService, configStore, workflow, logger, publication, snapshotByToken, nil)
 }
 
-func newEnrollmentWorkflowTLSSupervisorWithHandlersAndAcknowledgement(cfg config.Config, identityService *identity.Service, configStore *configuration.Store, workflow httpserver.EnrollmentWorkflowHandlerOptions, logger *log.Logger, publication *httpserver.EnrollmentSnapshotPublicationHandlerOptions, snapshotByToken *httpserver.EnrollmentSnapshotByTokenHandlerOptions, acknowledgement *httpserver.EnrollmentSnapshotAcknowledgementHandlerOptions) (*enrollment.EnrollmentTLSSupervisor, error) {
+func newEnrollmentWorkflowTLSSupervisorWithHandlersAndAcknowledgement(cfg config.Config, identityService *identity.Service, configStore enrollmentTLSConfigurationStore, workflow httpserver.EnrollmentWorkflowHandlerOptions, logger *log.Logger, publication *httpserver.EnrollmentSnapshotPublicationHandlerOptions, snapshotByToken *httpserver.EnrollmentSnapshotByTokenHandlerOptions, acknowledgement *httpserver.EnrollmentSnapshotAcknowledgementHandlerOptions) (*enrollment.EnrollmentTLSSupervisor, error) {
 	identityCurrent := &enrollmentTLSIdentityAdapter{service: identityService, logger: logger}
 	configurationStore := &enrollmentTLSConfigurationAdapter{store: configStore, logger: logger}
 	factory := newEnrollmentWorkflowTLSListenerFactory(identityCurrent, workflow, logger)

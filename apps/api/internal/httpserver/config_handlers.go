@@ -33,7 +33,7 @@ func writeConfigError(w http.ResponseWriter, err error) {
 	writeJSON(w, status, body)
 }
 
-func (s *Server) configStore(w http.ResponseWriter) (*configuration.Store, bool) {
+func (s *Server) configStore(w http.ResponseWriter) (ConfigurationBackend, bool) {
 	if s.config == nil {
 		writeConfigError(w, &httpError{status: http.StatusServiceUnavailable, message: "configuration store is not configured"})
 		return nil, false

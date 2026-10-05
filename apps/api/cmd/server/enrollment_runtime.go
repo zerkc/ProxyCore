@@ -126,8 +126,18 @@ type enrollmentTLSConfigurationAdapter struct {
 	logger *log.Logger
 }
 
+// storeUnconfigured reports whether the adapter has no usable store. A typed-nil
+// *configuration.Store held in the interface counts as not configured.
+func (a *enrollmentTLSConfigurationAdapter) storeUnconfigured() bool {
+	if a.store == nil {
+		return true
+	}
+	concrete, ok := a.store.(*configuration.Store)
+	return ok && concrete == nil
+}
+
 func (a *enrollmentTLSConfigurationAdapter) GetEnrollmentHostnames(ctx context.Context) (configuration.EnrollmentHostnameConfig, error) {
-	if a == nil || a.store == nil {
+	if a == nil || a.storeUnconfigured() {
 		logEnrollmentTLSFailure(configurationAdapterLogger(a), "configuration unavailable")
 		return configuration.EnrollmentHostnameConfig{}, enrollment.ErrEnrollmentTLSConfigurationUnavailable
 	}
@@ -143,7 +153,7 @@ func (a *enrollmentTLSConfigurationAdapter) GetEnrollmentHostnames(ctx context.C
 }
 
 func (a *enrollmentTLSConfigurationAdapter) EnsureEnrollmentTLSMaterial(ctx context.Context) (configuration.EnrollmentTLSMaterial, error) {
-	if a == nil || a.store == nil {
+	if a == nil || a.storeUnconfigured() {
 		logEnrollmentTLSFailure(configurationAdapterLogger(a), "TLS material unavailable")
 		return configuration.EnrollmentTLSMaterial{}, enrollment.ErrEnrollmentTLSMaterialUnavailable
 	}
@@ -205,7 +215,7 @@ func newEnrollmentTLSSupervisor(cfg config.Config, deps enrollmentTLSRuntimeDepe
 	})
 }
 
-func buildEnrollmentTLSSupervisor(cfg config.Config, identityService *identity.Service, configStore *configuration.Store, logger *log.Logger) (*enrollment.EnrollmentTLSSupervisor, error) {
+func buildEnrollmentTLSSupervisor(cfg config.Config, identityService *identity.Service, configStore enrollmentTLSConfigurationStore, logger *log.Logger) (*enrollment.EnrollmentTLSSupervisor, error) {
 	identityCurrent := &enrollmentTLSIdentityAdapter{service: identityService, logger: logger}
 	configurationStore := &enrollmentTLSConfigurationAdapter{store: configStore, logger: logger}
 	return newEnrollmentTLSSupervisor(cfg, enrollmentTLSRuntimeDependencies{

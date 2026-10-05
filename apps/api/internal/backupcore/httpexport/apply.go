@@ -11,17 +11,21 @@ import (
 // configStoreCreateApplyJobAdapter turns the configuration store's enqueue
 // operation into the import engine's narrow post-restore apply port.
 type configStoreCreateApplyJobAdapter struct {
-	store *configuration.Store
+	store configuration.ApplyJobEnqueuer
 }
 
 var _ dbimport.ApplyTrigger = (*configStoreCreateApplyJobAdapter)(nil)
 
-func newConfigStoreCreateApplyJobAdapter(store *configuration.Store) *configStoreCreateApplyJobAdapter {
+func newConfigStoreCreateApplyJobAdapter(store configuration.ApplyJobEnqueuer) *configStoreCreateApplyJobAdapter {
+	// A typed-nil *configuration.Store must keep meaning "nil store".
+	if concrete, ok := store.(*configuration.Store); ok && concrete == nil {
+		store = nil
+	}
 	return &configStoreCreateApplyJobAdapter{store: store}
 }
 
 // NewApplyTrigger constructs the production apply trigger used by BackupImporter.
-func NewApplyTrigger(store *configuration.Store) dbimport.ApplyTrigger {
+func NewApplyTrigger(store configuration.ApplyJobEnqueuer) dbimport.ApplyTrigger {
 	return newConfigStoreCreateApplyJobAdapter(store)
 }
 

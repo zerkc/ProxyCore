@@ -31,12 +31,13 @@ type renewalLoopRuntime struct {
 // RunRenewalLoop periodically renews due Let's Encrypt and internal
 // certificates until ctx is done. Enrollment TLS material is refreshed by its
 // role-aware supervisor, not by this ordinary certificate worker.
-func RunRenewalLoop(ctx context.Context, store *Store, opts RenewalOptions, interval time.Duration) {
+func RunRenewalLoop(ctx context.Context, store RenewalStore, opts RenewalOptions, interval time.Duration) {
 	runRenewalLoop(ctx, store, opts, interval, renewalLoopRuntime{})
 }
 
-func runRenewalLoop(ctx context.Context, store *Store, opts RenewalOptions, interval time.Duration, runtime renewalLoopRuntime) {
-	if ctx == nil || store == nil {
+func runRenewalLoop(ctx context.Context, store RenewalStore, opts RenewalOptions, interval time.Duration, runtime renewalLoopRuntime) {
+	// A typed-nil *Store must keep meaning "no store".
+	if concrete, ok := store.(*Store); ctx == nil || store == nil || (ok && concrete == nil) {
 		return
 	}
 	if interval <= 0 {
