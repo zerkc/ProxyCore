@@ -41,8 +41,12 @@ func NewSQLiteRecordWriteStore(writer *sqlitedb.Writer, secretWriter sqliteSecre
 // no orphan secrets remain (PG commits them independently).
 //
 // PG quirks kept on purpose: the sibling records are indexed by the caller's
-// zone id spelling (an uppercase alias sees none), and the conflict update never
-// rewrites zone_id, so reusing an id from another zone updates that row in place.
+// zone id spelling, so any non-canonical spelling (uppercase, braced, hyphen-less)
+// sees no siblings: they are neither validated nor rewritten, and the
+// proxied-name and CNAME-coexistence rules are not enforced against them (observed
+// on postgres:17, pinned by TestSQLiteAddRecordZoneAliasMirrorsPostgres). The
+// conflict update never rewrites zone_id, so reusing an id from another zone
+// updates that row in place.
 //
 // Body ids follow PG's uuid cast (observed on postgres:17): sqliteUpsertRecord
 // canonicalizes uppercase, braced, hyphen-less and grouped spellings through
@@ -51,8 +55,13 @@ func NewSQLiteRecordWriteStore(writer *sqlitedb.Writer, secretWriter sqliteSecre
 // twice (as a sibling, then as the new record, which wins); the final row is
 // correct and no duplicate row or id can appear, so the quirk is replicated.
 // A malformed id fails closed at the same point as PG's cast (after validation
-// and the secret write) with "invalid UUID lookup text" instead of PG's
-// "invalid input syntax for type uuid"; the transaction, secret included, rolls back.
+// and the secret write) with PG's exact error text (postgresInvalidUUIDError);
+// the transaction, secret included, rolls back. Remaining divergence: a malformed
+// zone id still returns the shared "invalid UUID lookup text" (PG's text comes from
+// its first query), as in the other SQLite zone adapters. A body id containing a
+// NUL byte also differs in text only: PG reports SQLSTATE 22021 (invalid byte
+// sequence for encoding "UTF8") while SQLite reports the 22P02 uuid text; both
+// fail closed and roll back.
 func (s *SQLiteRecordWriteStore) AddRecord(ctx context.Context, zoneID string, input domain.DNSRecordInput, actorUserID string) (AutoApplyResult[domain.DNSRecord], error) {
 	var result AutoApplyResult[domain.DNSRecord]
 	err := s.writer.Write(ctx, func(v sqlitedb.WriteValue) error {
@@ -184,11 +193,18 @@ func sqliteCertificatesByID(v sqlitedb.WriteValue) ([]domain.CertificateStatus, 
 	return certificates, rows.Err()
 }
 
+// postgresInvalidUUIDError reproduces the text pgconn renders for a failed uuid
+// cast, observed on postgres:17: the id is echoed raw between double quotes
+// (not %q-escaped). Callers only print err.Error(), so no typed error is needed.
+func postgresInvalidUUIDError(id string) error {
+	return fmt.Errorf("ERROR: invalid input syntax for type uuid: \"%s\" (SQLSTATE 22P02)", id)
+}
+
 // sqliteUpsertRecord keeps created_at and zone_id on conflict, like PG.
 func sqliteUpsertRecord(v sqlitedb.WriteValue, zoneID string, record domain.DNSRecord) error {
 	storedID, err := sqlitedb.ParseUUIDLookupText(record.ID)
 	if err != nil {
-		return err
+		return postgresInvalidUUIDError(record.ID)
 	}
 	valueJSON, err := json.Marshal(record.Value)
 	if err != nil {

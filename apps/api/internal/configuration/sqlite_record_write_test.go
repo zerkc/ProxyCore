@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math"
 	"reflect"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -695,12 +696,17 @@ func TestSQLiteAddRecordBodyIDAliasesMirrorPostgres(t *testing.T) {
 }
 
 func TestSQLiteAddRecordMalformedBodyIDFailsClosedWithoutOrphans(t *testing.T) {
-	// PG fails with "invalid input syntax for type uuid" at the upsert cast; the
-	// SQLite store fails with the shared "invalid UUID lookup text" class at the
-	// same point (after validation), and nothing at all is left behind. PG was observed
-	// for "not-a-uuid" and a 30-digit id; the padded and unterminated-brace cases
-	// follow the shared parser, which rejects them like PG's uuid input.
-	for _, id := range []string{"not-a-uuid", "eeeeeeee00004000800000000000ff", " " + recordExistID, recordExistID + " ", "{" + recordExistID} {
+	// PG fails at the upsert cast with pgconn's text, observed on postgres:17 as
+	// `ERROR: invalid input syntax for type uuid: "<id>" (SQLSTATE 22P02)`, the id
+	// echoed raw between double quotes (no escaping). The SQLite store fails at the
+	// same point (after validation and the secret write) with the same text, and
+	// nothing at all is left behind. Callers only render err.Error() (every
+	// non-httpError maps to 400), so no typed error is introduced.
+	ids := []string{
+		"not-a-uuid", "eeeeeeee00004000800000000000ff", " " + recordExistID, recordExistID + " ", "{" + recordExistID,
+		`a"b`, `a\b`, "\u00e9", "a\nb",
+	}
+	for _, id := range ids {
 		for _, withSecret := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%q/secret=%v", id, withSecret), func(t *testing.T) {
 				f := seedBodyIDFixture(t)
@@ -711,8 +717,8 @@ func TestSQLiteAddRecordMalformedBodyIDFailsClosedWithoutOrphans(t *testing.T) {
 				input.ID = id
 				before := recordState(t, f.db)
 				err := recordExpectRollback(t, f, before, input, createZoneContext(t))
-				if err.Error() != "invalid UUID lookup text" {
-					t.Fatalf("error = %q", err)
+				if want := `ERROR: invalid input syntax for type uuid: "` + id + `" (SQLSTATE 22P02)`; err.Error() != want {
+					t.Fatalf("error = %q, want %q", err, want)
 				}
 				if enqueueCount(t, f.db, "secrets") != 0 {
 					t.Fatal("secret survived a failed AddRecord")
@@ -768,5 +774,133 @@ func TestSQLiteAddRecordAliasDoesNotInheritExistingPasswordSecret(t *testing.T) 
 	blank.ID = created.Value.ID
 	if _, err := f.store.AddRecord(createZoneContext(t), recordZoneID, blank, ""); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// aliasFixture holds an "a" record and a proxied "www" record in recordZoneID,
+// both stamped updated_at '0' so a rewrite by AddRecord is observable.
+func aliasFixture(t *testing.T) *recordFixture {
+	t.Helper()
+	f := newRecordFixture(t)
+	f.seedRecord(t, recordExistID, recordZoneID, "a.example.test", "192.0.2.1")
+	settingsExec(t, f.db, `insert into dns_records (id,zone_id,name,type,value,ttl,enabled,proxied,proxy_settings,created_at,updated_at)
+		values (?,?,'www.example.test','A','"192.0.2.2"',300,1,1,?,'0','0')`, recordExistID2, recordZoneID,
+		`{"origin":{"ip":"192.0.2.10","port":8080,"protocol":"http"},"tlsEnabled":true,"certificateId":"`+recordCertID+`","websocket":true}`)
+	return f
+}
+
+func aliasRows(t *testing.T, f *recordFixture) []string {
+	t.Helper()
+	rows, err := f.db.Query(`select case when id in (?,?) then substr(id,-2) else 'NEW' end, zone_id, name, type, value, proxied, updated_at <> '0'
+		from dns_records order by name, type, id`, recordExistID, recordExistID2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var id, zone, name, typ, value string
+		var proxied, rewritten bool
+		if err := rows.Scan(&id, &zone, &name, &typ, &value, &proxied, &rewritten); err != nil {
+			t.Fatal(err)
+		}
+		out = append(out, fmt.Sprintf("%s %s %s %s %s proxied=%v rewritten=%v", id, zone[len(zone)-2:], name, typ, value, proxied, rewritten))
+	}
+	return out
+}
+
+// PG observed on postgres:17 (T50 follow-up 2) for a zone with an "a" record and
+// a proxied "www" record: siblings are indexed by the caller's zone id spelling,
+// so uppercase, braced and hyphen-less spellings find none. They are then not
+// validated and not rewritten (updated_at stays), the proxied-name and CNAME
+// coexistence rules never see them, the stored zone_id stays canonical, and every
+// call still creates exactly one revision and apply job. The canonical spelling
+// validates and rewrites the siblings. The CNAME-over-A case is pinned only for
+// aliases: with the canonical spelling PG panics inside domain validation (a
+// pre-existing domain bug shared by both stores, out of scope here).
+func TestSQLiteAddRecordZoneAliasMirrorsPostgres(t *testing.T) {
+	const (
+		aOld    = `01 01 a.example.test A "192.0.2.1" proxied=false rewritten=false`
+		aSame   = `01 01 a.example.test A "192.0.2.1" proxied=false rewritten=true`
+		aPatch  = `01 01 a.example.test A "192.0.2.77" proxied=false rewritten=true`
+		wOld    = `02 01 www.example.test A "192.0.2.2" proxied=true rewritten=false`
+		wNew    = `02 01 www.example.test A "192.0.2.2" proxied=true rewritten=true`
+		cNew    = `NEW 01 c.example.test A "192.0.2.9" proxied=false rewritten=true`
+		dupNew  = `NEW 01 www.example.test A "192.0.2.10" proxied=true rewritten=true`
+		cnameIn = `NEW 01 a.example.test CNAME "x.example.test" proxied=false rewritten=true`
+	)
+	patch := func(id string) domain.DNSRecordInput {
+		in := recordA("a", "192.0.2.77")
+		in.ID = id
+		return in
+	}
+	cname := domain.DNSRecordInput{Name: "a", Type: "CNAME", Value: "x.example.test", Enabled: true}
+	spellings := []struct {
+		name, zone string
+		canonical  bool
+	}{
+		{"canonical", recordZoneID, true},
+		{"uppercase", strings.ToUpper(recordZoneID), false},
+		{"braced", "{" + recordZoneID + "}", false},
+		{"hyphen-less", strings.ReplaceAll(recordZoneID, "-", ""), false},
+	}
+	// canon == nil with canonErr set means the canonical spelling is rejected;
+	// skipCanon leaves the canonical spelling out (PG panics there).
+	ops := []struct {
+		name      string
+		input     domain.DNSRecordInput
+		canon     []string
+		canonErr  string
+		alias     []string
+		skipCanon bool
+	}{
+		{name: "new record", input: recordA("c", "192.0.2.9"),
+			canon: []string{aSame, wNew, cNew}, alias: []string{aOld, wOld, cNew}},
+		{name: "second proxied record for the same name", input: recordProxied(nil),
+			canonErr: "Only one record may be proxied for www.example.test", alias: []string{aOld, wOld, dupNew}},
+		{name: "patch sibling by canonical id", input: patch(recordExistID),
+			canon: []string{aPatch, wNew}, alias: []string{aPatch, wOld}},
+		{name: "patch sibling by uppercase id", input: patch(strings.ToUpper(recordExistID)),
+			canon: []string{aPatch, wNew}, alias: []string{aPatch, wOld}},
+		{name: "CNAME next to an A record", input: cname, skipCanon: true,
+			alias: []string{aOld, wOld, cnameIn}},
+	}
+	for _, sp := range spellings {
+		for _, op := range ops {
+			if sp.canonical && op.skipCanon {
+				continue
+			}
+			t.Run(sp.name+"/"+op.name, func(t *testing.T) {
+				f := aliasFixture(t)
+				before := recordState(t, f.db)
+				got, err := f.store.AddRecord(createZoneContext(t), sp.zone, op.input, "")
+				want, jobs := op.alias, 1
+				if sp.canonical {
+					want = op.canon
+					if op.canonErr != "" {
+						want, jobs = []string{aOld, wOld}, 0
+					}
+				}
+				if jobs == 0 {
+					recordZero(t, got, err)
+					if err.Error() != op.canonErr || recordState(t, f.db) != before {
+						t.Fatalf("error = %q or state changed", err)
+					}
+				} else if err != nil {
+					t.Fatal(err)
+				} else if op.input.ID != "" && got.Value.ID != op.input.ID {
+					t.Fatalf("returned id = %q, want the caller spelling %q", got.Value.ID, op.input.ID)
+				}
+				gotRows, wantRows := aliasRows(t, f), append([]string(nil), want...)
+				sort.Strings(gotRows)
+				sort.Strings(wantRows)
+				if !reflect.DeepEqual(gotRows, wantRows) {
+					t.Fatalf("rows =\n%s\nwant\n%s", strings.Join(gotRows, "\n"), strings.Join(wantRows, "\n"))
+				}
+				if enqueueCount(t, f.db, "apply_jobs") != jobs || enqueueCount(t, f.db, "config_revisions") != jobs {
+					t.Fatalf("want %d revision and apply job", jobs)
+				}
+			})
+		}
 	}
 }
