@@ -74,6 +74,18 @@ type Store interface {
 	CompletePasswordChange(ctx context.Context, userID, currentSessionID, passwordHash string, at time.Time, event AuditEvent) (User, error)
 }
 
+// bootstrapUserStore optionally serializes the first active user insertion.
+// Stores without this capability retain the original bootstrap path.
+type bootstrapUserStore interface {
+	BootstrapUser(context.Context, User) (User, error)
+}
+
+// credentialSessionStore optionally binds session insertion to the verified hash.
+// Stores without this capability retain the original CreateSession behavior.
+type credentialSessionStore interface {
+	CreateSessionForCredential(context.Context, Session, string) (Session, User, error)
+}
+
 type AuthSession struct {
 	Token     string    `json:"-"`
 	UserID    string    `json:"userId"`
@@ -118,7 +130,15 @@ func (s *Service) Bootstrap(ctx context.Context, username, password string) (Use
 	if err != nil {
 		return User{}, err
 	}
-	created, err := s.store.CreateUser(ctx, user)
+	var created User
+	if bootstrap, ok := s.store.(bootstrapUserStore); ok {
+		created, err = bootstrap.BootstrapUser(ctx, user)
+		if errors.Is(err, ErrBootstrapComplete) {
+			_ = s.audit(ctx, "bootstrap", "installation", nil, nil, "denied", nil)
+		}
+	} else {
+		created, err = s.store.CreateUser(ctx, user)
+	}
 	if err != nil {
 		return User{}, err
 	}
@@ -151,13 +171,25 @@ func (s *Service) Login(ctx context.Context, username, password string) (AuthSes
 	}
 	now := s.now().UTC()
 	expiresAt := now.Add(s.sessionTTL)
-	session, err := s.store.CreateSession(ctx, Session{
+	session := Session{
 		ID:        newUUID(),
 		UserID:    user.ID,
 		TokenHash: HashOpaqueToken(token),
 		ExpiresAt: expiresAt,
 		CreatedAt: now,
-	})
+	}
+	if credentials, ok := s.store.(credentialSessionStore); ok {
+		var current User
+		session, current, err = credentials.CreateSessionForCredential(ctx, session, user.PasswordHash)
+		if errors.Is(err, ErrInvalidCredential) {
+			_ = s.audit(ctx, "login", "user", &user.ID, nil, "failure", map[string]any{"username": normalized})
+		}
+		if err == nil {
+			user = &current
+		}
+	} else {
+		session, err = s.store.CreateSession(ctx, session)
+	}
 	if err != nil {
 		return AuthSession{}, err
 	}
