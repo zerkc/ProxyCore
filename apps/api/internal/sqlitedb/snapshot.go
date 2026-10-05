@@ -13,13 +13,38 @@ import (
 	"strings"
 )
 
-// snapshotAfterVacuum is a test seam invoked with the temp path after VACUUM INTO.
-var snapshotAfterVacuum func(path string)
+// ErrSnapshotPublishedUnsynced reports that the snapshot was fully verified and
+// published at the destination, but fsyncing the parent directory failed, so the
+// durability of the directory entry is unconfirmed. Check with errors.Is.
+var ErrSnapshotPublishedUnsynced = errors.New("snapshot published but directory sync failed")
+
+// Test seams. Unexported; production values are the real implementations or nil.
+var (
+	// snapshotAfterVacuum is invoked with the temp path after VACUUM INTO.
+	snapshotAfterVacuum func(path string)
+	snapshotLink        = os.Link
+	snapshotSync        = syncPath
+)
 
 // Snapshot writes a consistent, standalone copy of db to destPath using
 // VACUUM INTO. It never overwrites, never modifies the source, verifies the
 // copy fail-closed, and removes its temp file on every failure. The parent
 // directory of destPath must already exist.
+//
+// Contract:
+//   - Any error other than ErrSnapshotPublishedUnsynced means nothing was
+//     published at destPath.
+//   - An error matching ErrSnapshotPublishedUnsynced means destPath exists with
+//     verified 0600 content, but the directory entry may not be durable; callers
+//     may keep the file or remove it and retry.
+//   - Publishing uses a hard link so it can never overwrite a racing
+//     destination. There is deliberately no rename fallback (it would
+//     reintroduce the overwrite race): the destination filesystem must support
+//     hard links, otherwise Snapshot fails closed.
+//   - The source migration ledger is read after the copy on a separate
+//     connection. A migration committing in between yields a spurious
+//     "schema version mismatch" failure; it is harmless (nothing is published)
+//     and the caller may simply retry.
 func Snapshot(ctx context.Context, db *sql.DB, destPath string) (err error) {
 	if destPath == "" || strings.ContainsRune(destPath, 0) {
 		return fmt.Errorf("snapshot requires a nonempty destination without NUL")
@@ -70,17 +95,20 @@ func Snapshot(ctx context.Context, db *sql.DB, destPath string) (err error) {
 	if err := os.Chmod(tmp, 0o600); err != nil {
 		return err
 	}
-	if err := syncPath(tmp); err != nil {
+	if err := snapshotSync(tmp); err != nil {
 		return err
 	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	// Link then unlink gives an atomic rename that cannot overwrite a racing destination.
-	if err := os.Link(tmp, dest); err != nil {
-		return fmt.Errorf("snapshot publish: %w", err)
+	if err := snapshotLink(tmp, dest); err != nil {
+		return fmt.Errorf("snapshot publish failed (destination filesystem must support hard links): %w", err)
 	}
-	return syncPath(dir)
+	if err := snapshotSync(dir); err != nil {
+		return fmt.Errorf("%w: %w", ErrSnapshotPublishedUnsynced, err)
+	}
+	return nil
 }
 
 func syncPath(path string) error {
@@ -104,11 +132,17 @@ func verifySnapshot(ctx context.Context, src *sql.DB, path string) error {
 	for _, pragma := range []string{"integrity_check", "quick_check"} {
 		var result string
 		if err := snap.QueryRowContext(ctx, "PRAGMA "+pragma).Scan(&result); err != nil || result != "ok" {
+			if cerr := ctx.Err(); cerr != nil {
+				return cerr
+			}
 			return fmt.Errorf("snapshot %s failed", pragma)
 		}
 	}
 	rows, err := snap.QueryContext(ctx, "PRAGMA foreign_key_check")
 	if err != nil {
+		if cerr := ctx.Err(); cerr != nil {
+			return cerr
+		}
 		return fmt.Errorf("snapshot foreign_key_check failed")
 	}
 	violations := rows.Next()
