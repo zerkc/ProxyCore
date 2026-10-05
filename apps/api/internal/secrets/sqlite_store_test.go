@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/base64"
+	"errors"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -240,4 +241,151 @@ func TestSQLiteStoreClosedAndNil(t *testing.T) {
 			t.Fatalf("%s: Get succeeded", name)
 		}
 	}
+}
+
+func TestSQLiteStorePutInWrite(t *testing.T) {
+	ctx := context.Background()
+	db := openSQLiteSecretsDB(t)
+	store := NewSQLiteStore(db, testKeyA)
+	writer := sqlitedb.NewWriter(db, func() sqlitedb.FiniteTimestamp {
+		return sqlitedb.FiniteTimestamp{Seconds: 123, Nanos: 456}
+	})
+
+	t.Run("usable inside Writer.Write with uncommitted read-back", func(t *testing.T) {
+		const plaintext = "synthetic-in-write-value"
+		var id, readBack string
+		err := writer.Write(ctx, func(v sqlitedb.WriteValue) error {
+			var err error
+			if id, err = store.PutInWrite(v, "in-write", plaintext); err != nil {
+				return err
+			}
+			readBack, err = store.GetInWrite(v, id)
+			return err
+		})
+		if err != nil || readBack != plaintext {
+			t.Fatalf("PutInWrite/GetInWrite = (%q, %v)", readBack, err)
+		}
+		if got, err := store.Get(ctx, id); err != nil || got != plaintext {
+			t.Fatalf("Get after commit = (%q, %v)", got, err)
+		}
+	})
+
+	t.Run("parity with Put: id format, clock, ciphertext at rest", func(t *testing.T) {
+		const plaintext = "synthetic-parity-value"
+		var id string
+		err := writer.Write(ctx, func(v sqlitedb.WriteValue) (err error) {
+			id, err = store.PutInWrite(v, "parity", plaintext)
+			return err
+		})
+		if err != nil || !uuidRe.MatchString(id) {
+			t.Fatalf("PutInWrite = (%q, %v)", id, err)
+		}
+		var purpose, ciphertext, created, updated string
+		if err := db.QueryRow(`select purpose,ciphertext,created_at,updated_at from secrets where id=?`, id).
+			Scan(&purpose, &ciphertext, &created, &updated); err != nil {
+			t.Fatal(err)
+		}
+		stamp, _ := sqlitedb.EncodeTimestamp(sqlitedb.FiniteTimestamp{Seconds: 123, Nanos: 456})
+		if purpose != "parity" || created != *stamp || updated != *stamp {
+			t.Fatalf("row purpose=%q created=%q updated=%q", purpose, created, updated)
+		}
+		if strings.Contains(ciphertext, plaintext) || !strings.HasPrefix(ciphertext, "v1:") {
+			t.Fatal("ciphertext at rest is not an encrypted v1 envelope")
+		}
+		if decrypted, err := DecryptSecret(ciphertext, testKeyA); err != nil || decrypted != plaintext {
+			t.Fatalf("DecryptSecret mismatch: %v", err)
+		}
+	})
+
+	t.Run("secret rolls back with the surrounding Write", func(t *testing.T) {
+		var before, after int
+		db.QueryRow(`select count(*) from secrets`).Scan(&before)
+		var id string
+		err := writer.Write(ctx, func(v sqlitedb.WriteValue) (err error) {
+			if id, err = store.PutInWrite(v, "rollback", "synthetic-rollback-value"); err != nil {
+				return err
+			}
+			return errors.New("injected failure")
+		})
+		if err == nil || id == "" {
+			t.Fatalf("expected injected failure after a successful insert: %v", err)
+		}
+		db.QueryRow(`select count(*) from secrets`).Scan(&after)
+		if before != after {
+			t.Fatal("secret survived rollback")
+		}
+		if got, err := store.Get(ctx, id); err != nil || got != "" {
+			t.Fatalf("Get after rollback = (%q, %v)", got, err)
+		}
+	})
+
+	t.Run("invalid key and bad purpose write nothing", func(t *testing.T) {
+		var before, after int
+		db.QueryRow(`select count(*) from secrets`).Scan(&before)
+		err := writer.Write(ctx, func(v sqlitedb.WriteValue) error {
+			if id, err := NewSQLiteStore(db, "short").PutInWrite(v, "p", "x"); err == nil || id != "" {
+				t.Fatalf("invalid key PutInWrite = (%q, %v)", id, err)
+			}
+			if id, err := store.PutInWrite(v, "a\x00b", "x"); err == nil || id != "" {
+				t.Fatalf("NUL purpose PutInWrite = (%q, %v)", id, err)
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		db.QueryRow(`select count(*) from secrets`).Scan(&after)
+		if before != after {
+			t.Fatal("failed PutInWrite wrote a row")
+		}
+	})
+
+	t.Run("GetInWrite mirrors Get for unknown, malformed and wrong key", func(t *testing.T) {
+		err := writer.Write(ctx, func(v sqlitedb.WriteValue) error {
+			if got, err := store.GetInWrite(v, "00000000-0000-4000-8000-000000000000"); err != nil || got != "" {
+				t.Fatalf("unknown = (%q, %v)", got, err)
+			}
+			if got, err := store.GetInWrite(v, "not-a-uuid"); err == nil || got != "" {
+				t.Fatalf("malformed = (%q, %v)", got, err)
+			}
+			id, err := store.PutInWrite(v, "p", "synthetic-wrong-key")
+			if err != nil {
+				return err
+			}
+			if got, err := NewSQLiteStore(db, testKeyB).GetInWrite(v, id); err == nil || got != "" {
+				t.Fatalf("wrong key = (%q, %v)", got, err)
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("nil receiver and nil db", func(t *testing.T) {
+		err := writer.Write(ctx, func(v sqlitedb.WriteValue) error {
+			for name, s := range map[string]*SQLiteStore{"nil receiver": nil, "nil db": NewSQLiteStore(nil, testKeyA)} {
+				if _, err := s.PutInWrite(v, "p", "x"); err == nil {
+					t.Fatalf("%s: PutInWrite succeeded", name)
+				}
+				if _, err := s.GetInWrite(v, "00000000-0000-4000-8000-000000000000"); err == nil {
+					t.Fatalf("%s: GetInWrite succeeded", name)
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("nested Write is still refused", func(t *testing.T) {
+		err := writer.Write(ctx, func(v sqlitedb.WriteValue) error {
+			_, err := store.Put(v.Context(), "p", "x")
+			return err
+		})
+		if err == nil || !strings.Contains(err.Error(), "nested write transaction") {
+			t.Fatalf("Put inside Write = %v", err)
+		}
+	})
 }

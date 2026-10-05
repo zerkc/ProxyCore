@@ -46,20 +46,38 @@ func (s *SQLiteStore) Put(ctx context.Context, purpose, plaintext string) (strin
 		return "", err
 	}
 	var id string
-	err = s.writer.Write(ctx, func(v sqlitedb.WriteValue) error {
-		newID, err := v.NewUUID()
-		if err != nil {
-			return err
-		}
-		_, err = v.Conn().ExecContext(v.Context(),
-			`insert into secrets (id, purpose, ciphertext, created_at, updated_at) values (?,?,?,?,?)`,
-			newID, purpose, ciphertext, v.Timestamp(), v.Timestamp())
-		if err == nil {
-			id = newID
-		}
+	err = s.writer.Write(ctx, func(v sqlitedb.WriteValue) (err error) {
+		id, err = insertSecret(v, purpose, ciphertext)
 		return err
 	})
 	if err != nil {
+		return "", err
+	}
+	return id, nil
+}
+
+// PutInWrite is Put inside a caller-owned writer transaction: it opens none, so
+// the secret commits or rolls back with the surrounding Write. It uses the
+// writer value's UUID and clock, and never retains the connection.
+func (s *SQLiteStore) PutInWrite(v sqlitedb.WriteValue, purpose, plaintext string) (string, error) {
+	if err := s.ready(); err != nil {
+		return "", err
+	}
+	ciphertext, err := EncryptSecret(plaintext, s.masterKeyBase64)
+	if err != nil {
+		return "", err
+	}
+	return insertSecret(v, purpose, ciphertext)
+}
+
+func insertSecret(v sqlitedb.WriteValue, purpose, ciphertext string) (string, error) {
+	id, err := v.NewUUID()
+	if err != nil {
+		return "", err
+	}
+	if _, err := v.Conn().ExecContext(v.Context(),
+		`insert into secrets (id, purpose, ciphertext, created_at, updated_at) values (?,?,?,?,?)`,
+		id, purpose, ciphertext, v.Timestamp(), v.Timestamp()); err != nil {
 		return "", err
 	}
 	return id, nil
@@ -71,12 +89,29 @@ func (s *SQLiteStore) Get(ctx context.Context, id string) (string, error) {
 	if err := s.ready(); err != nil {
 		return "", err
 	}
+	return s.get(ctx, s.db, id)
+}
+
+// GetInWrite is Get on the writer's connection, so it also sees secrets that
+// the surrounding Write has not committed yet.
+func (s *SQLiteStore) GetInWrite(v sqlitedb.WriteValue, id string) (string, error) {
+	if err := s.ready(); err != nil {
+		return "", err
+	}
+	return s.get(v.Context(), v.Conn(), id)
+}
+
+type secretQueryer interface {
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+func (s *SQLiteStore) get(ctx context.Context, q secretQueryer, id string) (string, error) {
 	key, err := canonicalUUID(id)
 	if err != nil {
 		return "", err
 	}
 	var ciphertext string
-	err = s.db.QueryRowContext(ctx, `select ciphertext from secrets where id = ?`, key).Scan(&ciphertext)
+	err = q.QueryRowContext(ctx, `select ciphertext from secrets where id = ?`, key).Scan(&ciphertext)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil
 	}
