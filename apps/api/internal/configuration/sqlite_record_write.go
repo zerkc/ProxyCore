@@ -40,28 +40,24 @@ func NewSQLiteRecordWriteStore(writer *sqlitedb.Writer, secretWriter sqliteSecre
 // transaction as the record, so any later failure rolls the secret back too and
 // no orphan secrets remain (PG commits them independently).
 //
-// PG quirks kept on purpose: the sibling records are indexed by the caller's
-// zone id spelling, so any non-canonical spelling (uppercase, braced, hyphen-less)
-// sees no siblings: they are neither validated nor rewritten, and the
-// proxied-name and CNAME-coexistence rules are not enforced against them (observed
-// on postgres:17, pinned by TestSQLiteAddRecordZoneAliasMirrorsPostgres). The
-// conflict update never rewrites zone_id, so reusing an id from another zone
-// updates that row in place.
+// The zone id and the body id are canonicalized once at entry through the same
+// uuid grammar PG's cast accepts (uppercase, braced, hyphen-less, 4-digit groups),
+// so every accepted spelling behaves exactly like the canonical one: siblings are
+// found, validated (proxied-name and CNAME-coexistence rules) and rewritten, and
+// an alias of an existing record id updates that row in place without appearing
+// twice in the validation set. This deliberately fixes a pre-existing PG defect
+// (siblings indexed by the caller's spelling) in both stores. The returned
+// record id is therefore canonical. The conflict update never rewrites zone_id,
+// so reusing an id from another zone updates that row in place.
 //
-// Body ids follow PG's uuid cast (observed on postgres:17): sqliteUpsertRecord
-// canonicalizes uppercase, braced, hyphen-less and grouped spellings through
-// ParseUUIDLookupText, so an alias updates the stored row in place. Siblings are
-// still matched by the caller's spelling like PG, so an alias row is upserted
-// twice (as a sibling, then as the new record, which wins); the final row is
-// correct and no duplicate row or id can appear, so the quirk is replicated.
-// A malformed id fails closed at the same point as PG's cast (after validation
-// and the secret write) with PG's exact error text (postgresInvalidUUIDError);
-// the transaction, secret included, rolls back. Remaining divergence: a malformed
-// zone id still returns the shared "invalid UUID lookup text" (PG's text comes from
-// its first query), as in the other SQLite zone adapters. A body id containing a
-// NUL byte also differs in text only: PG reports SQLSTATE 22021 (invalid byte
-// sequence for encoding "UTF8") while SQLite reports the 22P02 uuid text; both
-// fail closed and roll back.
+// A malformed body id is passed through and fails closed at the same point as PG's
+// cast (after validation and the secret write) with PG's exact error text
+// (postgresInvalidUUIDError); the transaction, secret included, rolls back.
+// Remaining divergence: a malformed zone id still returns the shared "invalid UUID
+// lookup text" (PG's text comes from its first query), as in the other SQLite zone
+// adapters. A body id containing a NUL byte also differs in text only: PG reports
+// SQLSTATE 22021 (invalid byte sequence for encoding "UTF8") while SQLite reports
+// the 22P02 uuid text; both fail closed and roll back.
 func (s *SQLiteRecordWriteStore) AddRecord(ctx context.Context, zoneID string, input domain.DNSRecordInput, actorUserID string) (AutoApplyResult[domain.DNSRecord], error) {
 	var result AutoApplyResult[domain.DNSRecord]
 	err := s.writer.Write(ctx, func(v sqlitedb.WriteValue) error {
@@ -82,9 +78,6 @@ func (s *SQLiteRecordWriteStore) AddRecord(ctx context.Context, zoneID string, i
 		if err != nil {
 			return err
 		}
-		if zoneID != canonicalZone {
-			current = nil
-		}
 		certificates, err := sqliteCertificatesByID(v)
 		if err != nil {
 			return err
@@ -95,7 +88,10 @@ func (s *SQLiteRecordWriteStore) AddRecord(ctx context.Context, zoneID string, i
 		}
 		ingress := domain.Ingress{IPv4: deref(settingsRow.ingressIPv4), IPv6: deref(settingsRow.ingressIPv6)}
 
-		recordID := input.ID
+		// Canonicalized once, like the zone id: stored ids are canonical, so the
+		// sibling match below must compare canonical spellings. A malformed id is
+		// passed through and fails at the upsert like PG's cast.
+		recordID := canonicalUUIDText(input.ID)
 		if recordID == "" {
 			if recordID, err = v.NewUUID(); err != nil {
 				return err

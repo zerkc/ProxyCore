@@ -228,7 +228,7 @@ func getZone(ctx context.Context, q querier, id string) (domain.ZoneState, error
 	if err != nil {
 		return domain.ZoneState{}, err
 	}
-	zone.Records = grouped[id]
+	zone.Records = grouped[zone.ID]
 	if zone.Records == nil {
 		zone.Records = []domain.DNSRecord{}
 	}

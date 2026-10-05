@@ -21,6 +21,10 @@ func (s *Store) AddRecord(ctx context.Context, zoneID string, input domain.DNSRe
 	}
 	defer tx.Rollback(ctx)
 
+	// Stored ids are canonical lowercase uuids: canonicalize every accepted
+	// spelling once so sibling lookups and validation see the stored records. A
+	// malformed id is passed through and fails at the first query's uuid cast.
+	zoneID = canonicalUUIDText(zoneID)
 	var zoneName string
 	err = tx.QueryRow(ctx, `select name from zones where id = $1 for update`, zoneID).Scan(&zoneName)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -47,7 +51,7 @@ func (s *Store) AddRecord(ctx context.Context, zoneID string, input domain.DNSRe
 	}
 	ingress := domain.Ingress{IPv4: deref(settingsRow.ingressIPv4), IPv6: deref(settingsRow.ingressIPv6)}
 
-	recordID := input.ID
+	recordID := canonicalUUIDText(input.ID)
 	if recordID == "" {
 		recordID = newUUID()
 	}

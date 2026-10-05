@@ -19,8 +19,9 @@ func NewSQLiteZoneReadStore(db *sql.DB) *SQLiteZoneReadStore {
 	return &SQLiteZoneReadStore{db: db}
 }
 
-// GetZone retains PostgreSQL's two nontransactional reads and caller-spelled
-// grouping. Ordering by name alone does not establish cross-engine collation
+// GetZone retains PostgreSQL's two nontransactional reads; records are selected
+// by the stored canonical zone id, so any accepted spelling sees its records.
+// Ordering by name alone does not establish cross-engine collation
 // parity or a tie-breaker. scanRecord retains the source's float64 JSON decoding.
 func (s *SQLiteZoneReadStore) GetZone(ctx context.Context, id string) (domain.ZoneState, error) {
 	canonicalID, err := sqlitedb.ParseUUIDLookupText(id)
@@ -54,8 +55,8 @@ func (s *SQLiteZoneReadStore) GetZone(ctx context.Context, id string) (domain.Zo
 	if err := rows.Err(); err != nil {
 		return domain.ZoneState{}, err
 	}
-	// Even aliases must decode all matching rows before selecting by original id.
-	zone.Records = grouped[id]
+	// Even aliases must decode all matching rows before selecting by the stored id.
+	zone.Records = grouped[zone.ID]
 	if zone.Records == nil {
 		zone.Records = []domain.DNSRecord{}
 	}

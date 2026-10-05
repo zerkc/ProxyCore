@@ -49,11 +49,8 @@ func TestSQLiteZonesLookup(t *testing.T) {
 			if err != nil || got.ID != want.ID || got.Name != want.Name || got.Enabled || got.Records == nil {
 				t.Fatal(got, err)
 			}
-			expected := 0
-			if id == sqliteZoneID {
-				expected = 1
-			}
-			if len(got.Records) != expected {
+			// Every accepted spelling sees the zone's records, like the canonical one.
+			if len(got.Records) != 1 {
 				t.Fatal(got.Records)
 			}
 		})

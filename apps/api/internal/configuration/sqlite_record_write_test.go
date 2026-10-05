@@ -283,9 +283,9 @@ func TestSQLiteAddRecordSameIDInOtherZoneKeepsItsZone(t *testing.T) {
 	}
 }
 
-func TestSQLiteAddRecordUppercaseZoneAliasMirrorsCallerSpelledGrouping(t *testing.T) {
-	// PG groups records by canonical zone_id::text and then indexes the map with
-	// the caller's spelling, so an uppercase alias sees no sibling records.
+func TestSQLiteAddRecordUppercaseZoneAliasRewritesSiblings(t *testing.T) {
+	// Follow-up 3: the zone id is canonicalized at entry, so an uppercase alias
+	// sees the sibling records exactly like the canonical spelling and rewrites them.
 	f := newRecordFixture(t)
 	f.seedRecord(t, recordExistID, recordZoneID, "a.example.test", "192.0.2.1")
 	if _, err := f.store.AddRecord(createZoneContext(t), strings.ToUpper(recordZoneID), recordA("b", "192.0.2.2"), ""); err != nil {
@@ -299,8 +299,8 @@ func TestSQLiteAddRecordUppercaseZoneAliasMirrorsCallerSpelledGrouping(t *testin
 	if err := f.db.QueryRow(`select zone_id from dns_records where id<>?`, recordExistID).Scan(&added); err != nil {
 		t.Fatal(err)
 	}
-	if updated != "0" || zone != recordZoneID || added != recordZoneID {
-		t.Fatal("alias must canonicalize the stored zone and skip sibling rewrite", updated, zone, added)
+	if updated == "0" || zone != recordZoneID || added != recordZoneID {
+		t.Fatal("alias must rewrite the siblings and keep the canonical zone", updated, zone, added)
 	}
 }
 
@@ -619,10 +619,9 @@ func bodyIDRows(t *testing.T, f *recordFixture) []bodyIDRow {
 
 // PG observed against postgres:17 (T50 follow-up): a body id is cast to uuid, so
 // uppercase, braced, hyphen-less and 4-digit-group spellings are all accepted and
-// canonicalized in storage. Siblings are matched by the caller's spelling, so an
-// alias of an existing id does not find it: the stored row then appears twice in
-// the upsert set (once as a sibling, once as the new record), the new record is
-// written last and wins, and the returned id keeps the caller's spelling.
+// canonicalized in storage. Follow-up 3 canonicalizes the body id once at entry,
+// so an alias of an existing id finds that row as the same record (no duplicate
+// in the validation or upsert set) and the returned id is the canonical one.
 func TestSQLiteAddRecordBodyIDAliasesMirrorPostgres(t *testing.T) {
 	upperExist := strings.ToUpper(recordExistID)
 	cases := []struct {
@@ -682,8 +681,8 @@ func TestSQLiteAddRecordBodyIDAliasesMirrorPostgres(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got.Value.ID != tc.id {
-				t.Fatalf("returned id = %q, want the caller spelling %q", got.Value.ID, tc.id)
+			if want := canonicalUUIDText(tc.id); got.Value.ID != want {
+				t.Fatalf("returned id = %q, want the canonical %q", got.Value.ID, want)
 			}
 			if rows := bodyIDRows(t, f); !reflect.DeepEqual(rows, tc.wantRows) {
 				t.Fatalf("rows = %+v", rows)
@@ -733,8 +732,8 @@ func TestSQLiteAddRecordAliasWithSecretCommitsAtomically(t *testing.T) {
 	input := recordProxied(map[string]any{"username": "alice", "password": recordPassword})
 	input.ID = strings.ToUpper(recordExistID)
 	got, err := f.store.AddRecord(createZoneContext(t), recordZoneID, input, "")
-	if err != nil || got.Value.ID != input.ID {
-		t.Fatal(got, err)
+	if err != nil || got.Value.ID != recordExistID {
+		t.Fatal(got.Value.ID, err)
 	}
 	var count int
 	if err := f.db.QueryRow(`select count(*) from dns_records where lower(id)=?`, recordExistID).Scan(&count); err != nil || count != 1 || enqueueCount(t, f.db, "secrets") != 1 || enqueueCount(t, f.db, "dns_records") != 3 {
@@ -755,10 +754,9 @@ func TestSQLiteAddRecordBlankPasswordAcceptsSecretOfAnyPurpose(t *testing.T) {
 	}
 }
 
-func TestSQLiteAddRecordAliasDoesNotInheritExistingPasswordSecret(t *testing.T) {
-	// Siblings are matched by the caller's spelling (as in PG), so an alias id
-	// finds no existing proxy settings and a blank password cannot be inherited,
-	// while the canonical spelling inherits it.
+func TestSQLiteAddRecordAliasInheritsExistingPasswordSecret(t *testing.T) {
+	// Follow-up 3: the record id is canonicalized at entry, so an alias id finds
+	// the existing record and inherits its password secret like the canonical one.
 	f := newRecordFixture(t)
 	first := recordProxied(map[string]any{"username": "alice", "password": recordPassword})
 	created, err := f.store.AddRecord(createZoneContext(t), recordZoneID, first, "")
@@ -767,13 +765,13 @@ func TestSQLiteAddRecordAliasDoesNotInheritExistingPasswordSecret(t *testing.T) 
 	}
 	blank := recordProxied(map[string]any{"username": "alice"})
 	blank.ID = strings.ToUpper(created.Value.ID)
-	before := recordState(t, f.db)
-	if err := recordExpectRollback(t, f, before, blank, createZoneContext(t)); err.Error() != "Basic Auth password is required" {
-		t.Fatalf("error = %q", err)
-	}
-	blank.ID = created.Value.ID
-	if _, err := f.store.AddRecord(createZoneContext(t), recordZoneID, blank, ""); err != nil {
+	got, err := f.store.AddRecord(createZoneContext(t), recordZoneID, blank, "")
+	if err != nil {
 		t.Fatal(err)
+	}
+	want := created.Value.Proxy["basicAuth"].(map[string]any)["passwordSecretId"]
+	if got.Value.Proxy["basicAuth"].(map[string]any)["passwordSecretId"] != want || enqueueCount(t, f.db, "secrets") != 1 {
+		t.Fatal("alias did not inherit the stored secret")
 	}
 }
 
@@ -809,25 +807,20 @@ func aliasRows(t *testing.T, f *recordFixture) []string {
 	return out
 }
 
-// PG observed on postgres:17 (T50 follow-up 2) for a zone with an "a" record and
-// a proxied "www" record: siblings are indexed by the caller's zone id spelling,
-// so uppercase, braced and hyphen-less spellings find none. They are then not
-// validated and not rewritten (updated_at stays), the proxied-name and CNAME
-// coexistence rules never see them, the stored zone_id stays canonical, and every
-// call still creates exactly one revision and apply job. The canonical spelling
-// validates and rewrites the siblings. The CNAME-over-A case is pinned only for
-// aliases: with the canonical spelling PG panics inside domain validation (a
-// pre-existing domain bug shared by both stores, out of scope here).
-func TestSQLiteAddRecordZoneAliasMirrorsPostgres(t *testing.T) {
+// T50 follow-up 3: every spelling PG's uuid parser accepts for the zone id is
+// canonicalized once at the entry of AddRecord, so uppercase, braced and
+// hyphen-less spellings behave exactly like the canonical one: siblings are found,
+// validated (proxied-name and CNAME-coexistence rules) and rewritten, and a
+// rejected call changes nothing. Before follow-up 3 PG and this store indexed the
+// siblings by the caller's spelling, so aliases skipped all of that.
+func TestSQLiteAddRecordZoneAliasBehavesLikeCanonical(t *testing.T) {
 	const (
-		aOld    = `01 01 a.example.test A "192.0.2.1" proxied=false rewritten=false`
-		aSame   = `01 01 a.example.test A "192.0.2.1" proxied=false rewritten=true`
-		aPatch  = `01 01 a.example.test A "192.0.2.77" proxied=false rewritten=true`
-		wOld    = `02 01 www.example.test A "192.0.2.2" proxied=true rewritten=false`
-		wNew    = `02 01 www.example.test A "192.0.2.2" proxied=true rewritten=true`
-		cNew    = `NEW 01 c.example.test A "192.0.2.9" proxied=false rewritten=true`
-		dupNew  = `NEW 01 www.example.test A "192.0.2.10" proxied=true rewritten=true`
-		cnameIn = `NEW 01 a.example.test CNAME "x.example.test" proxied=false rewritten=true`
+		aSame  = `01 01 a.example.test A "192.0.2.1" proxied=false rewritten=true`
+		aPatch = `01 01 a.example.test A "192.0.2.77" proxied=false rewritten=true`
+		aOld   = `01 01 a.example.test A "192.0.2.1" proxied=false rewritten=false`
+		wOld   = `02 01 www.example.test A "192.0.2.2" proxied=true rewritten=false`
+		wNew   = `02 01 www.example.test A "192.0.2.2" proxied=true rewritten=true`
+		cNew   = `NEW 01 c.example.test A "192.0.2.9" proxied=false rewritten=true`
 	)
 	patch := func(id string) domain.DNSRecordInput {
 		in := recordA("a", "192.0.2.77")
@@ -835,61 +828,45 @@ func TestSQLiteAddRecordZoneAliasMirrorsPostgres(t *testing.T) {
 		return in
 	}
 	cname := domain.DNSRecordInput{Name: "a", Type: "CNAME", Value: "x.example.test", Enabled: true}
-	spellings := []struct {
-		name, zone string
-		canonical  bool
-	}{
-		{"canonical", recordZoneID, true},
-		{"uppercase", strings.ToUpper(recordZoneID), false},
-		{"braced", "{" + recordZoneID + "}", false},
-		{"hyphen-less", strings.ReplaceAll(recordZoneID, "-", ""), false},
+	spellings := []struct{ name, zone string }{
+		{"canonical", recordZoneID},
+		{"uppercase", strings.ToUpper(recordZoneID)},
+		{"braced", "{" + recordZoneID + "}"},
+		{"hyphen-less", strings.ReplaceAll(recordZoneID, "-", "")},
+		{"4-digit-groups", "aaaa-aaaa-0000-4000-8000-0000-0000-0001"},
 	}
-	// canon == nil with canonErr set means the canonical spelling is rejected;
-	// skipCanon leaves the canonical spelling out (PG panics there).
 	ops := []struct {
-		name      string
-		input     domain.DNSRecordInput
-		canon     []string
-		canonErr  string
-		alias     []string
-		skipCanon bool
+		name  string
+		input domain.DNSRecordInput
+		want  []string
+		err   string
 	}{
-		{name: "new record", input: recordA("c", "192.0.2.9"),
-			canon: []string{aSame, wNew, cNew}, alias: []string{aOld, wOld, cNew}},
+		{name: "new record", input: recordA("c", "192.0.2.9"), want: []string{aSame, wNew, cNew}},
 		{name: "second proxied record for the same name", input: recordProxied(nil),
-			canonErr: "Only one record may be proxied for www.example.test", alias: []string{aOld, wOld, dupNew}},
-		{name: "patch sibling by canonical id", input: patch(recordExistID),
-			canon: []string{aPatch, wNew}, alias: []string{aPatch, wOld}},
-		{name: "patch sibling by uppercase id", input: patch(strings.ToUpper(recordExistID)),
-			canon: []string{aPatch, wNew}, alias: []string{aPatch, wOld}},
-		{name: "CNAME next to an A record", input: cname, skipCanon: true,
-			alias: []string{aOld, wOld, cnameIn}},
+			err: "Only one record may be proxied for www.example.test"},
+		{name: "patch sibling by canonical id", input: patch(recordExistID), want: []string{aPatch, wNew}},
+		{name: "patch sibling by uppercase id", input: patch(strings.ToUpper(recordExistID)), want: []string{aPatch, wNew}},
+		{name: "CNAME next to an A record", input: cname,
+			err: "CNAME cannot coexist with other records for a.example.test"},
 	}
 	for _, sp := range spellings {
 		for _, op := range ops {
-			if sp.canonical && op.skipCanon {
-				continue
-			}
 			t.Run(sp.name+"/"+op.name, func(t *testing.T) {
 				f := aliasFixture(t)
 				before := recordState(t, f.db)
 				got, err := f.store.AddRecord(createZoneContext(t), sp.zone, op.input, "")
-				want, jobs := op.alias, 1
-				if sp.canonical {
-					want = op.canon
-					if op.canonErr != "" {
-						want, jobs = []string{aOld, wOld}, 0
-					}
-				}
-				if jobs == 0 {
+				want, jobs := op.want, 1
+				if op.err != "" {
 					recordZero(t, got, err)
-					if err.Error() != op.canonErr || recordState(t, f.db) != before {
-						t.Fatalf("error = %q or state changed", err)
+					var ve *domain.ValidationError
+					if !errors.As(err, &ve) || err.Error() != op.err || recordState(t, f.db) != before {
+						t.Fatalf("error = %T %q or state changed", err, err)
 					}
+					want, jobs = []string{aOld, wOld}, 0
 				} else if err != nil {
 					t.Fatal(err)
-				} else if op.input.ID != "" && got.Value.ID != op.input.ID {
-					t.Fatalf("returned id = %q, want the caller spelling %q", got.Value.ID, op.input.ID)
+				} else if op.input.ID != "" && got.Value.ID != recordExistID {
+					t.Fatalf("returned id = %q, want the canonical id", got.Value.ID)
 				}
 				gotRows, wantRows := aliasRows(t, f), append([]string(nil), want...)
 				sort.Strings(gotRows)
@@ -897,10 +874,52 @@ func TestSQLiteAddRecordZoneAliasMirrorsPostgres(t *testing.T) {
 				if !reflect.DeepEqual(gotRows, wantRows) {
 					t.Fatalf("rows =\n%s\nwant\n%s", strings.Join(gotRows, "\n"), strings.Join(wantRows, "\n"))
 				}
-				if enqueueCount(t, f.db, "apply_jobs") != jobs || enqueueCount(t, f.db, "config_revisions") != jobs {
-					t.Fatalf("want %d revision and apply job", jobs)
+				if enqueueCount(t, f.db, "apply_jobs") != jobs || enqueueCount(t, f.db, "config_revisions") != jobs ||
+					enqueueCount(t, f.db, "secrets") != 0 {
+					t.Fatalf("want %d revision and apply job and no secrets", jobs)
 				}
 			})
 		}
+	}
+}
+
+// A malformed zone id keeps the SQLite error text; nothing is written.
+func TestSQLiteAddRecordMalformedZoneIDKeepsLookupError(t *testing.T) {
+	f := aliasFixture(t)
+	before := recordState(t, f.db)
+	got, err := f.store.AddRecord(createZoneContext(t), "not-a-zone", recordA("c", "192.0.2.9"), "")
+	recordZero(t, got, err)
+	if err.Error() != "invalid UUID lookup text" || recordState(t, f.db) != before {
+		t.Fatalf("error = %q or state changed", err)
+	}
+}
+
+// Canonical zone, CNAME next to an enabled A record: a validation error, never a
+// panic, with no row, revision, job or secret written (follow-up 3 bug 1).
+func TestSQLiteAddRecordCNAMECoexistenceReturnsValidationError(t *testing.T) {
+	f := aliasFixture(t)
+	before := recordState(t, f.db)
+	cname := domain.DNSRecordInput{Name: "a", Type: "CNAME", Value: "x.example.test", Enabled: true}
+	got, err := f.store.AddRecord(createZoneContext(t), recordZoneID, cname, "")
+	recordZero(t, got, err)
+	var ve *domain.ValidationError
+	if !errors.As(err, &ve) || ve.Message != "CNAME cannot coexist with other records for a.example.test" {
+		t.Fatalf("error = %T %v", err, err)
+	}
+	if recordState(t, f.db) != before || enqueueCount(t, f.db, "apply_jobs") != 0 ||
+		enqueueCount(t, f.db, "config_revisions") != 0 || enqueueCount(t, f.db, "secrets") != 0 {
+		t.Fatal("state changed across a rejected CNAME")
+	}
+}
+
+// Aliases of an existing proxied record id find it as the same record, so a
+// zone-alias plus record-alias PATCH never reports a false proxied conflict.
+func TestSQLiteAddRecordAliasOfExistingProxiedRecordIDIsNotAConflict(t *testing.T) {
+	f := aliasFixture(t)
+	in := recordProxied(nil)
+	in.ID = strings.ToUpper(recordExistID2)
+	got, err := f.store.AddRecord(createZoneContext(t), strings.ToUpper(recordZoneID), in, "")
+	if err != nil || got.Value.ID != recordExistID2 {
+		t.Fatalf("id=%q err=%v", got.Value.ID, err)
 	}
 }

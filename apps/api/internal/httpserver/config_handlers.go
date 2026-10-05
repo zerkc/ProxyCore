@@ -315,7 +315,9 @@ func (s *Server) handlePatchRecord(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	zoneID := r.PathValue("zoneId")
-	recordID := r.PathValue("recordId")
+	// Stored record ids are canonical: any spelling the database accepts as a
+	// uuid addresses the same record. A malformed id passes through unchanged.
+	recordID := configuration.CanonicalUUIDText(r.PathValue("recordId"))
 	body, ok := decodeJSONObject(w, r)
 	if !ok {
 		return
