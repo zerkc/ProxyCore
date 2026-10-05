@@ -5,16 +5,12 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/zerkc/ProxyCore/apps/api/internal/acme"
 	"github.com/zerkc/ProxyCore/apps/api/internal/domain"
 	"github.com/zerkc/ProxyCore/apps/api/internal/sqlitedb"
 )
-
-// ErrSQLiteLetsEncryptNotImplemented is returned for every issuer other than
-// self-signed and uploaded. Let's Encrypt (and its failed-row behavior) is T56d,
-// which replaces this rejection; until then nothing is written for it.
-var ErrSQLiteLetsEncryptNotImplemented = errors.New("Let's Encrypt issuance is not implemented for SQLite yet")
 
 const sqliteCertificateKeyPurpose = "certificate-private-key"
 
@@ -29,6 +25,15 @@ type SQLiteCertificateIssueStore struct {
 	db      *sql.DB
 	writer  *sqlitedb.Writer
 	secrets sqliteInternalCASecrets
+
+	// Test seams (zero values select production behavior): the ACME client, and
+	// the http-01 apply-job wait timeout and poll interval (PG: 60s / 250ms).
+	issueACME  func(context.Context, acme.LetsEncryptOptions) (acme.Material, error)
+	jobTimeout time.Duration
+	jobPoll    time.Duration
+	// afterCredentialMiss runs between the Cloudflare connection lookup miss and
+	// the Write that creates it, so tests can force that interleaving.
+	afterCredentialMiss func()
 }
 
 // NewSQLiteCertificateIssueStore is cheap and nil-safe: a nil (or typed-nil
@@ -44,9 +49,11 @@ func NewSQLiteCertificateIssueStore(db *sql.DB, writer *sqlitedb.Writer, secretS
 	}
 }
 
-// IssueCertificate mirrors Store.IssueCertificate for issuer self-signed and
-// uploaded. Both return the error and write nothing on failure (PG only records
-// a failed row for letsencrypt). actorUserID is unused until 56d (http-01).
+// IssueCertificate mirrors Store.IssueCertificate. Self-signed and uploaded
+// return the error and write nothing on failure. Let's Encrypt (see
+// sqlite_certificate_acme.go) records a status=failed row and returns it with a
+// nil error, exactly like PG; other issuers follow the same flow but return the
+// error. actorUserID selects the http-01 apply-job route.
 //
 // Intentional difference from PG: key generation, PEM validation and the CA
 // ensure happen first, outside the writer, then ONE Write inserts the key secret
@@ -98,8 +105,15 @@ func (s *SQLiteCertificateIssueStore) IssueCertificate(ctx context.Context, inpu
 		base.ExpiresAt = &expires
 		return s.insertIssued(ctx, base, material)
 
-	default:
-		return domain.CertificateStatus{}, ErrSQLiteLetsEncryptNotImplemented
+	default: // letsencrypt and, as in PG, every other issuer
+		cert, err := s.issueLetsEncrypt(ctx, input, base, actorUserID)
+		if err != nil {
+			if input.Issuer != "letsencrypt" {
+				return domain.CertificateStatus{}, err
+			}
+			return s.insertFailedLetsEncrypt(ctx, base, err)
+		}
+		return cert, nil
 	}
 }
 

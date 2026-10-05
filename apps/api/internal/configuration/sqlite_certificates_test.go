@@ -636,3 +636,39 @@ func TestSQLiteCertificateUpdateActiveMaterial(t *testing.T) {
 		t.Fatalf("malformed: %v", err)
 	}
 }
+
+// SQLite-only: the infinity sentinels and sub-second boundaries cannot be
+// expressed in the PG comparison matrix above. '2' (+infinity) is never due and
+// does not hide other rows; '0' (-infinity) is selected but fails to decode, so
+// the whole list errors, like PG's -infinity due list.
+func TestSQLiteCertificateDueSentinelsAndSubSecondBoundaries(t *testing.T) {
+	ctx := context.Background()
+	f := newCertFixture(t)
+	nowSec := dueNow.Unix()
+	f.seed(t, certSeed{id: dueID(1), issuer: "self-signed", challenge: "none", status: "active", created: secPost2000, renew: certKey(t, nowSec, 0)})
+	f.seed(t, certSeed{id: dueID(2), issuer: "self-signed", challenge: "none", status: "active", created: secPost2000, renew: certKey(t, nowSec-1, 999_999_999)})
+	f.seed(t, certSeed{id: dueID(3), issuer: "self-signed", challenge: "none", status: "active", created: secPost2000, renew: certKey(t, nowSec, 1)})
+	f.seed(t, certSeed{id: dueID(4), issuer: "self-signed", challenge: "none", status: "active", created: secPost2000, renew: certKey(t, nowSec+1, 0)})
+	positive := "2"
+	f.seed(t, certSeed{id: dueID(5), issuer: "self-signed", challenge: "none", status: "active", created: secPost2000, renew: &positive})
+
+	got, err := f.store.ListCertificatesDueForRenewal(ctx, dueNow)
+	if err != nil || !reflect.DeepEqual(certIDs(got), []string{dueID(2), dueID(1)}) {
+		t.Fatalf("sub-second boundaries at now: %v %v", certIDs(got), err)
+	}
+	got, err = f.store.ListCertificatesDueForRenewal(ctx, dueNow.Add(time.Nanosecond))
+	if err != nil || !reflect.DeepEqual(certIDs(got), []string{dueID(2), dueID(1), dueID(3)}) {
+		t.Fatalf("now plus 1ns: %v %v", certIDs(got), err)
+	}
+	got, err = f.store.ListCertificatesDueForRenewal(ctx, dueNow.Add(-time.Nanosecond))
+	if err != nil || !reflect.DeepEqual(certIDs(got), []string{dueID(2)}) {
+		t.Fatalf("now minus 1ns: %v %v", certIDs(got), err)
+	}
+
+	negative := "0"
+	f.seed(t, certSeed{id: dueID(6), issuer: "self-signed", challenge: "none", status: "active", created: secPost2000, renew: &negative})
+	got, err = f.store.ListCertificatesDueForRenewal(ctx, dueNow)
+	if err == nil || got != nil {
+		t.Fatalf("a -infinity renew_after must fail the list: %v %v", certIDs(got), err)
+	}
+}

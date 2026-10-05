@@ -336,3 +336,40 @@ func TestSQLiteInternalCACanceledContextAndClosedDB(t *testing.T) {
 		t.Fatal("closed db must fail")
 	}
 }
+
+// The key_secret_id CHECK makes a blank id unreachable through normal writes,
+// so the row is forced in with checks and foreign keys off on one connection.
+func TestSQLiteInternalCARejectsBlankKeySecretID(t *testing.T) {
+	ctx := context.Background()
+	for name, blank := range map[string]string{"empty": "", "whitespace": " \t\n"} {
+		t.Run(name, func(t *testing.T) {
+			f := newCAFixture(t)
+			other, err := acme.CreateInternalCA(0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			conn, err := f.db.Conn(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, pragma := range []string{"pragma ignore_check_constraints = on", "pragma foreign_keys = off"} {
+				if _, err := conn.ExecContext(ctx, pragma); err != nil {
+					t.Fatal(err)
+				}
+			}
+			_, insertErr := conn.ExecContext(ctx, `insert into internal_ca (id,certificate_pem,key_secret_id,created_at,updated_at) values ('default',?,?,'0','0')`, other.CertificatePEM, blank)
+			_, _ = conn.ExecContext(ctx, "pragma ignore_check_constraints = off")
+			_, _ = conn.ExecContext(ctx, "pragma foreign_keys = on")
+			conn.Close()
+			if insertErr != nil {
+				t.Fatal(insertErr)
+			}
+			if _, err := f.store.EnsureInternalCACertificatePEM(ctx); err == nil || err.Error() != "established internal CA material is incomplete" {
+				t.Fatalf("blank key secret id: %v", err)
+			}
+			if f.count(t, `select count(*) from internal_ca`) != 1 || f.count(t, `select count(*) from secrets`) != 0 {
+				t.Fatal("a broken CA row must not be replaced and must not create secrets")
+			}
+		})
+	}
+}

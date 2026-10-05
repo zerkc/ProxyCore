@@ -410,22 +410,6 @@ func TestSQLiteCertificateIssueRejectsMalformedMasterKeyWithoutState(t *testing.
 	}
 }
 
-func TestSQLiteCertificateIssueLetsEncryptIsNotImplementedYet(t *testing.T) {
-	f := newIssueFixture(t)
-	for _, issuer := range []string{"letsencrypt", "", "bogus"} {
-		for _, challenge := range []string{"none", "http-01", "dns-01"} {
-			got, err := f.issuer.IssueCertificate(context.Background(), CertificateIssueInput{Hostnames: []string{"a.test"}, Issuer: issuer, Challenge: challenge}, "actor")
-			if !errors.Is(err, ErrSQLiteLetsEncryptNotImplemented) || !reflect.DeepEqual(got, domain.CertificateStatus{}) {
-				t.Fatalf("issuer %q challenge %q: %v", issuer, challenge, err)
-			}
-		}
-	}
-	// 56c writes no failed row for Let's Encrypt either: that is 56d.
-	if certs, _, all := f.rows(t); certs != 0 || all != 0 {
-		t.Fatal("rejected issuance must write nothing")
-	}
-}
-
 func TestSQLiteCertificateIssueIsAtomicWhenTheRowFails(t *testing.T) {
 	// A NUL byte in environment violates a CHECK after the key secret was inserted.
 	pair := newPEMPair(t, []string{"a.test"}, time.Now().Add(time.Hour), false, false)
