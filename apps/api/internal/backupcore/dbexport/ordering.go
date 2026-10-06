@@ -317,3 +317,26 @@ func findCycle(tables []string, adjacency map[string][]string, indegree map[stri
 	}
 	return sorted
 }
+
+// SQLiteExportOrder is the fixed export order for the SQLite exporter. It is
+// the deterministic topological order (see topologicalOrder) of
+// DefaultConfigTables over the foreign keys of the migrated SQLite schema; a
+// test recomputes it from PRAGMA foreign_key_list so it cannot drift.
+var SQLiteExportOrder = []string{
+	"cluster_keys",
+	"installation_identity",
+	"installation_settings",
+	"internal_ca_enrollment_state",
+	"node_state",
+	"resolver_pools",
+	"secrets",
+	"stream_routes",
+	"users",
+	"zones",
+	"forwarding_rules",
+	"certificates",
+	"internal_ca",
+	"provider_connections",
+	"config_revisions",
+	"dns_records",
+}

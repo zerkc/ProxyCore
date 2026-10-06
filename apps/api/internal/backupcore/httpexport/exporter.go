@@ -107,7 +107,34 @@ func (e *BackupExporter) Export(ctx context.Context, w io.Writer, passphrase []b
 	if e.Pool == nil {
 		return "", errors.New("httpexport: nil database pool")
 	}
-	if e.Identity == nil {
+	return exportBundle(ctx, w, passphrase, bundleConfig{
+		Identity:        e.Identity,
+		Version:         e.Version,
+		Now:             e.Now,
+		MasterKeyBase64: e.MasterKeyBase64,
+		Host:            hostread.New(e.Pool, hostread.Config{}),
+		ExportDB: func(ctx context.Context, entries dbexport.ZipWriter, now func() time.Time, masterKeyBase64 string) (dbexport.ExportReport, error) {
+			return dbexport.New(e.Pool, dbexport.ExporterOptions{
+				Now:             now,
+				MasterKeyBase64: masterKeyBase64,
+			}).Export(ctx, entries)
+		},
+	})
+}
+
+// bundleConfig carries the storage-specific dependencies of a backup so the
+// PostgreSQL and SQLite exporters share one bundle assembly flow.
+type bundleConfig struct {
+	Identity        IdentitySource
+	Version         string
+	Now             func() time.Time
+	MasterKeyBase64 string
+	Host            hostread.HostSnapshotReader
+	ExportDB        func(ctx context.Context, entries dbexport.ZipWriter, now func() time.Time, masterKeyBase64 string) (dbexport.ExportReport, error)
+}
+
+func exportBundle(ctx context.Context, w io.Writer, passphrase []byte, cfg bundleConfig) (manifestSHA256Hex string, err error) {
+	if cfg.Identity == nil {
 		return "", errors.New("httpexport: nil identity source")
 	}
 	if w == nil {
@@ -116,16 +143,16 @@ func (e *BackupExporter) Export(ctx context.Context, w io.Writer, passphrase []b
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	now := e.Now
+	now := cfg.Now
 	if now == nil {
 		now = time.Now
 	}
 
-	manifest := backupcore.NewManifest(e.Version)
+	manifest := backupcore.NewManifest(cfg.Version)
 	manifest.CreatedAt = now().UTC().Format(time.RFC3339)
-	manifest.InstallationID = e.Identity.InstallationIDString()
-	manifest.NodeID = e.Identity.NodeIDString()
-	manifest.Role = e.Identity.RoleString()
+	manifest.InstallationID = cfg.Identity.InstallationIDString()
+	manifest.NodeID = cfg.Identity.NodeIDString()
+	manifest.Role = cfg.Identity.RoleString()
 	if manifest.InstallationID == "" || manifest.NodeID == "" || manifest.Role == "" {
 		return "", errors.New("httpexport: incomplete identity")
 	}
@@ -142,12 +169,12 @@ func (e *BackupExporter) Export(ctx context.Context, w io.Writer, passphrase []b
 	}()
 
 	entries := &dbWriter{zw: zw, manifest: &manifest}
-	host := hostread.New(e.Pool, hostread.Config{})
+	host := cfg.Host
 	envFile, err := host.EnvFile(ctx)
 	if err != nil {
 		return "", fmt.Errorf("read env snapshot: %w", err)
 	}
-	masterKeyBase64, err := resolveMasterKey(e.MasterKeyBase64, envFile)
+	masterKeyBase64, err := resolveMasterKey(cfg.MasterKeyBase64, envFile)
 	if err != nil {
 		return "", err
 	}
@@ -174,10 +201,7 @@ func (e *BackupExporter) Export(ctx context.Context, w io.Writer, passphrase []b
 		}
 	}
 
-	databaseReport, err := dbexport.New(e.Pool, dbexport.ExporterOptions{
-		Now:             now,
-		MasterKeyBase64: masterKeyBase64,
-	}).Export(ctx, entries)
+	databaseReport, err := cfg.ExportDB(ctx, entries, now, masterKeyBase64)
 	if err != nil {
 		return "", fmt.Errorf("export database: %w", err)
 	}
