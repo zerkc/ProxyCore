@@ -23,9 +23,9 @@ type sqliteInternalCASecrets interface {
 var _ sqliteInternalCASecrets = (*secrets.SQLiteStore)(nil)
 
 // SQLiteInternalCAStore is the unwired SQLite counterpart of the internal-CA
-// pieces that self-signed issuance needs: EnsureInternalCACertificatePEM and
-// issueInternalLeaf. Enrollment TLS material, its advisory lock, the enrollment
-// state table and cluster identity belong to T57 and are not ported here.
+// pieces used by self-signed issuance and enrollment TLS. Enrollment TLS uses
+// the same CA and encrypted secret store; its single-writer transaction replaces
+// PostgreSQL advisory locks. Cluster identity remains a separate store.
 // It is a sibling of SQLiteCertificateStore (same read *sql.DB / write
 // *sqlitedb.Writer split) so both can share one db and writer.
 type SQLiteInternalCAStore struct {
