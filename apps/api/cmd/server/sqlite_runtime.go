@@ -23,27 +23,11 @@ import (
 )
 
 // This file is the SQLite composition root. It is deliberately separate from
-// main.go so removing the PostgreSQL branch (T59d) does not touch it.
+// main.go so it stays independent of any other persistence backend.
 
-const (
-	backendNone     = "none"
-	backendPostgres = "postgres"
-	backendSQLite   = "sqlite"
-)
-
-// selectedBackend decides the persistence backend. DATABASE_URL wins when both
-// are set so an existing PostgreSQL deployment never silently switches store
-// because a SQLite path appeared in its environment.
-func selectedBackend(cfg config.Config) string {
-	switch {
-	case cfg.DatabaseURL != "":
-		return backendPostgres
-	case cfg.SQLitePath != "":
-		return backendSQLite
-	default:
-		return backendNone
-	}
-}
+// errSQLitePathRequired is returned when PROXYCORE_SQLITE_PATH is unset: SQLite
+// is the only supported backend, so there is no store-less boot.
+var errSQLitePathRequired = errors.New("PROXYCORE_SQLITE_PATH is required: SQLite is the only supported backend")
 
 var (
 	_ enrollmentTLSConfigurationStore = (*configuration.SQLiteConfigurationBackend)(nil)
@@ -69,8 +53,11 @@ type sqliteStack struct {
 }
 
 func openSQLiteStack(ctx context.Context, cfg config.Config, logger *log.Logger) (stack *sqliteStack, err error) {
-	if ctx == nil || strings.TrimSpace(cfg.SQLitePath) == "" {
-		return nil, errors.New("sqlite path is required")
+	if ctx == nil {
+		return nil, errors.New("process context is required")
+	}
+	if strings.TrimSpace(cfg.SQLitePath) == "" {
+		return nil, errSQLitePathRequired
 	}
 	if err := os.MkdirAll(filepath.Dir(cfg.SQLitePath), 0o700); err != nil {
 		return nil, fmt.Errorf("sqlite directory: %w", err)

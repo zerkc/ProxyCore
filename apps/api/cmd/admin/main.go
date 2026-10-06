@@ -9,15 +9,13 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/zerkc/ProxyCore/apps/api/internal/auth"
 	"github.com/zerkc/ProxyCore/apps/api/internal/config"
 	"github.com/zerkc/ProxyCore/apps/api/internal/domain"
 	"github.com/zerkc/ProxyCore/apps/api/internal/identity"
 )
 
 // resetFunc matches the auth.Service.ResetPassword signature so the
-// dispatch can be unit-tested without spinning up a real PostgreSQL.
+// dispatch can be unit-tested without spinning up a real database.
 type resetFunc func(context.Context, string) (string, error)
 
 // snapshotStatusFunc matches the identity.Service.Load signature so the
@@ -121,32 +119,15 @@ func main() {
 		fmt.Fprintf(os.Stderr, "config: %v\n", err)
 		os.Exit(1)
 	}
-	if cfg.DatabaseURL == "" {
-		fmt.Fprintln(os.Stderr, "config: DATABASE_URL is required")
-		os.Exit(1)
-	}
-	pool, err := pgxpool.New(ctx, cfg.DatabaseURL)
+	rt, err := openAdminRuntime(ctx, cfg)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "database: %v\n", err)
 		os.Exit(1)
 	}
-	defer pool.Close()
-
-	if args := os.Args[1:]; len(args) > 0 && args[0] == "reset-password" {
-		store := auth.NewPostgresStore(pool)
-		if err := store.EnsureSchema(ctx); err != nil {
-			fmt.Fprintf(os.Stderr, "database schema: %v\n", err)
-			os.Exit(1)
-		}
-		svc := auth.NewService(store, auth.ServiceOptions{})
-		os.Exit(runResetPassword(ctx, args[1:], os.Stdout, os.Stderr, svc.ResetPassword))
-	}
-
-	identityStore := identity.NewPgStore(pool)
-	identitySvc := identity.NewService(identityStore)
-	os.Exit(dispatch(ctx, os.Args[1:], os.Stdout, os.Stderr, nil, identitySvc.Load))
+	code := dispatch(ctx, os.Args[1:], os.Stdout, os.Stderr, rt.reset, rt.status)
+	rt.Close()
+	os.Exit(code)
 }
 
-// guard against the identity import being dropped during future edits; the
-// type is used transitively via identitySvc.Load.
+// guard against the domain import being dropped during future edits.
 var _ = domain.TopologyRoleStandalone

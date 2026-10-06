@@ -31,20 +31,15 @@ func sqliteTestConfig(t *testing.T) config.Config {
 	}
 }
 
-func TestSelectedBackendPrefersDatabaseURLWhenBothSet(t *testing.T) {
-	cases := map[string]struct {
-		cfg  config.Config
-		want string
-	}{
-		"none":     {config.Config{}, backendNone},
-		"postgres": {config.Config{DatabaseURL: "postgres://x"}, backendPostgres},
-		"sqlite":   {config.Config{SQLitePath: "/tmp/x.sqlite"}, backendSQLite},
-		"both":     {config.Config{DatabaseURL: "postgres://x", SQLitePath: "/tmp/x.sqlite"}, backendPostgres},
+func TestRunServerFailsFastWithoutSQLitePath(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	err := runServer(ctx, config.Config{Addr: "127.0.0.1:0"}, log.New(&runtimeTestLog{}, "", 0))
+	if err == nil {
+		t.Fatal("runServer without PROXYCORE_SQLITE_PATH must fail fast")
 	}
-	for name, tc := range cases {
-		if got := selectedBackend(tc.cfg); got != tc.want {
-			t.Fatalf("%s: selectedBackend=%q want %q", name, got, tc.want)
-		}
+	if !errors.Is(err, errSQLitePathRequired) {
+		t.Fatalf("error = %v, want errSQLitePathRequired", err)
 	}
 }
 
