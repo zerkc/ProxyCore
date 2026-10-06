@@ -108,6 +108,10 @@ func runServerWithNodeConverter(ctx context.Context, cfg config.Config, logger *
 	var tokenAuthority httpserver.EnrollmentTokenAuthority
 	var snapshotClient *syncpublication.SnapshotClient
 	var localKEKLoader *cluster.LocalKEKLoader
+	// Backend-neutral seams filled by whichever persistence branch runs.
+	var tlsStore enrollmentTLSConfigurationStore
+	var renewalStore configuration.RenewalStore
+	var clusterKeys cluster.KeyLoader
 	options := []httpserver.Option{
 		httpserver.WithUpdateChecker(update.NewChecker(update.CheckerOptions{
 			CurrentVersion: version.Version,
@@ -119,7 +123,33 @@ func runServerWithNodeConverter(ctx context.Context, cfg config.Config, logger *
 	if opt := updaterClientFromConfig(cfg); opt != nil {
 		options = append(options, opt)
 	}
-	if cfg.DatabaseURL != "" {
+	if cfg.DatabaseURL != "" && cfg.SQLitePath != "" {
+		logger.Printf("both DATABASE_URL and PROXYCORE_SQLITE_PATH are set; using PostgreSQL")
+	}
+	if selectedBackend(cfg) == backendSQLite {
+		stack, err := openSQLiteStack(ctx, cfg, logger)
+		if err != nil {
+			return err
+		}
+		defer stack.Close()
+		options = append(options, stack.options(cfg)...)
+		phase2Store = stack.phase2
+		identitySvc = stack.identity
+		identityResult = stack.identityResult
+		tokenAuthority = stack.tokenAuthority
+		localKEKLoader = stack.localKEKLoader
+		clusterKeys = stack.keys
+		tlsStore = stack.config
+		renewalStore = stack.config
+		snapshotClient = syncpublication.NewSnapshotClient(syncpublication.SnapshotClientOptions{
+			CanonicalizeURL: enrollment.CanonicalizePrimaryURL,
+		})
+		nodeConverter = buildNodeConverter(enableNodeConverter, stack.phase2, identitySvc, logger)
+		if nodeConverter != nil {
+			logger.Printf("node converter ready for role=%s", identityResult.Role)
+		}
+	}
+	if selectedBackend(cfg) == backendPostgres {
 		connectCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		var err error
 		pool, err = pgxpool.New(connectCtx, cfg.DatabaseURL)
@@ -144,6 +174,9 @@ func runServerWithNodeConverter(ctx context.Context, cfg config.Config, logger *
 
 		defaultIngress := domain.Ingress{IPv4: cfg.ProxyIngressIPv4, IPv6: cfg.ProxyIngressIPv6}
 		configStore = configuration.New(pool, cfg.MasterKeyBase64, defaultIngress)
+		tlsStore = configStore
+		renewalStore = configStore
+		clusterKeys = cluster.NewPGKeyLoader(pool, cluster.NewStore(cfg.MasterKeyBase64))
 		options = append(options,
 			httpserver.WithConfigurationStore(configStore),
 			httpserver.WithDefaultIngress(defaultIngress),
@@ -172,7 +205,7 @@ func runServerWithNodeConverter(ctx context.Context, cfg config.Config, logger *
 			CanonicalizeURL: enrollment.CanonicalizePrimaryURL,
 		})
 		localKEKLoader = cluster.NewLocalKEKLoader(cluster.LocalKEKLoaderOptions{
-			Keys: cluster.NewPGKeyLoader(pool, cluster.NewStore(cfg.MasterKeyBase64)), Identity: identitySvc,
+			Keys: clusterKeys, Identity: identitySvc,
 		})
 		tokenAuthority = httpserver.NewEnrollmentTokenAuthority(phase2Store, identitySvc, httpserver.EnrollmentTokenAuthorityOptions{
 			List: func(ctx context.Context, ownerID string) ([]httpserver.EnrollmentTokenRecord, error) {
@@ -213,7 +246,7 @@ func runServerWithNodeConverter(ctx context.Context, cfg config.Config, logger *
 
 	draftCache := enrollment.NewDraftCache(enrollment.DraftCacheOptions{})
 	var supervisor *enrollment.EnrollmentTLSSupervisor
-	if configStore != nil && identitySvc != nil {
+	if tlsStore != nil && identitySvc != nil {
 		workflow := httpserver.EnrollmentWorkflowHandlerOptions{
 			Cache:     draftCache,
 			Converter: nodeConverter,
@@ -226,7 +259,7 @@ func runServerWithNodeConverter(ctx context.Context, cfg config.Config, logger *
 			workflow.VerifyToken = tokenAuthority.Verify
 		}
 		wireEnrollmentWorkflowDependencies(&workflow, snapshotClient, localKEKLoader)
-		snapshotByTokenKeyLoader := &snapshotByTokenClusterKeyLoader{keys: cluster.NewPGKeyLoader(pool, cluster.NewStore(cfg.MasterKeyBase64)), identity: snapshotByTokenIdentitySource{service: identitySvc}}
+		snapshotByTokenKeyLoader := &snapshotByTokenClusterKeyLoader{keys: clusterKeys, identity: snapshotByTokenIdentitySource{service: identitySvc}}
 		snapshotByTokenOptions := httpserver.EnrollmentSnapshotByTokenHandlerOptions{
 			Store:            productionSnapshotByTokenStore(phase2Store),
 			Identity:         snapshotByTokenIdentitySource{service: identitySvc},
@@ -242,7 +275,7 @@ func runServerWithNodeConverter(ctx context.Context, cfg config.Config, logger *
 		acknowledgementOptions := httpserver.EnrollmentSnapshotAcknowledgementHandlerOptions{
 			Store: phase2Store, Identity: identitySvc,
 		}
-		supervisor, err = newEnrollmentWorkflowTLSSupervisorWithHandlersAndAcknowledgement(cfg, identitySvc, configStore, workflow, logger, &publicationOptions, &snapshotByTokenOptions, &acknowledgementOptions)
+		supervisor, err = newEnrollmentWorkflowTLSSupervisorWithHandlersAndAcknowledgement(cfg, identitySvc, tlsStore, workflow, logger, &publicationOptions, &snapshotByTokenOptions, &acknowledgementOptions)
 		if err != nil {
 			logEnrollmentTLSFailure(logger, "supervisor unavailable")
 			supervisor = nil
@@ -250,12 +283,12 @@ func runServerWithNodeConverter(ctx context.Context, cfg config.Config, logger *
 	}
 
 	workers := make([]func(context.Context), 0, 3)
-	if configStore != nil {
+	if renewalStore != nil {
 		workers = append(workers, func(workerCtx context.Context) {
 			// Ordinary renewal is gated by the live identity on every cycle and
 			// work item. Enrollment TLS material remains supervisor-owned and is
 			// refreshed atomically by the supervisor above.
-			configuration.RunRenewalLoop(workerCtx, configStore, configuration.RenewalOptions{
+			configuration.RunRenewalLoop(workerCtx, renewalStore, configuration.RenewalOptions{
 				StagingDirectoryURL:    cfg.ACMEDirectoryURL,
 				ProductionDirectoryURL: cfg.ACMEProductionDirectoryURL,
 				Email:                  cfg.AcmeEmail,

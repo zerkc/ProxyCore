@@ -13,6 +13,10 @@ type Config struct {
 	Addr              string
 	EnrollmentTLSAddr string
 	DatabaseURL       string
+	// SQLitePath selects the SQLite backend when DATABASE_URL is empty. It is
+	// opt-in (no default) so existing in-memory/dev boots are unchanged. When
+	// both are set DATABASE_URL wins, preserving current PostgreSQL deployments.
+	SQLitePath        string
 	UIDist            string
 	MasterKeyBase64   string
 	SessionCookieName string
@@ -51,6 +55,7 @@ func Load() (Config, error) {
 		Addr:              env("PROXYCORE_API_ADDR", ":3000"),
 		EnrollmentTLSAddr: enrollmentTLSAddr,
 		DatabaseURL:       os.Getenv("DATABASE_URL"),
+		SQLitePath:        strings.TrimSpace(os.Getenv("PROXYCORE_SQLITE_PATH")),
 		UIDist:            env("PROXYCORE_UI_DIST", "apps/ui/dist"),
 		MasterKeyBase64:   os.Getenv("PROXYCORE_MASTER_KEY_BASE64"),
 		SessionCookieName: env("SESSION_COOKIE_NAME", "proxycore_session"),

@@ -7,6 +7,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"reflect"
 	"strings"
 	"time"
 
@@ -127,13 +128,19 @@ type enrollmentTLSConfigurationAdapter struct {
 }
 
 // storeUnconfigured reports whether the adapter has no usable store. A typed-nil
-// *configuration.Store held in the interface counts as not configured.
+// pointer (*configuration.Store, *configuration.SQLiteConfigurationBackend, ...)
+// held in the interface counts as not configured.
 func (a *enrollmentTLSConfigurationAdapter) storeUnconfigured() bool {
-	if a.store == nil {
+	return isTypedNil(a.store)
+}
+
+// isTypedNil reports whether v is nil or an interface holding a nil pointer.
+func isTypedNil(v any) bool {
+	if v == nil {
 		return true
 	}
-	concrete, ok := a.store.(*configuration.Store)
-	return ok && concrete == nil
+	rv := reflect.ValueOf(v)
+	return rv.Kind() == reflect.Pointer && rv.IsNil()
 }
 
 func (a *enrollmentTLSConfigurationAdapter) GetEnrollmentHostnames(ctx context.Context) (configuration.EnrollmentHostnameConfig, error) {
