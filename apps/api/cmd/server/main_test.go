@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -24,6 +25,8 @@ import (
 	"github.com/zerkc/ProxyCore/apps/api/internal/enrollment"
 	"github.com/zerkc/ProxyCore/apps/api/internal/httpserver"
 	"github.com/zerkc/ProxyCore/apps/api/internal/identity"
+	"github.com/zerkc/ProxyCore/apps/api/internal/secrets"
+	"github.com/zerkc/ProxyCore/apps/api/internal/sqlitedb"
 	syncpublication "github.com/zerkc/ProxyCore/apps/api/internal/sync"
 )
 
@@ -466,5 +469,142 @@ func TestBuildNodeConverterRequiresFlagAndEligibleIdentity(t *testing.T) {
 				t.Fatalf("converter present=%t, want %t", got != nil, test.want)
 			}
 		})
+	}
+}
+
+type snapshotKeyIdentityFake struct {
+	current identity.Identity
+	loaded  bool
+}
+
+func (f snapshotKeyIdentityFake) Current() (identity.Identity, bool) { return f.current, f.loaded }
+
+type snapshotKeyLoaderFake struct {
+	calls      int
+	gotID      uuid.UUID
+	materialID uuid.UUID
+	key        []byte
+	err        error
+}
+
+func (f *snapshotKeyLoaderFake) LoadActive(_ context.Context, id uuid.UUID) (cluster.KeyMaterial, error) {
+	f.calls++
+	f.gotID = id
+	if f.err != nil {
+		return cluster.KeyMaterial{}, f.err
+	}
+	materialID := f.materialID
+	if materialID == uuid.Nil {
+		materialID = id
+	}
+	return cluster.NewKeyMaterial(materialID, f.key)
+}
+
+func snapshotKeyTestIdentity(role domain.TopologyRole, keyID *uuid.UUID) snapshotKeyIdentityFake {
+	return snapshotKeyIdentityFake{loaded: true, current: identity.Identity{Role: role, ClusterKeyID: keyID}}
+}
+
+func TestSnapshotByTokenClusterKeyLoaderMatrix(t *testing.T) {
+	keyID := uuid.New()
+	good := bytes.Repeat([]byte{9}, cluster.KEKLength)
+	cases := []struct {
+		name      string
+		identity  snapshotKeyIdentityFake
+		fake      snapshotKeyLoaderFake
+		wantErr   bool
+		wantCalls int
+	}{
+		{name: "primary loads", identity: snapshotKeyTestIdentity(domain.TopologyRolePrimary, &keyID), fake: snapshotKeyLoaderFake{key: good}, wantCalls: 1},
+		{name: "primary with nodes loads", identity: snapshotKeyTestIdentity(domain.TopologyRolePrimaryWithNodes, &keyID), fake: snapshotKeyLoaderFake{key: good}, wantCalls: 1},
+		{name: "node rejected", identity: snapshotKeyTestIdentity(domain.TopologyRoleNode, &keyID), fake: snapshotKeyLoaderFake{key: good}, wantErr: true},
+		{name: "standalone rejected", identity: snapshotKeyTestIdentity(domain.TopologyRoleStandalone, &keyID), fake: snapshotKeyLoaderFake{key: good}, wantErr: true},
+		{name: "missing cluster key id", identity: snapshotKeyTestIdentity(domain.TopologyRolePrimary, nil), fake: snapshotKeyLoaderFake{key: good}, wantErr: true},
+		{name: "identity not loaded", identity: snapshotKeyIdentityFake{}, fake: snapshotKeyLoaderFake{key: good}, wantErr: true},
+		{name: "loaded id differs", identity: snapshotKeyTestIdentity(domain.TopologyRolePrimary, &keyID), fake: snapshotKeyLoaderFake{key: good, materialID: uuid.New()}, wantErr: true, wantCalls: 1},
+		{name: "store failure", identity: snapshotKeyTestIdentity(domain.TopologyRolePrimary, &keyID), fake: snapshotKeyLoaderFake{err: errors.New("boom")}, wantErr: true, wantCalls: 1},
+		{name: "key denied", identity: snapshotKeyTestIdentity(domain.TopologyRolePrimary, &keyID), fake: snapshotKeyLoaderFake{err: cluster.ErrClusterKeyDenied}, wantErr: true, wantCalls: 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := tc.fake
+			loader := &snapshotByTokenClusterKeyLoader{keys: &fake, identity: tc.identity}
+			material, err := loader.Load(context.Background())
+			if fake.calls != tc.wantCalls {
+				t.Fatalf("key loader calls=%d, want %d", fake.calls, tc.wantCalls)
+			}
+			if tc.wantErr {
+				if !errors.Is(err, httpserver.ErrSnapshotByTokenUnavailable) || material != nil {
+					t.Fatalf("error=%v material=%v, want ErrSnapshotByTokenUnavailable", err, material != nil)
+				}
+				return
+			}
+			if err != nil || material == nil {
+				t.Fatalf("Load: err=%v material=%v", err, material != nil)
+			}
+			defer material.Destroy()
+			if fake.gotID != keyID || !bytes.Equal(material.CopyBytes(), good) {
+				t.Fatal("loader requested or returned the wrong key")
+			}
+		})
+	}
+}
+
+func TestSnapshotByTokenClusterKeyLoaderUnconfigured(t *testing.T) {
+	keyID := uuid.New()
+	fake := &snapshotKeyLoaderFake{key: bytes.Repeat([]byte{9}, cluster.KEKLength)}
+	for name, loader := range map[string]*snapshotByTokenClusterKeyLoader{
+		"nil":         nil,
+		"no keys":     {identity: snapshotKeyTestIdentity(domain.TopologyRolePrimary, &keyID)},
+		"no identity": {keys: fake},
+	} {
+		if material, err := loader.Load(context.Background()); !errors.Is(err, httpserver.ErrSnapshotByTokenUnavailable) || material != nil {
+			t.Fatalf("%s: err=%v material=%v", name, err, material != nil)
+		}
+	}
+	//nolint:staticcheck // a nil context is the case under test.
+	if _, err := (&snapshotByTokenClusterKeyLoader{keys: fake, identity: snapshotKeyTestIdentity(domain.TopologyRolePrimary, &keyID)}).Load(nil); !errors.Is(err, httpserver.ErrSnapshotByTokenUnavailable) {
+		t.Fatalf("nil ctx err=%v", err)
+	}
+}
+
+func TestSnapshotByTokenClusterKeyLoaderWorksWithSQLiteKeyStore(t *testing.T) {
+	db, err := sqlitedb.Open(filepath.Join(t.TempDir(), "keys.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := sqlitedb.Migrate(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	master := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x19}, 32))
+	key := bytes.Repeat([]byte{0x33}, cluster.KEKLength)
+	wrapped, err := secrets.EncryptSecret(string(key), master)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyID := uuid.New()
+	created, err := sqlitedb.EncodeTimestamp(sqlitedb.FiniteTimestamp{Seconds: 1_700_000_000, Nanos: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`insert into cluster_keys (id, purpose, wrapped_kek, wrapping_key_version, created_at) values (?, ?, ?, ?, ?)`,
+		keyID.String(), cluster.ClusterKeyPurpose, wrapped, cluster.ClusterKeyWrappingVersion, created); err != nil {
+		t.Fatal(err)
+	}
+	store := cluster.NewSQLiteKeyStore(db, nil, master)
+	load := func(role domain.TopologyRole, id *uuid.UUID) (httpserver.SnapshotByTokenKeyMaterial, error) {
+		return (&snapshotByTokenClusterKeyLoader{keys: store, identity: snapshotKeyTestIdentity(role, id)}).Load(context.Background())
+	}
+	material, err := load(domain.TopologyRolePrimaryWithNodes, &keyID)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !bytes.Equal(material.CopyBytes(), key) {
+		t.Fatal("loaded key differs from persisted key")
+	}
+	material.Destroy()
+	unknown := uuid.New()
+	if m, err := load(domain.TopologyRolePrimaryWithNodes, &unknown); !errors.Is(err, httpserver.ErrSnapshotByTokenUnavailable) || m != nil {
+		t.Fatalf("unknown id: err=%v", err)
 	}
 }

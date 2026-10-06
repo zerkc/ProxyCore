@@ -172,7 +172,7 @@ func runServerWithNodeConverter(ctx context.Context, cfg config.Config, logger *
 			CanonicalizeURL: enrollment.CanonicalizePrimaryURL,
 		})
 		localKEKLoader = cluster.NewLocalKEKLoader(cluster.LocalKEKLoaderOptions{
-			Pool: pool, Store: cluster.NewStore(cfg.MasterKeyBase64), Identity: identitySvc,
+			Keys: cluster.NewPGKeyLoader(pool, cluster.NewStore(cfg.MasterKeyBase64)), Identity: identitySvc,
 		})
 		tokenAuthority = httpserver.NewEnrollmentTokenAuthority(phase2Store, identitySvc, httpserver.EnrollmentTokenAuthorityOptions{
 			List: func(ctx context.Context, ownerID string) ([]httpserver.EnrollmentTokenRecord, error) {
@@ -226,7 +226,7 @@ func runServerWithNodeConverter(ctx context.Context, cfg config.Config, logger *
 			workflow.VerifyToken = tokenAuthority.Verify
 		}
 		wireEnrollmentWorkflowDependencies(&workflow, snapshotClient, localKEKLoader)
-		snapshotByTokenKeyLoader := &snapshotByTokenClusterKeyLoader{pool: pool, store: cluster.NewStore(cfg.MasterKeyBase64), identity: identitySvc}
+		snapshotByTokenKeyLoader := &snapshotByTokenClusterKeyLoader{keys: cluster.NewPGKeyLoader(pool, cluster.NewStore(cfg.MasterKeyBase64)), identity: snapshotByTokenIdentitySource{service: identitySvc}}
 		snapshotByTokenOptions := httpserver.EnrollmentSnapshotByTokenHandlerOptions{
 			Store:            productionSnapshotByTokenStore(phase2Store),
 			Identity:         snapshotByTokenIdentitySource{service: identitySvc},
@@ -641,37 +641,31 @@ func productionSnapshotByTokenStore(store snapshotByTokenStoreReader) httpserver
 	return snapshotByTokenStoreAdapter{store: store}
 }
 
+type snapshotByTokenIdentityCurrent interface {
+	Current() (identity.Identity, bool)
+}
+
 type snapshotByTokenClusterKeyLoader struct {
-	pool     *pgxpool.Pool
-	store    *cluster.Store
-	identity *identity.Service
+	keys     cluster.KeyLoader
+	identity snapshotByTokenIdentityCurrent
 }
 
 func (l *snapshotByTokenClusterKeyLoader) Load(ctx context.Context) (httpserver.SnapshotByTokenKeyMaterial, error) {
-	if l == nil || ctx == nil || l.pool == nil || l.store == nil || l.identity == nil {
+	if l == nil || ctx == nil || l.keys == nil || l.identity == nil {
 		return nil, httpserver.ErrSnapshotByTokenUnavailable
 	}
-	current, loaded := (snapshotByTokenIdentitySource{service: l.identity}).Current()
+	current, loaded := l.identity.Current()
 	if !loaded || current.ClusterKeyID == nil ||
 		(current.Role != domain.TopologyRolePrimary && current.Role != domain.TopologyRolePrimaryWithNodes) {
 		return nil, httpserver.ErrSnapshotByTokenUnavailable
 	}
-	tx, err := l.pool.Begin(ctx)
-	if err != nil {
-		return nil, httpserver.ErrSnapshotByTokenUnavailable
-	}
-	defer tx.Rollback(ctx)
-	material, err := l.store.LoadOrCreate(ctx, tx, current.ClusterKeyID)
+	material, err := l.keys.LoadActive(ctx, *current.ClusterKeyID)
 	keyBytes := material.CopyBytes()
 	keyUsable := len(keyBytes) > 0
 	for index := range keyBytes {
 		keyBytes[index] = 0
 	}
 	if err != nil || material.ID != *current.ClusterKeyID || !keyUsable {
-		material.Destroy()
-		return nil, httpserver.ErrSnapshotByTokenUnavailable
-	}
-	if err := tx.Commit(ctx); err != nil {
 		material.Destroy()
 		return nil, httpserver.ErrSnapshotByTokenUnavailable
 	}

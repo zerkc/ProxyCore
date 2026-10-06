@@ -6,8 +6,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/zerkc/ProxyCore/apps/api/internal/domain"
 	"github.com/zerkc/ProxyCore/apps/api/internal/identity"
@@ -28,15 +26,13 @@ type IdentitySource interface {
 }
 
 type LocalKEKLoader struct {
-	pool     *pgxpool.Pool
-	store    *Store
+	keys     KeyLoader
 	identity IdentitySource
 	now      func() time.Time
 }
 
 type LocalKEKLoaderOptions struct {
-	Pool     *pgxpool.Pool
-	Store    *Store
+	Keys     KeyLoader
 	Identity IdentitySource
 	Now      func() time.Time
 }
@@ -46,12 +42,12 @@ func NewLocalKEKLoader(opts LocalKEKLoaderOptions) *LocalKEKLoader {
 	if now == nil {
 		now = time.Now
 	}
-	return &LocalKEKLoader{pool: opts.Pool, store: opts.Store, identity: opts.Identity, now: now}
+	return &LocalKEKLoader{keys: opts.Keys, identity: opts.Identity, now: now}
 }
 
 // LoadLocalKEK reads the already-loaded local identity, loads the referenced
-// encrypted KEK in one owned transaction, commits that transaction, and then
-// returns a caller-owned in-memory KEK. The caller must call Destroy.
+// encrypted KEK through the storage-agnostic KeyLoader, and returns a
+// caller-owned in-memory KEK. The caller must call Destroy.
 func (l *LocalKEKLoader) LoadLocalKEK(ctx context.Context) (*KEK, uuid.UUID, error) {
 	if l == nil || ctx == nil || l.identity == nil {
 		return nil, uuid.Nil, ErrLocalKEKLoaderNotReady
@@ -67,17 +63,11 @@ func (l *LocalKEKLoader) LoadLocalKEK(ctx context.Context) (*KEK, uuid.UUID, err
 		return nil, uuid.Nil, ErrLocalKEKLoaderNotReady
 	}
 	activeID := *current.ClusterKeyID
-	if l.pool == nil || l.store == nil {
+	if l.keys == nil {
 		return nil, uuid.Nil, ErrLocalKEKLoaderStore
 	}
 
-	tx, err := l.pool.BeginTx(ctx, pgx.TxOptions{})
-	if err != nil {
-		return nil, uuid.Nil, ErrLocalKEKLoaderStore
-	}
-	defer tx.Rollback(ctx)
-
-	material, err := l.store.LoadOrCreate(ctx, tx, &activeID)
+	material, err := l.keys.LoadActive(ctx, activeID)
 	if err != nil {
 		material.Destroy()
 		return nil, uuid.Nil, ErrLocalKEKLoaderStore
@@ -91,10 +81,6 @@ func (l *LocalKEKLoader) LoadLocalKEK(ctx context.Context) (*KEK, uuid.UUID, err
 		if kek != nil {
 			kek.Destroy()
 		}
-		return nil, uuid.Nil, ErrLocalKEKLoaderStore
-	}
-	if err := tx.Commit(ctx); err != nil {
-		kek.Destroy()
 		return nil, uuid.Nil, ErrLocalKEKLoaderStore
 	}
 	return kek, materialID, nil

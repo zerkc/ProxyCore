@@ -37,7 +37,7 @@ func TestPostgresLocalKEKLoaderOwnsAndCommitsTransaction(t *testing.T) {
 	if _, err := identityService.Load(ctx); err != nil {
 		t.Fatalf("load identity: %v", err)
 	}
-	loader := NewLocalKEKLoader(LocalKEKLoaderOptions{Pool: pool, Store: store, Identity: identityService})
+	loader := NewLocalKEKLoader(LocalKEKLoaderOptions{Keys: NewPGKeyLoader(pool, store), Identity: identityService})
 	kek, loadedID, err := loader.LoadLocalKEK(ctx)
 	if err != nil {
 		t.Fatalf("LoadLocalKEK: %v", err)
