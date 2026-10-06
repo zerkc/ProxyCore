@@ -1,16 +1,10 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { loadConfig } from "@proxycore/config";
-import {
-  createDatabase,
-  PgJobStore,
-  PgRevisionStore,
-  PgSecretStore,
-  runJobNotificationListener,
-} from "@proxycore/db";
 import { ApplyOrchestrator } from "./apply";
 import { UnixSocketControlClient } from "./control-client";
-import { runWorkerLoop, WorkerWakeup } from "./poller";
+import { runWorkerLoop } from "./poller";
+import { createWorkerRuntime } from "./sqlite-runtime";
 
 export function workerIdentity(): string {
   return "proxycore-worker";
@@ -40,12 +34,24 @@ async function main(): Promise<void> {
   };
   heartbeat();
   const heartbeatTimer = setInterval(heartbeat, 30_000);
-  const database = createDatabase(config.databaseUrl);
-  const jobs = new PgJobStore(database.db);
-  const revisions = new PgRevisionStore(database.db);
-  const secretStore = config.masterKeyBase64
-    ? new PgSecretStore(database.db, config.masterKeyBase64)
-    : undefined;
+  if (!config.sqlitePath) {
+    clearInterval(heartbeatTimer);
+    throw new Error("PROXYCORE_SQLITE_PATH is required");
+  }
+  const runtime = await createWorkerRuntime(
+    {
+      sqlitePath: config.sqlitePath,
+      masterKeyBase64: config.masterKeyBase64,
+    },
+    {
+      log: (message) =>
+        process.stdout.write(`${new Date().toISOString()} ${message}\n`),
+    },
+  ).catch((error: unknown) => {
+    clearInterval(heartbeatTimer);
+    throw error;
+  });
+  const { jobs, revisions, secretStore, wakeup } = runtime;
   const orchestrator = new ApplyOrchestrator({
     jobs,
     revisions,
@@ -53,22 +59,9 @@ async function main(): Promise<void> {
     candidateRoot,
   });
   const controller = new AbortController();
-  const wakeup = new WorkerWakeup();
   const shutdown = () => controller.abort();
   process.once("SIGINT", shutdown);
   process.once("SIGTERM", shutdown);
-  const listenerPromise = runJobNotificationListener({
-    pool: database.pool,
-    signal: controller.signal,
-    onJob: () => wakeup.notify(),
-    onError: (error) => {
-      process.stderr.write(
-        `${new Date().toISOString()} worker notification listener error: ${
-          error instanceof Error ? error.message : String(error)
-        }\n`,
-      );
-    },
-  });
   process.stdout.write(
     `${workerIdentity()} listening for jobs; reconciling every ${reconciliationIntervalMs}ms\n`,
   );
@@ -111,8 +104,7 @@ async function main(): Promise<void> {
     wakeup.notify();
     process.removeListener("SIGINT", shutdown);
     process.removeListener("SIGTERM", shutdown);
-    await listenerPromise;
-    await database.pool.end();
+    await runtime.close();
   }
 }
 

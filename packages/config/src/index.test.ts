@@ -24,3 +24,18 @@ describe("loadConfig", () => {
     expect(() => loadConfig({ DATABASE_URL: "not-a-url" })).toThrow();
   });
 });
+
+describe("loadConfig sqlite path", () => {
+  it("leaves the sqlite path undefined when unset", () => {
+    expect(loadConfig({ NODE_ENV: "test" }).sqlitePath).toBeUndefined();
+  });
+
+  it("reads PROXYCORE_SQLITE_PATH without requiring DATABASE_URL", () => {
+    const config = loadConfig({ PROXYCORE_SQLITE_PATH: "/data/proxycore.db" });
+    expect(config.sqlitePath).toBe("/data/proxycore.db");
+  });
+
+  it("rejects an empty sqlite path", () => {
+    expect(() => loadConfig({ PROXYCORE_SQLITE_PATH: "" })).toThrow();
+  });
+});

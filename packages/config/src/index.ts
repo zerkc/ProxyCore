@@ -9,6 +9,8 @@ const environmentSchema = z.object({
     .url()
     .default("postgres://proxycore:proxycore@localhost:5432/proxycore"),
   PROXYCORE_PERSISTENCE_MODE: z.enum(["postgres", "memory"]).optional(),
+  // Same name as the Go side; the Go API owns schema migration.
+  PROXYCORE_SQLITE_PATH: z.string().min(1).optional(),
   PROXYCORE_MASTER_KEY_BASE64: z.string().optional(),
   SESSION_COOKIE_NAME: z.string().min(1).default("proxycore_session"),
   SESSION_TTL_SECONDS: z.coerce.number().int().positive().default(28_800),
@@ -34,6 +36,7 @@ const environmentSchema = z.object({
 export type AppConfig = {
   nodeEnv: "development" | "test" | "production";
   databaseUrl: string;
+  sqlitePath?: string;
   persistenceMode: "postgres" | "memory";
   masterKeyBase64?: string;
   sessionCookieName: string;
@@ -74,6 +77,7 @@ export function loadConfig(
     persistenceMode:
       parsed.PROXYCORE_PERSISTENCE_MODE ??
       (parsed.NODE_ENV === "test" ? "memory" : "postgres"),
+    sqlitePath: parsed.PROXYCORE_SQLITE_PATH,
     masterKeyBase64: parsed.PROXYCORE_MASTER_KEY_BASE64,
     sessionCookieName: parsed.SESSION_COOKIE_NAME,
     sessionTtlSeconds: parsed.SESSION_TTL_SECONDS,
