@@ -29,5 +29,7 @@ type phase2Backend interface {
 var (
 	_ nodeConverterStore              = (*configuration.Store)(nil)
 	_ phase2Backend                   = (*configuration.PgPhase2Store)(nil)
+	_ nodeConverterStore              = (*configuration.SQLitePhase2Store)(nil)
+	_ phase2Backend                   = (*configuration.SQLitePhase2Store)(nil)
 	_ enrollmentTLSConfigurationStore = (*configuration.Store)(nil)
 )

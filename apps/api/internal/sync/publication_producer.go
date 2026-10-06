@@ -304,4 +304,5 @@ func zeroCanonicalBytes(value []byte) {
 }
 
 var _ configuration.CanonicalSnapshotStore = (*configuration.PgPhase2Store)(nil)
+var _ configuration.CanonicalSnapshotStore = (*configuration.SQLitePhase2Store)(nil)
 var _ CanonicalSnapshotExporter = (*replicationsnapshot.Exporter)(nil)
