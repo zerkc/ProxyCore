@@ -41,24 +41,6 @@ jobs:
   test-go:
     name: Test (Go)
     runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:16-alpine
-        env:
-          POSTGRES_USER: proxycore
-          POSTGRES_PASSWORD: proxycore
-          POSTGRES_DB: proxycore
-        ports:
-          - 5432:5432
-        # Test DB data is disposable; overlay fsync/checkpoint I/O caused suite timeouts.
-        options: >-
-          --tmpfs /var/lib/postgresql/data:rw,size=1g
-          --health-cmd "pg_isready -U proxycore -d proxycore"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
-    env:
-      DATABASE_URL: postgres://proxycore:proxycore@localhost:5432/proxycore?sslmode=disable
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -69,9 +51,49 @@ jobs:
           go-version-file: apps/api/go.mod
           cache-dependency-path: apps/api/go.sum
 
+      # SQLite-only runtime: no database service is needed. The PostgreSQL
+      # converter tests skip here (PROXYCORE_CONVERT_TEST_PG_URL is unset) and
+      # run for real in the test-convert job below.
       - name: Test
         working-directory: apps/api
         run: go test ./...
+
+  # The PostgreSQL -> SQLite converter is the only code that still talks to
+  # PostgreSQL, so it is the only job with a PostgreSQL service.
+  test-convert:
+    name: Test (PostgreSQL converter)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: proxycore
+          POSTGRES_PASSWORD: proxycore
+          POSTGRES_DB: proxycore
+        ports:
+          - 5432:5432
+        # Test DB data is disposable; tmpfs avoids fsync/checkpoint I/O timeouts.
+        options: >-
+          --tmpfs /var/lib/postgresql/data:rw,size=1g
+          --health-cmd "pg_isready -U proxycore -d proxycore"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      PROXYCORE_CONVERT_TEST_PG_URL: postgres://proxycore:proxycore@localhost:5432/proxycore?sslmode=disable
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: apps/api/go.mod
+          cache-dependency-path: apps/api/go.sum
+
+      - name: Test converter against PostgreSQL
+        working-directory: apps/api
+        run: go test -count=1 ./internal/pgconvert/... ./cmd/convert/...
 
   build:
     name: Build
@@ -105,23 +127,27 @@ jobs:
             -ldflags="-s -w -X github.com/zerkc/ProxyCore/apps/api/internal/version.Version=${VERSION}" \
             -o /tmp/proxycore-api ./cmd/server
 
+      - name: Build PostgreSQL converter
+        working-directory: apps/api
+        run: CGO_ENABLED=0 go build -trimpath -o /tmp/proxycore-convert ./cmd/convert
+
       - name: Validate Compose file
         env:
           # Dummy values only for `compose config` interpolation (not used at runtime).
           PROXYCORE_MASTER_KEY_BASE64: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
-          POSTGRES_PASSWORD: ci-compose-check
         run: docker compose -f compose.yaml config --quiet
 
   ci:
     name: CI
     if: always()
-    needs: [test-js, test-go, build]
+    needs: [test-js, test-go, test-convert, build]
     runs-on: ubuntu-latest
     steps:
       - name: Require green jobs
         run: |
           js='${{ needs.test-js.result }}'
           go='${{ needs.test-go.result }}'
+          convert='${{ needs.test-convert.result }}'
           build='${{ needs.build.result }}'
-          echo "test-js=${js} test-go=${go} build=${build}"
-          test "$js" = success && test "$go" = success && test "$build" = success
+          echo "test-js=${js} test-go=${go} test-convert=${convert} build=${build}"
+          test "$js" = success && test "$go" = success && test "$convert" = success && test "$build" = success

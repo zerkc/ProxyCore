@@ -16,7 +16,7 @@
 - [ ] `bun run typecheck`
 - [ ] `bun run test`
 - [ ] `bun run lint`
-- [ ] `cd apps/api && go test ./...` (set `DATABASE_URL` for DB-backed tests)
+- [ ] `cd apps/api && go test ./...` (converter tests need `PROXYCORE_CONVERT_TEST_PG_URL` pointing at a disposable PostgreSQL; they skip otherwise)
 - [ ] Manual check (describe):
 
 ## Checklist
