@@ -42,15 +42,21 @@ RUN --mount=type=cache,id=go-mod,target=/go/pkg/mod \
        -ldflags="-s -w -X github.com/zerkc/ProxyCore/apps/api/internal/version.Version=${VERSION}" \
        -o /out/proxycore-api ./cmd/server \
     && CGO_ENABLED=0 GOOS=linux go build -trimpath \
-       -ldflags="-s -w" -o /out/proxycore-admin ./cmd/admin
+       -ldflags="-s -w" -o /out/proxycore-admin ./cmd/admin \
+    && CGO_ENABLED=0 GOOS=linux go build -trimpath \
+       -ldflags="-s -w" -o /out/proxycore-convert ./cmd/convert
 
 # Runtime: single static binary + SPA assets.
 FROM alpine:3.22
 RUN apk add --no-cache ca-certificates tzdata wget \
-  && adduser -D -H -u 10001 proxycore
+  && adduser -D -H -u 10001 proxycore \
+  && mkdir -p /var/lib/proxycore-db \
+  && chown 10001:10001 /var/lib/proxycore-db
 WORKDIR /app
 COPY --from=api /out/proxycore-api /app/proxycore-api
 COPY --from=api /out/proxycore-admin /usr/local/bin/proxycore-admin
+# Offline one-way PostgreSQL -> SQLite converter; manual upgrade tool only.
+COPY --from=api /out/proxycore-convert /usr/local/bin/proxycore-convert
 COPY --from=ui /ui/dist /app/ui
 ENV PROXYCORE_UI_DIST=/app/ui
 ENV PROXYCORE_API_ADDR=:3000
