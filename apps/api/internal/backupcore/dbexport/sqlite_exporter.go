@@ -68,10 +68,50 @@ type sqliteColumn struct {
 	name     string
 	declared string
 	kind     sqliteKind
+	notNull  bool
 }
 
 type sqliteQuerier interface {
 	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+}
+
+// SQLiteQuerier is satisfied by *sql.DB, *sql.Tx and *sql.Conn.
+type SQLiteQuerier = sqliteQuerier
+
+// SQLiteKind is the JSON kind of a SQLite column in the bundle.
+type SQLiteKind = sqliteKind
+
+// Exported column kinds, shared with the SQLite importer so both directions
+// use the same schema-and-special-column classification.
+const (
+	SQLiteKindText      = kindText
+	SQLiteKindInt       = kindInt
+	SQLiteKindBool      = kindBool
+	SQLiteKindTimestamp = kindTimestamp
+	SQLiteKindJSON      = kindJSON
+	SQLiteKindBlob      = kindBlob
+)
+
+// SQLiteColumnSpec describes one column of an exported table.
+type SQLiteColumnSpec struct {
+	Name     string
+	Declared string
+	Kind     SQLiteKind
+	NotNull  bool
+}
+
+// DescribeSQLiteColumns classifies the columns of table exactly as the
+// exporter does. Unknown declared types yield *UnsupportedSQLiteTypeError.
+func DescribeSQLiteColumns(ctx context.Context, q SQLiteQuerier, table string) ([]SQLiteColumnSpec, error) {
+	columns, err := sqliteTableColumns(ctx, q, table)
+	if err != nil {
+		return nil, err
+	}
+	specs := make([]SQLiteColumnSpec, len(columns))
+	for index, column := range columns {
+		specs[index] = SQLiteColumnSpec{Name: column.name, Declared: column.declared, Kind: column.kind, NotNull: column.notNull}
+	}
+	return specs, nil
 }
 
 // resolveSQLiteKind maps a declared SQLite type plus the table-specific
@@ -117,7 +157,7 @@ func sqliteTableColumns(ctx context.Context, q sqliteQuerier, table string) ([]s
 		if err != nil {
 			return nil, err
 		}
-		columns = append(columns, sqliteColumn{name: name, declared: declared, kind: kind})
+		columns = append(columns, sqliteColumn{name: name, declared: declared, kind: kind, notNull: notNull != 0})
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("describe %q: %w", table, err)

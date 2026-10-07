@@ -10,6 +10,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/zerkc/ProxyCore/apps/api/internal/backupcore/dbexport"
 	"github.com/zerkc/ProxyCore/apps/api/internal/backupcore/zipextract"
@@ -101,6 +102,41 @@ func decodeTableRows(data []byte) ([]map[string]any, error) {
 		return nil, err
 	}
 	return rows, nil
+}
+
+// postgresTableImporter is the PostgreSQL TableImporter: one transaction, a
+// transaction-scoped advisory lock, TRUNCATE ... CASCADE and COPY per table.
+type postgresTableImporter struct {
+	pool *pgxpool.Pool
+}
+
+func newPostgresTableImporter(pool *pgxpool.Pool) *postgresTableImporter {
+	return &postgresTableImporter{pool: pool}
+}
+
+func (i *postgresTableImporter) ReplaceTables(ctx context.Context, payloads []tablePayload) ([]TablePreview, error) {
+	tx, err := i.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("begin backup import transaction: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback(ctx)
+		}
+	}()
+	if err := acquireImportLock(ctx, tx); err != nil {
+		return nil, err
+	}
+	previews, err := importConfigTables(ctx, tx, payloads)
+	if err != nil {
+		return previews, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return previews, fmt.Errorf("commit backup import: %w", err)
+	}
+	committed = true
+	return previews, nil
 }
 
 func importConfigTables(ctx context.Context, tx pgx.Tx, payloads []tablePayload) ([]TablePreview, error) {

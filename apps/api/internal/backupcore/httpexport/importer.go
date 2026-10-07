@@ -51,6 +51,37 @@ func (i *BackupImporter) ImportWithActorID(ctx context.Context, body io.Reader, 
 }
 
 func (i *BackupImporter) importWithActorID(ctx context.Context, body io.Reader, size int64, passphrase []byte, dryRun bool, actorID string) (httpserver.ImportReport, error) {
+	return importBundle(ctx, body, size, passphrase, dryRun, actorID, bundleImport{
+		Pool:            i.Pool,
+		MasterKeyBase64: i.MasterKeyBase64,
+		EnvRestorePath:  i.EnvRestorePath,
+		CandidateRoot:   i.CandidateRoot,
+		EnvMode:         i.EnvMode,
+		Apply:           i.Apply,
+		Audit:           i.Audit,
+		NewRevisionID:   i.NewRevisionID,
+		Now:             i.Now,
+		BodyLimit:       i.BodyLimit,
+	})
+}
+
+// bundleImport is the database-independent configuration shared by the
+// PostgreSQL and SQLite importers; exactly one of Pool and Tables is set.
+type bundleImport struct {
+	Pool            *pgxpool.Pool
+	Tables          dbimport.TableImporter
+	MasterKeyBase64 string
+	EnvRestorePath  string
+	CandidateRoot   string
+	EnvMode         string
+	Apply           dbimport.ApplyTrigger
+	Audit           dbimport.AuditEmitter
+	NewRevisionID   string
+	Now             func() time.Time
+	BodyLimit       int64
+}
+
+func importBundle(ctx context.Context, body io.Reader, size int64, passphrase []byte, dryRun bool, actorID string, i bundleImport) (httpserver.ImportReport, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -90,6 +121,7 @@ func (i *BackupImporter) importWithActorID(ctx context.Context, body io.Reader, 
 	}
 	engine, err := dbimport.New(dbimport.Options{
 		Pool:                    i.Pool,
+		Tables:                  i.Tables,
 		MasterKeyBase64:         i.MasterKeyBase64,
 		EnvRestorePath:          hostConfig.EnvPath,
 		CandidateRoot:           hostConfig.CandidateRoot,
