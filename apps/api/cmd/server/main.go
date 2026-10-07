@@ -140,8 +140,7 @@ func runServerWithNodeConverter(ctx context.Context, cfg config.Config, logger *
 	if nodeConverter != nil {
 		logger.Printf("node converter ready for role=%s", identityResult.Role)
 	}
-	// Backup export/import stays unwired until T61 (SQLite implementation);
-	// the backup handlers treat a nil exporter/importer as unavailable.
+	options = append(options, stack.backupOptions(cfg)...)
 
 	server := &http.Server{
 		Addr:              cfg.Addr,

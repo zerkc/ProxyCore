@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -191,4 +192,58 @@ func (s *typedNilTLSStore) GetEnrollmentHostnames(context.Context) (configuratio
 func (s *typedNilTLSStore) EnsureEnrollmentTLSMaterial(context.Context) (configuration.EnrollmentTLSMaterial, error) {
 	s.called = true
 	return configuration.EnrollmentTLSMaterial{}, nil
+}
+
+func TestSQLiteStackBackupOptionsRequireMasterKey(t *testing.T) {
+	cfg := sqliteTestConfig(t)
+	stack, err := openSQLiteStack(context.Background(), cfg, nil)
+	if err != nil {
+		t.Fatalf("openSQLiteStack: %v", err)
+	}
+	defer stack.Close()
+
+	json := func(h http.Handler, path string, body string, cookie *http.Cookie) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		if cookie != nil {
+			req.AddCookie(cookie)
+		}
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec
+	}
+	creds := `{"username":"owner","password":"correct horse battery staple"}`
+	base := httpserver.New(cfg, nil, stack.options(cfg)...).Handler()
+	if rec := json(base, "/api/auth/bootstrap", creds, nil); rec.Code != http.StatusCreated {
+		t.Fatalf("bootstrap status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	login := json(base, "/api/auth/login", creds, nil)
+	cookies := login.Result().Cookies()
+	if login.Code != http.StatusOK || len(cookies) != 1 {
+		t.Fatalf("login status = %d cookies=%v", login.Code, cookies)
+	}
+	post := func(opts []httpserver.Option, path string) int {
+		options := append(stack.options(cfg), opts...)
+		return json(httpserver.New(cfg, nil, options...).Handler(), path, "", cookies[0]).Code
+	}
+
+	if got := post(nil, "/api/backup/export"); got != http.StatusServiceUnavailable {
+		t.Fatalf("unwired export status = %d, want 503", got)
+	}
+
+	noKey := cfg
+	noKey.MasterKeyBase64 = ""
+	if opts := stack.backupOptions(noKey); len(opts) != 0 {
+		t.Fatalf("backupOptions without master key = %d options, want 0", len(opts))
+	}
+
+	opts := stack.backupOptions(cfg)
+	if len(opts) != 1 {
+		t.Fatalf("backupOptions with master key = %d options, want 1", len(opts))
+	}
+	for _, path := range []string{"/api/backup/export", "/api/backup/import"} {
+		if got := post(opts, path); got == http.StatusServiceUnavailable {
+			t.Fatalf("%s still reports the backup service as unavailable", path)
+		}
+	}
 }

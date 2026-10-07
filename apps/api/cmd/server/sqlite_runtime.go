@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/zerkc/ProxyCore/apps/api/internal/auth"
+	"github.com/zerkc/ProxyCore/apps/api/internal/backupcore/dbimport"
+	"github.com/zerkc/ProxyCore/apps/api/internal/backupcore/httpexport"
 	"github.com/zerkc/ProxyCore/apps/api/internal/cluster"
 	"github.com/zerkc/ProxyCore/apps/api/internal/config"
 	"github.com/zerkc/ProxyCore/apps/api/internal/configuration"
@@ -20,6 +22,7 @@ import (
 	"github.com/zerkc/ProxyCore/apps/api/internal/identity"
 	"github.com/zerkc/ProxyCore/apps/api/internal/secrets"
 	"github.com/zerkc/ProxyCore/apps/api/internal/sqlitedb"
+	"github.com/zerkc/ProxyCore/apps/api/internal/version"
 )
 
 // This file is the SQLite composition root. It is deliberately separate from
@@ -155,4 +158,32 @@ func sqliteEnrollmentTokenLister(source enrollmentTokenListSource) httpserver.En
 		}
 		return result, nil
 	}
+}
+
+// backupOptions wires the public backup export/import over the stack's
+// database. Like the PostgreSQL wiring it replaced, it needs the master key:
+// the bundle carries a marker row encrypted with it. Without a key the backup
+// handlers keep reporting the service as unavailable.
+func (s *sqliteStack) backupOptions(cfg config.Config) []httpserver.Option {
+	if cfg.MasterKeyBase64 == "" {
+		return nil
+	}
+	exporter := &httpexport.SQLiteBackupExporter{
+		DB:              s.db,
+		Identity:        httpexport.NewIdentitySource(s.identity),
+		Version:         version.Version,
+		Now:             time.Now,
+		MasterKeyBase64: cfg.MasterKeyBase64,
+	}
+	importer := &httpexport.SQLiteBackupImporter{
+		DB:              s.db,
+		Writer:          s.writer,
+		MasterKeyBase64: cfg.MasterKeyBase64,
+		EnvMode:         "0600",
+		Apply:           httpexport.NewApplyTrigger(s.config),
+		Audit:           &dbimport.SQLiteAuditEmitter{DB: s.db, Writer: s.writer},
+		Now:             time.Now,
+		BodyLimit:       4 << 30,
+	}
+	return []httpserver.Option{httpserver.WithBackup(exporter, importer)}
 }
