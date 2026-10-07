@@ -94,7 +94,7 @@ func TestApplyHappyPath(t *testing.T) {
 	fc := &fakeCommander{
 		result: map[string]fakeResult{
 			"pull":   {Output: "pulled api: ok"},
-			"run":    {Output: "migrations applied"},
+			"run":    {Output: "preflight ok"},
 			"up":     {Output: "api up"},
 			"health": {Output: ""}, // not used via docker; HTTPGet handles it
 		},
@@ -103,7 +103,6 @@ func TestApplyHappyPath(t *testing.T) {
 	u := New(Options{
 		ProjectName:          "proxycore",
 		Services:             []string{"api", "worker"},
-		MigrateService:       "migrate",
 		HealthURL:            "http://api:3000/api/health",
 		HealthTimeout:        2 * time.Second,
 		PollInterval:         50 * time.Millisecond,
@@ -124,10 +123,10 @@ func TestApplyHappyPath(t *testing.T) {
 		t.Fatalf("status=%q want ok; steps=%+v", status.Status, status.Steps)
 	}
 	if len(status.Steps) != 5 {
-		t.Fatalf("expected 5 steps (pull, migrate, restart, verify, bootstrap), got %d: %+v",
+		t.Fatalf("expected 5 steps (pull, preflight, restart, verify, bootstrap), got %d: %+v",
 			len(status.Steps), stepNames(status.Steps))
 	}
-	want := []string{"pull", "migrate", "restart", "verify", "bootstrap"}
+	want := []string{"pull", "preflight", "restart", "verify", "bootstrap"}
 	for i, n := range want {
 		if status.Steps[i].Name != n {
 			t.Errorf("step %d name=%q want %q", i, status.Steps[i].Name, n)
@@ -139,8 +138,8 @@ func TestApplyHappyPath(t *testing.T) {
 	if hits != 1 {
 		t.Errorf("expected 1 health probe, got %d", hits)
 	}
-	if fc.CallCount() != 3 {
-		t.Errorf("expected 3 docker calls (pull, run, up), got %d", fc.CallCount())
+	if fc.CallCount() != 4 {
+		t.Errorf("expected 4 docker calls (pull, volume inspect, run, up), got %d", fc.CallCount())
 	}
 
 	// Verify the atomic bootstrap request JSON was written.
@@ -229,8 +228,8 @@ func TestApplyBuildModeFetchesSource(t *testing.T) {
 	gitCalls := 0
 	fc := &fakeCommander{
 		result: map[string]fakeResult{
-			"build": {Output: "built api worker migrate"},
-			"run":   {Output: "migrations applied"},
+			"build": {Output: "built api worker"},
+			"run":   {Output: "preflight ok"},
 			"up":    {Output: "api worker up"},
 		},
 	}
@@ -265,7 +264,6 @@ func TestApplyBuildModeFetchesSource(t *testing.T) {
 		SourceDir:            tmp,
 		ProjectName:          "proxycore",
 		Services:             []string{"api", "worker"},
-		MigrateService:       "migrate",
 		BootstrapRequestFile: requestFile,
 		HealthURL:            "http://api:3000/api/health",
 		HealthTimeout:        2 * time.Second,
@@ -284,7 +282,7 @@ func TestApplyBuildModeFetchesSource(t *testing.T) {
 	}
 	// fetch-source is now the first step.
 	if len(status.Steps) != 6 {
-		t.Fatalf("expected 6 steps (fetch-source, build, migrate, restart, verify, bootstrap), got %d: %+v",
+		t.Fatalf("expected 6 steps (fetch-source, build, preflight, restart, verify, bootstrap), got %d: %+v",
 			len(status.Steps), stepNames(status.Steps))
 	}
 	if status.Steps[0].Name != "fetch-source" {
@@ -306,7 +304,7 @@ func TestApplyBuildModeSkipsFetchSourceWhenSourceDirEmpty(t *testing.T) {
 	fc := &fakeCommander{
 		result: map[string]fakeResult{
 			"build": {Output: "built"},
-			"run":   {Output: "migrated"},
+			"run":   {Output: "ok"},
 			"up":    {Output: "up"},
 		},
 	}
@@ -323,7 +321,6 @@ func TestApplyBuildModeSkipsFetchSourceWhenSourceDirEmpty(t *testing.T) {
 		SourceDir:            "", // not configured
 		ProjectName:          "proxycore",
 		Services:             []string{"api"},
-		MigrateService:       "migrate",
 		BootstrapRequestFile: requestFile,
 		HealthURL:            "http://api:3000/api/health",
 		HealthTimeout:        2 * time.Second,
@@ -342,7 +339,7 @@ func TestApplyBuildModeSkipsFetchSourceWhenSourceDirEmpty(t *testing.T) {
 	}
 	// No fetch-source step when SourceDir is empty.
 	if len(status.Steps) != 5 {
-		t.Fatalf("expected 5 steps (build, migrate, restart, verify, bootstrap), got %d: %+v",
+		t.Fatalf("expected 5 steps (build, preflight, restart, verify, bootstrap), got %d: %+v",
 			len(status.Steps), stepNames(status.Steps))
 	}
 	if status.Steps[0].Name != UpdateModeBuild {
@@ -360,7 +357,7 @@ func TestApplyBuildModeRejectsDirtySource(t *testing.T) {
 	fc := &fakeCommander{
 		result: map[string]fakeResult{
 			"build": {Output: "built"},
-			"run":   {Output: "migrated"},
+			"run":   {Output: "ok"},
 			"up":    {Output: "up"},
 		},
 	}
@@ -386,7 +383,6 @@ func TestApplyBuildModeRejectsDirtySource(t *testing.T) {
 		SourceDir:            tmp,
 		ProjectName:          "proxycore",
 		Services:             []string{"api"},
-		MigrateService:       "migrate",
 		BootstrapRequestFile: requestFile,
 		HealthURL:            "http://api:3000/api/health",
 		HealthTimeout:        2 * time.Second,
@@ -419,7 +415,7 @@ func TestApplyBuildModeRejectsGitFailure(t *testing.T) {
 	fc := &fakeCommander{
 		result: map[string]fakeResult{
 			"build": {Output: "built"},
-			"run":   {Output: "migrated"},
+			"run":   {Output: "ok"},
 			"up":    {Output: "up"},
 		},
 	}
@@ -446,7 +442,6 @@ func TestApplyBuildModeRejectsGitFailure(t *testing.T) {
 		SourceDir:            tmp,
 		ProjectName:          "proxycore",
 		Services:             []string{"api"},
-		MigrateService:       "migrate",
 		BootstrapRequestFile: requestFile,
 		HealthURL:            "http://api:3000/api/health",
 		HealthTimeout:        2 * time.Second,
@@ -479,7 +474,7 @@ func TestApplyBuildModeRestoresSourceOnFailure(t *testing.T) {
 	fc := &fakeCommander{
 		result: map[string]fakeResult{
 			"build": {Output: "built"},
-			"run":   {Output: "migrations applied"},
+			"run":   {Output: "preflight ok"},
 			"up":    {Output: "no such image", Err: errFake("exit 1")},
 		},
 	}
@@ -516,7 +511,6 @@ func TestApplyBuildModeRestoresSourceOnFailure(t *testing.T) {
 		SourceDir:            tmp,
 		ProjectName:          "proxycore",
 		Services:             []string{"api"},
-		MigrateService:       "migrate",
 		BootstrapRequestFile: requestFile,
 		HealthURL:            "http://api:3000/api/health",
 		HealthTimeout:        2 * time.Second,
@@ -540,8 +534,8 @@ func TestApplyBuildMode(t *testing.T) {
 	requestFile := filepath.Join(tmp, "request.json")
 	fc := &fakeCommander{
 		result: map[string]fakeResult{
-			"build": {Output: "built api worker migrate"},
-			"run":   {Output: "migrations applied"},
+			"build": {Output: "built api worker"},
+			"run":   {Output: "preflight ok"},
 			"up":    {Output: "api worker up"},
 		},
 	}
@@ -549,7 +543,6 @@ func TestApplyBuildMode(t *testing.T) {
 		UpdateMode:           UpdateModeBuild,
 		ProjectName:          "proxycore",
 		Services:             []string{"api", "worker"},
-		MigrateService:       "migrate",
 		BootstrapRequestFile: requestFile,
 		HealthURL:            "http://api:3000/api/health",
 		HealthTimeout:        2 * time.Second,
@@ -570,9 +563,14 @@ func TestApplyBuildMode(t *testing.T) {
 	firstArgs := append([]string(nil), fc.calls[0].Args...)
 	fc.mu.Unlock()
 	joined := strings.Join(firstArgs, " ")
-	for _, want := range []string{"--profile", "tools", "build", "api", "worker", "migrate"} {
+	for _, want := range []string{"build", "api", "worker"} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("build command %q does not contain %q", joined, want)
+		}
+	}
+	for _, unwanted := range []string{"--profile", "tools", "migrate"} {
+		if strings.Contains(joined, unwanted) {
+			t.Errorf("build command %q must not contain %q", joined, unwanted)
 		}
 	}
 }
@@ -584,15 +582,14 @@ func TestApplyPullFailureStopsEarly(t *testing.T) {
 		},
 	}
 	u := New(Options{
-		ProjectName:    "proxycore",
-		Services:       []string{"api", "worker"},
-		MigrateService: "migrate",
-		HealthURL:      "http://api:3000/api/health",
-		HealthTimeout:  2 * time.Second,
-		PollInterval:   50 * time.Millisecond,
-		Exec:           fc.Exec,
-		HTTPGet:        func(ctx context.Context, url string) (int, error) { return 200, nil },
-		Logger:         &recordingLogger{},
+		ProjectName:   "proxycore",
+		Services:      []string{"api", "worker"},
+		HealthURL:     "http://api:3000/api/health",
+		HealthTimeout: 2 * time.Second,
+		PollInterval:  50 * time.Millisecond,
+		Exec:          fc.Exec,
+		HTTPGet:       func(ctx context.Context, url string) (int, error) { return 200, nil },
+		Logger:        &recordingLogger{},
 	})
 
 	_, err := u.Apply(context.Background(), "0.1.5")
@@ -620,15 +617,14 @@ func TestApplyRestartFailureKeepsVerifyPending(t *testing.T) {
 		},
 	}
 	u := New(Options{
-		ProjectName:    "proxycore",
-		Services:       []string{"api", "worker"},
-		MigrateService: "migrate",
-		HealthURL:      "http://api:3000/api/health",
-		HealthTimeout:  2 * time.Second,
-		PollInterval:   50 * time.Millisecond,
-		Exec:           fc.Exec,
-		HTTPGet:        func(ctx context.Context, url string) (int, error) { return 200, nil },
-		Logger:         &recordingLogger{},
+		ProjectName:   "proxycore",
+		Services:      []string{"api", "worker"},
+		HealthURL:     "http://api:3000/api/health",
+		HealthTimeout: 2 * time.Second,
+		PollInterval:  50 * time.Millisecond,
+		Exec:          fc.Exec,
+		HTTPGet:       func(ctx context.Context, url string) (int, error) { return 200, nil },
+		Logger:        &recordingLogger{},
 	})
 
 	_, err := u.Apply(context.Background(), "0.1.5")
@@ -637,7 +633,7 @@ func TestApplyRestartFailureKeepsVerifyPending(t *testing.T) {
 	}
 	last := u.Last()
 	if len(last.Steps) != 3 {
-		t.Fatalf("expected 3 steps (pull, migrate, restart), got %d: %+v",
+		t.Fatalf("expected 3 steps (pull, preflight, restart), got %d: %+v",
 			len(last.Steps), stepNames(last.Steps))
 	}
 	if last.Steps[2].Name != "restart" || last.Steps[2].Status != "failed" {
@@ -661,7 +657,6 @@ func TestApplyBootstrapWriteFailure(t *testing.T) {
 	u := New(Options{
 		ProjectName:          "proxycore",
 		Services:             []string{"api"},
-		MigrateService:       "migrate",
 		HealthURL:            "http://api:3000/api/health",
 		HealthTimeout:        2 * time.Second,
 		PollInterval:         50 * time.Millisecond,
@@ -707,12 +702,11 @@ func TestApplyBootstrapSkippedWhenNotConfigured(t *testing.T) {
 		},
 	}
 	u := New(Options{
-		ProjectName:    "proxycore",
-		Services:       []string{"api"},
-		MigrateService: "migrate",
-		HealthURL:      "http://api:3000/api/health",
-		HealthTimeout:  2 * time.Second,
-		PollInterval:   50 * time.Millisecond,
+		ProjectName:   "proxycore",
+		Services:      []string{"api"},
+		HealthURL:     "http://api:3000/api/health",
+		HealthTimeout: 2 * time.Second,
+		PollInterval:  50 * time.Millisecond,
 		// BootstrapRequestFile left empty — step should be skipped.
 		Exec: fc.Exec,
 		HTTPGet: func(ctx context.Context, url string) (int, error) {
@@ -823,3 +817,102 @@ func stepNames(steps []StepResult) []string {
 type errFake string
 
 func (e errFake) Error() string { return string(e) }
+
+// preflightFixture builds an Updater whose Exec reports a programmed legacy
+// volume / sqlite database state and records every command.
+func preflightFixture(t *testing.T, legacyVolume, sqliteDB bool) (*Updater, *[]string) {
+	t.Helper()
+	var cmds []string
+	exec := func(ctx context.Context, name string, args ...string) (string, error) {
+		line := name + " " + strings.Join(args, " ")
+		cmds = append(cmds, line)
+		switch {
+		case name == "docker" && len(args) >= 3 && args[0] == "volume" && args[1] == "inspect":
+			if args[2] != "proxycore_postgres-data" {
+				t.Errorf("unexpected volume inspected: %q", args[2])
+			}
+			if legacyVolume {
+				return "[{}]", nil
+			}
+			return "", errFake("no such volume")
+		case containsArg(args, "run") && containsArg(args, "--entrypoint"):
+			if sqliteDB {
+				return "", nil
+			}
+			return "", errFake("exit 1")
+		}
+		return "", nil
+	}
+	u := New(Options{
+		ProjectName:   "proxycore",
+		Services:      []string{"api", "worker"},
+		HealthTimeout: time.Second,
+		PollInterval:  10 * time.Millisecond,
+		Exec:          exec,
+		HTTPGet:       func(ctx context.Context, url string) (int, error) { return 200, nil },
+		Logger:        &recordingLogger{},
+	})
+	return u, &cmds
+}
+
+func TestPreflightRefusesLegacyPostgresWithoutSQLite(t *testing.T) {
+	u, cmds := preflightFixture(t, true, false)
+
+	_, err := u.Apply(context.Background(), "0.2.0")
+	if err == nil {
+		t.Fatal("expected preflight failure")
+	}
+	last := u.Last()
+	if got := stepNames(last.Steps); len(got) != 2 || got[1] != "preflight:failed" {
+		t.Fatalf("steps=%v want [pull:ok preflight:failed]", got)
+	}
+	msg := last.Steps[1].Error
+	for _, want := range []string{"PostgreSQL", "proxycore-convert", "docs"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("preflight error %q does not mention %q", msg, want)
+		}
+	}
+	for _, c := range *cmds {
+		if strings.Contains(c, " up ") {
+			t.Errorf("services must not be restarted after a refused preflight: %q", c)
+		}
+	}
+}
+
+func TestPreflightProceedsOnFreshInstall(t *testing.T) {
+	u, cmds := preflightFixture(t, false, false)
+
+	status, err := u.Apply(context.Background(), "0.2.0")
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if got := stepNames(status.Steps)[1]; got != "preflight:ok" {
+		t.Errorf("step 1=%q want preflight:ok", got)
+	}
+	for _, c := range *cmds {
+		if strings.Contains(c, "--entrypoint") {
+			t.Errorf("no sqlite probe expected without a legacy volume: %q", c)
+		}
+	}
+}
+
+func TestPreflightProceedsWhenSQLiteAlreadyExists(t *testing.T) {
+	u, cmds := preflightFixture(t, true, true)
+
+	status, err := u.Apply(context.Background(), "0.2.0")
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if got := stepNames(status.Steps)[1]; got != "preflight:ok" {
+		t.Errorf("step 1=%q want preflight:ok", got)
+	}
+	probed := false
+	for _, c := range *cmds {
+		if strings.Contains(c, "--entrypoint test") && strings.Contains(c, "/var/lib/proxycore-db/proxycore.db") {
+			probed = true
+		}
+	}
+	if !probed {
+		t.Errorf("expected sqlite probe via compose run; commands=%v", *cmds)
+	}
+}

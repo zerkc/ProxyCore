@@ -43,7 +43,6 @@ func main() {
 		ComposeFile:          cfg.ComposeFile,
 		ProjectName:          cfg.ProjectName,
 		Services:             cfg.Services,
-		MigrateService:       cfg.MigrateService,
 		HealthURL:            cfg.HealthURL,
 		HealthTimeout:        cfg.HealthTimeout,
 		BootstrapRequestFile: cfg.BootstrapRequestFile,
@@ -134,7 +133,6 @@ type config struct {
 	ComposeFile          string
 	ProjectName          string
 	Services             []string
-	MigrateService       string
 	HealthURL            string
 	HealthTimeout        time.Duration
 	BootstrapRequestFile string
@@ -142,12 +140,11 @@ type config struct {
 
 func loadConfig() (*config, error) {
 	cfg := &config{
-		Addr:           envOr("PROXYCORE_UPDATER_ADDR", ":8080"),
-		UpdateMode:     envOr("PROXYCORE_UPDATE_MODE", updater.UpdateModePull),
-		ComposeFile:    envOr("PROXYCORE_COMPOSE_FILE", "/app/compose.yaml"),
-		ProjectName:    envOr("PROXYCORE_COMPOSE_PROJECT", "proxycore"),
-		MigrateService: envOr("PROXYCORE_MIGRATE_SERVICE", "migrate"),
-		HealthURL:      envOr("PROXYCORE_HEALTH_URL", "http://api:3000/api/health"),
+		Addr:        envOr("PROXYCORE_UPDATER_ADDR", ":8080"),
+		UpdateMode:  envOr("PROXYCORE_UPDATE_MODE", updater.UpdateModePull),
+		ComposeFile: envOr("PROXYCORE_COMPOSE_FILE", "/app/compose.yaml"),
+		ProjectName: envOr("PROXYCORE_COMPOSE_PROJECT", "proxycore"),
+		HealthURL:   envOr("PROXYCORE_HEALTH_URL", "http://api:3000/api/health"),
 	}
 	if s := strings.TrimSpace(os.Getenv("PROXYCORE_UPDATER_SERVICES")); s != "" {
 		cfg.Services = splitNonEmpty(s, ", ")
