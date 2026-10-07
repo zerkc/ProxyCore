@@ -18,7 +18,7 @@ Requirements:
 - [Bun](https://bun.sh) `1.3.14` (see `packageManager` in `package.json`)
 - Go matching `apps/api/go.mod`
 - Docker Engine + Compose v2 (for local stack / compose validation)
-- Optional: Postgres for Go DB-backed tests (`DATABASE_URL`)
+- Optional: a disposable PostgreSQL, only to run the PostgreSQL-to-SQLite converter tests (`PROXYCORE_CONVERT_TEST_PG_URL`)
 
 ```sh
 bun install
@@ -29,9 +29,9 @@ bun run build:ui
 
 cd apps/api
 go test ./...
-# Full handler tests:
-# export DATABASE_URL=postgres://proxycore:proxycore@localhost:5432/proxycore?sslmode=disable
-# go test ./...
+# Converter tests against a disposable PostgreSQL (skipped otherwise):
+# export PROXYCORE_CONVERT_TEST_PG_URL=postgres://proxycore:proxycore@localhost:5432/proxycore?sslmode=disable
+# go test ./internal/pgconvert/... ./cmd/convert/...
 ```
 
 Local stack: see [docs/runbooks/bootstrap.md](docs/runbooks/bootstrap.md) and `.env.example`.

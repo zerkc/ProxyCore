@@ -384,8 +384,8 @@ func (u *Updater) preflightLegacyPostgres(ctx context.Context) (string, error) {
 	args = append(args, "run", "--rm", "--no-deps", "--entrypoint", "test", "api", "-f", sqliteDatabasePath)
 	if _, err := u.opts.Exec(ctx, "docker", args...); err != nil {
 		return "", fmt.Errorf("%w: legacy PostgreSQL volume %s exists but no SQLite database was found at %s. "+
-			"Convert it offline first with proxycore-convert (see the SQLite upgrade section in the project docs), "+
-			"then retry the update", ErrLegacyPostgresNotConverted, legacyVolume, sqliteDatabasePath)
+			"Convert it offline first with scripts/convert-postgres.sh, which runs proxycore-convert "+
+			"(see docs/runbooks/upgrade-from-postgres.md), then retry the update", ErrLegacyPostgresNotConverted, legacyVolume, sqliteDatabasePath)
 	}
 	return "SQLite database present", nil
 }
