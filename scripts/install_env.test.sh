@@ -10,12 +10,11 @@ source_installer() {
 run_loader() {
   input=$1
   printf '%s' "$input" | (
-    unset WEB_PORT ENROLLMENT_PORT DNS_PORT POSTGRES_USER POSTGRES_DB
+    unset WEB_PORT ENROLLMENT_PORT DNS_PORT
     source_installer
     load_env_values -
     apply_env_file_values
-    printf '%s|%s|%s|%s|%s\n' \
-      "$WEB_PORT" "$ENROLLMENT_PORT" "$DNS_PORT" "$POSTGRES_USER" "$POSTGRES_DB"
+    printf '%s|%s|%s\n' "$WEB_PORT" "$ENROLLMENT_PORT" "$DNS_PORT"
   )
 }
 
@@ -38,25 +37,25 @@ assert_rejected() {
 grammar_env=$(printf '%b' ' \t# comment\r\n WEB_PORT \t = \t "3000"\r\n DNS_PORT = 53 # unquoted comment\r\n UNKNOWN=$(printf ENROLLMENT_SIDE_EFFECT >&2)\r\n')
 single_quote_env="ENROLLMENT_PORT='3443'"
 [ "$(run_loader "$grammar_env
-$single_quote_env")" = '3000|3443|53|proxycore|proxycore' ] || {
+$single_quote_env")" = '3000|3443|53' ] || {
   printf 'bounded dotenv grammar did not load valid CRLF data\n' >&2
   exit 1
 }
 quoted_comment_env=$(printf '%b' 'WEB_PORT="3000" # double quote\r\nENROLLMENT_PORT='\''3443'\'' # single quote\r\nDNS_PORT=53 # plain\r\n')
-[ "$(run_loader "$quoted_comment_env")" = '3000|3443|53|proxycore|proxycore' ] || {
+[ "$(run_loader "$quoted_comment_env")" = '3000|3443|53' ] || {
   printf 'quoted port comments were not accepted\n' >&2
   exit 1
 }
 
 unknown_opaque='not a dotenv assignment
 UNKNOWN=`printf ENROLLMENT_SIDE_EFFECT >&2`'
-[ "$(run_loader "$unknown_opaque")" = '3000|3443|53|proxycore|proxycore' ] || {
+[ "$(run_loader "$unknown_opaque")" = '3000|3443|53' ] || {
   printf 'unknown dotenv lines were not ignored opaquely\n' >&2
   exit 1
 }
 unknown_after_known='WEB_PORT=3000
 UNKNOWN_PROJECT_SETTING'
-[ "$(run_loader "$unknown_after_known")" = '3000|3443|53|proxycore|proxycore' ] || {
+[ "$(run_loader "$unknown_after_known")" = '3000|3443|53' ] || {
   printf 'unknown dotenv keys after known keys were not ignored\n' >&2
   exit 1
 }
@@ -76,6 +75,11 @@ control_env=$(printf 'WEB_PORT="30\\t00"')
 assert_rejected 'quoted control character' "$control_env"
 assert_rejected 'single quote trailing text' "WEB_PORT='3000' trailing"
 assert_rejected 'double quote trailing text' 'WEB_PORT="3000" trailing'
+
+# GNU stat first, BSD stat as the macOS fallback.
+file_mode() {
+  stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1"
+}
 
 TEST_TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/proxycore-install-env.XXXXXX")
 TEST_OWNER_PID=${BASHPID:-$$}
@@ -124,7 +128,7 @@ printf 'UNKNOWN_SETTING=preserve\n WEB_PORT = "3000" # existing\n' > "$TEST_TMP_
 [ "$(grep -c '^UNKNOWN_SETTING=preserve$' "$TEST_TMP_DIR/.env")" -eq 1 ] || exit 1
 [ "$(grep -c '^ WEB_PORT = "3000" # existing$' "$TEST_TMP_DIR/.env")" -eq 1 ] || exit 1
 [ "$(grep -c '^ENROLLMENT_PORT=3443$' "$TEST_TMP_DIR/.env")" -eq 1 ] || exit 1
-[ "$(stat -c '%a' "$TEST_TMP_DIR/.env")" = 600 ] || {
+[ "$(file_mode "$TEST_TMP_DIR/.env")" = 600 ] || {
   printf 'atomic append did not retain restrictive mode\n' >&2
   exit 1
 }
@@ -152,12 +156,10 @@ printf 'UNKNOWN_SETTING=preserve\n WEB_PORT = "3000" # existing\n' > "$TEST_TMP_
   source_installer
   need_cmd() { :; }
   random_b64() { printf 'dummy-master-key'; }
-  random_password() { printf 'dummy-password'; }
   WEB_PORT=3000 ENROLLMENT_PORT=3443 DNS_PORT=53
-  POSTGRES_USER=proxycore POSTGRES_DB=proxycore
   ensure_env >/dev/null
 )
-[ "$(stat -c '%a' "$TEST_TMP_DIR/.env")" = 600 ] || {
+[ "$(file_mode "$TEST_TMP_DIR/.env")" = 600 ] || {
   printf 'atomic creation did not set restrictive mode\n' >&2
   exit 1
 }
@@ -166,3 +168,10 @@ printf 'UNKNOWN_SETTING=preserve\n WEB_PORT = "3000" # existing\n' > "$TEST_TMP_
   printf 'atomic creation left a temp file\n' >&2
   exit 1
 }
+# A fresh .env carries the master key but no PostgreSQL credentials.
+for forbidden in POSTGRES_DB POSTGRES_USER POSTGRES_PASSWORD; do
+  if grep -Fq "$forbidden" "$TEST_TMP_DIR/.env"; then
+    printf 'fresh .env still contains %s\n' "$forbidden" >&2
+    exit 1
+  fi
+done

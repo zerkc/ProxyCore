@@ -36,12 +36,11 @@ fi
 run_loader() {
   input=$1
   printf '%s' "$input" | (
-    unset WEB_PORT ENROLLMENT_PORT DNS_PORT POSTGRES_USER POSTGRES_DB
+    unset WEB_PORT ENROLLMENT_PORT DNS_PORT
     PROXYCORE_INSTALL_NO_MAIN=1 . "$ROOT/scripts/install.sh"
     load_env_values -
     apply_env_file_values
-    printf '%s|%s|%s|%s|%s\n' \
-      "$WEB_PORT" "$ENROLLMENT_PORT" "$DNS_PORT" "$POSTGRES_USER" "$POSTGRES_DB"
+    printf '%s|%s|%s\n' "$WEB_PORT" "$ENROLLMENT_PORT" "$DNS_PORT"
   )
 }
 
@@ -50,7 +49,7 @@ assert_file_rejected() {
   input=$2
   output=''
   if output=$(printf '%s' "$input" | (
-    unset WEB_PORT ENROLLMENT_PORT DNS_PORT POSTGRES_USER POSTGRES_DB
+    unset WEB_PORT ENROLLMENT_PORT DNS_PORT
     PROXYCORE_INSTALL_NO_MAIN=1 . "$ROOT/scripts/install.sh"
     load_env_values -
     apply_env_file_values
@@ -73,12 +72,12 @@ assert_external_port_rejected() {
   output=''
   if output=$(
     (
-      case "$variable" in
-        WEB_PORT) WEB_PORT=$value ;;
-        ENROLLMENT_PORT) ENROLLMENT_PORT=$value ;;
-        DNS_PORT) DNS_PORT=$value ;;
-        *) exit 1 ;;
-      esac
+      # if-chain rather than case: bash 3.2 mis-parses case inside $( ( ... ) ).
+      if [ "$variable" = WEB_PORT ]; then WEB_PORT=$value
+      elif [ "$variable" = ENROLLMENT_PORT ]; then ENROLLMENT_PORT=$value
+      elif [ "$variable" = DNS_PORT ]; then DNS_PORT=$value
+      else exit 1
+      fi
       PROXYCORE_INSTALL_NO_MAIN=1 . "$ROOT/scripts/install.sh"
       validate_host_port "$variable" "$value"
     ) 2>&1
@@ -94,34 +93,31 @@ assert_external_port_rejected() {
   esac
 }
 
+# Legacy POSTGRES_* keys in an existing .env are opaque unknown data now.
 valid_env='WEB_PORT=3100
 ENROLLMENT_PORT=9443
 DNS_PORT=5353
-POSTGRES_USER=proxycore
+POSTGRES_USER=bad user!
 POSTGRES_DB=proxycore'
-[ "$(run_loader "$valid_env")" = '3100|9443|5353|proxycore|proxycore' ] || {
+[ "$(run_loader "$valid_env")" = '3100|9443|5353' ] || {
   printf 'valid existing .env values were not loaded as data\n' >&2
   exit 1
 }
 
 external_env='WEB_PORT=3100
 ENROLLMENT_PORT=9443
-DNS_PORT=5353
-POSTGRES_USER=file_user
-POSTGRES_DB=file_db'
+DNS_PORT=5353'
 run_external_loader() {
   input=$1
   printf '%s' "$input" | (
     WEB_PORT=4100 ENROLLMENT_PORT=9444 DNS_PORT=5354
-    POSTGRES_USER=external_user POSTGRES_DB=external_db
     PROXYCORE_INSTALL_NO_MAIN=1 . "$ROOT/scripts/install.sh"
     load_env_values -
     apply_env_file_values
-    printf '%s|%s|%s|%s|%s\n' \
-      "$WEB_PORT" "$ENROLLMENT_PORT" "$DNS_PORT" "$POSTGRES_USER" "$POSTGRES_DB"
+    printf '%s|%s|%s\n' "$WEB_PORT" "$ENROLLMENT_PORT" "$DNS_PORT"
   )
 }
-[ "$(run_external_loader "$external_env")" = '4100|9444|5354|external_user|external_db' ] || {
+[ "$(run_external_loader "$external_env")" = '4100|9444|5354' ] || {
   printf 'external environment did not override .env data\n' >&2
   exit 1
 }
@@ -156,12 +152,12 @@ assert_main_rejects_before_side_effect() {
   if output=$(
     (
       PROXYCORE_HOME=/path/that/does/not/exist
-      case "$variable" in
-        WEB_PORT) WEB_PORT=$value ;;
-        ENROLLMENT_PORT) ENROLLMENT_PORT=$value ;;
-        DNS_PORT) DNS_PORT=$value ;;
-        *) exit 1 ;;
-      esac
+      # if-chain rather than case: bash 3.2 mis-parses case inside $( ( ... ) ).
+      if [ "$variable" = WEB_PORT ]; then WEB_PORT=$value
+      elif [ "$variable" = ENROLLMENT_PORT ]; then ENROLLMENT_PORT=$value
+      elif [ "$variable" = DNS_PORT ]; then DNS_PORT=$value
+      else exit 1
+      fi
       PROXYCORE_INSTALL_NO_MAIN=1 . "$ROOT/scripts/install.sh"
       need_cmd() { printf 'INSTALLER_SIDE_EFFECT\\n' >&2; exit 99; }
       sync_repo() { printf 'INSTALLER_SIDE_EFFECT\\n' >&2; exit 99; }
@@ -188,7 +184,7 @@ assert_file_preflight_rejects_before_side_effect() {
   input=$1
   output=''
   if output=$(printf '%s' "$input" | (
-    unset WEB_PORT ENROLLMENT_PORT DNS_PORT POSTGRES_USER POSTGRES_DB
+    unset WEB_PORT ENROLLMENT_PORT DNS_PORT
     PROXYCORE_INSTALL_NO_MAIN=1 . "$ROOT/scripts/install.sh"
     preflight_runtime_values -
     printf 'PREFLIGHT_SIDE_EFFECT\\n' >&2
@@ -205,6 +201,43 @@ assert_file_preflight_rejects_before_side_effect() {
 }
 file_preflight_payload=$(printf 'ENROLLMENT_PORT=%s\n' '$(printf ENROLLMENT_SIDE_EFFECT >&2)')
 assert_file_preflight_rejects_before_side_effect "$file_preflight_payload"
+
+# PostgreSQL is gone from the installer: no credentials, readiness wait or
+# migrate step. The only PostgreSQL logic left is the legacy-volume refusal.
+for forbidden in POSTGRES_USER POSTGRES_DB POSTGRES_PASSWORD wait_postgres 'run --rm migrate' 'build migrate'; do
+  if grep -Fq -- "$forbidden" "$ROOT/scripts/install.sh" "$ROOT/scripts/install_env.sh"; then
+    printf 'installer still references %s\n' "$forbidden" >&2
+    exit 1
+  fi
+done
+
+# Legacy detection: stub docker as a shell function inside a subshell.
+run_legacy_check() {
+  volume_present=$1
+  db_present=$2
+  (
+    PROXYCORE_INSTALL_NO_MAIN=1 . "$ROOT/scripts/install.sh"
+    PROXYCORE_HOME=/opt/proxycore
+    docker() {
+      case "$1 $2" in
+        'volume inspect') [ "$volume_present" = 1 ] && [ "$3" = proxycore_postgres-data ] ;;
+        'compose run') [ "$db_present" = 1 ] ;;
+        *) return 1 ;;
+      esac
+    }
+    refuse_unconverted_legacy_postgres
+  ) 2>&1
+}
+output=$(run_legacy_check 1 0) && {
+  printf 'legacy volume without SQLite database was accepted\n' >&2
+  exit 1
+}
+case "$output" in
+  *scripts/convert-postgres.sh*docs/runbooks/upgrade-from-postgres.md*) ;;
+  *) printf 'legacy refusal does not point at the converter: %s\n' "$output" >&2; exit 1 ;;
+esac
+run_legacy_check 0 0 >/dev/null || { printf 'fresh install was refused\n' >&2; exit 1; }
+run_legacy_check 1 1 >/dev/null || { printf 'converted install was refused\n' >&2; exit 1; }
 
 # Operator-facing docs distinguish the direct enrollment socket from Nginx.
 contains "$ROOT/README.md" 'ENROLLMENT_PORT'

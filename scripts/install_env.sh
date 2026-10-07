@@ -55,9 +55,6 @@ create_env_file() {
   begin_env_temp "$env_target"
   cat > "$ENV_TEMP_FILE" <<EOF
 PROXYCORE_MASTER_KEY_BASE64=${master_key}
-POSTGRES_DB=${POSTGRES_DB}
-POSTGRES_USER=${POSTGRES_USER}
-POSTGRES_PASSWORD=${postgres_password}
 WEB_PORT=${WEB_PORT}
 ENROLLMENT_PORT=${ENROLLMENT_PORT}
 DNS_PORT=${DNS_PORT}
