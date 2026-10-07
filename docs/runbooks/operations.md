@@ -85,3 +85,46 @@ DNS-01 adapter.
 
 Retention removes old or oversized operational artifacts only. It must keep
 desired state, the active applied revision, and active certificate keys.
+
+## PostgreSQL to SQLite conversion
+
+Existing PostgreSQL installations move to SQLite once, offline, with
+`apps/api/cmd/convert`. It is the only code that still reads PostgreSQL; the
+source is read inside one `REPEATABLE READ READ ONLY` transaction and is never
+written.
+
+1. Stop the api and the worker first so the snapshot is consistent and no new
+   writes are lost. Keep PostgreSQL running and untouched.
+2. Run the converter with the same master key the installation already uses:
+
+   ```sh
+   export PROXYCORE_CONVERT_PG_URL='postgres://...'      # never logged
+   export PROXYCORE_MASTER_KEY_BASE64='...'              # same key as today
+   go run ./apps/api/cmd/convert --out /var/lib/proxycore/proxycore.db
+   ```
+
+   `--out` must not exist (there is no `--force`). The converter writes
+   `<out>.tmp`, then validates it independently of the copy: per-table row
+   counts and canonical hashes on both sides, `foreign_key_check`,
+   `integrity_check`, schema version, every encrypted secret decrypts with the
+   master key and is byte-identical to PostgreSQL, `config_revisions.checksum`
+   and `applied_snapshots.content_hash` are recomputed, and snapshot BLOBs are
+   compared. Only then is the file published atomically and
+   `<out>.converted.json` written. That marker (tool version, UTC time,
+   per-table counts and hashes, warnings, source schema fingerprint, no
+   secrets) is the proof that the file was converted and validated; a database
+   without it must not be used.
+3. Read the warnings. Dangling references in `enrollment_tokens`,
+   `enrollment_grants` and `enrolled_nodes` (their foreign keys were dropped
+   in PostgreSQL) and older-schema gaps are copied or defaulted and listed, not
+   fatal.
+4. Start the new release with `PROXYCORE_SQLITE_PATH` pointing at the file, on
+   a volume shared by the api and the worker.
+
+Exit codes: `0` converted and validated, `1` validation or fidelity failure
+(nothing is published, temporary files are removed), `2` usage error or output
+already present, `3` PostgreSQL unreachable or a schema or data shape the
+converter does not know.
+
+Rollback: redeploy the previous release against the untouched PostgreSQL
+database. Changes made after cutover on SQLite are not copied back.

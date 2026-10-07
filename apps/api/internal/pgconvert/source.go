@@ -2,7 +2,10 @@ package pgconvert
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"sort"
 	"strings"
 	"unicode/utf8"
 
@@ -302,6 +305,34 @@ func (s *Source) ReadTable(ctx context.Context, plan *Plan, table string, fn fun
 		}
 	}
 	return rows.Err()
+}
+
+// SchemaFingerprint is a sha256 over the current schema's table, column, type
+// and enum label inventory. It identifies the source schema in the conversion
+// marker without exposing any data.
+func (s *Source) SchemaFingerprint(ctx context.Context) (string, error) {
+	lines, err := s.stringColumn(ctx, `select c.table_name::text || '.' || c.column_name::text || ':' || c.data_type::text || ':' || c.udt_name::text
+		|| ':' || c.is_nullable::text from information_schema.columns c
+		join information_schema.tables t on t.table_schema = c.table_schema and t.table_name = c.table_name and t.table_type = 'BASE TABLE'
+		where c.table_schema = current_schema() order by c.table_name, c.ordinal_position`)
+	if err != nil {
+		return "", err
+	}
+	labels, err := s.enumLabels(ctx)
+	if err != nil {
+		return "", err
+	}
+	enums := make([]string, 0, len(labels))
+	for name, values := range labels {
+		enums = append(enums, "enum "+name+"="+strings.Join(values, ","))
+	}
+	sort.Strings(enums)
+	h := sha256.New()
+	for _, line := range append(lines, enums...) {
+		h.Write([]byte(line))
+		h.Write([]byte{'\n'})
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 func quoteIdent(name string) string { return `"` + strings.ReplaceAll(name, `"`, `""`) + `"` }
