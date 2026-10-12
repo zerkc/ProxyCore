@@ -95,6 +95,11 @@ jobs:
         working-directory: apps/api
         run: go test -count=1 ./internal/pgconvert/... ./cmd/convert/...
 
+      - name: Test legacy conversion scripts (stubbed Docker, no daemon needed)
+        run: |
+          sh scripts/convert-postgres.test.sh
+          sh scripts/migrate-legacy-postgres.test.sh
+
   build:
     name: Build
     runs-on: ubuntu-latest
