@@ -7,8 +7,10 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
+	"github.com/zerkc/ProxyCore/apps/api/internal/auth"
 	"github.com/zerkc/ProxyCore/apps/api/internal/config"
 	"github.com/zerkc/ProxyCore/apps/api/internal/httpserver"
 	"github.com/zerkc/ProxyCore/apps/api/internal/update"
@@ -333,4 +335,225 @@ func applyRequest(targetVersion string) (*http.Request, *httptest.ResponseRecord
 	req := httptest.NewRequest(http.MethodPost, "/api/updates/apply", bytes.NewReader(payload))
 	req.Header.Set("Content-Type", "application/json")
 	return req, httptest.NewRecorder()
+}
+
+// newApplyHTTPTestServer serves the SQLite-backed stack with one bootstrapped
+// user: an owner when ownerRole is true, otherwise an operator. A nil updater
+// leaves the apply route unconfigured.
+func newApplyHTTPTestServer(t *testing.T, updater httpserver.UpdaterClient, ownerRole bool) http.Handler {
+	t.Helper()
+	var opts []httpserver.Option
+	if updater != nil {
+		opts = append(opts, httpserver.WithUpdaterClient(updater))
+	}
+	env := newSQLiteHTTPTestServer(t, opts...)
+	username, role := "owneruser", auth.RoleOwner
+	if !ownerRole {
+		username, role = "operatoruser", auth.RoleOperator
+	}
+	if _, err := env.Auth.CreateUser(context.Background(), auth.User{}, username, "correct horse battery staple", role); err != nil {
+		t.Fatalf("create %s user: %v", role, err)
+	}
+	return env.Handler
+}
+
+func TestUpdateApplyUnauthenticatedReturns401(t *testing.T) {
+	handler := newApplyHTTPTestServer(t, nil, true)
+
+	req, rec := applyRequest("v0.2.0") // no session cookie
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status=%d, want %d", rec.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestUpdateApplyOperatorRoleReturns403(t *testing.T) {
+	mockClient := &mockUpdaterClient{applyFunc: func(ctx context.Context, s string) (int, error) {
+		return http.StatusAccepted, nil
+	}}
+	handler := newApplyHTTPTestServer(t, mockClient, false) // operator role
+
+	cookie := loginAs(t, handler, "operatoruser", "correct horse battery staple")
+
+	req, rec := applyRequest("v0.3.0")
+	req.AddCookie(cookie)
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status=%d, want %d body=%s", rec.Code, http.StatusForbidden, rec.Body.String())
+	}
+}
+
+func TestUpdateApplyNoClientReturns503(t *testing.T) {
+	handler := newApplyHTTPTestServer(t, nil, true) // nil updater, owner role
+	cookie := loginAs(t, handler, "owneruser", "correct horse battery staple")
+
+	req, rec := applyRequest("v0.2.0")
+	req.AddCookie(cookie)
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d, want %d body=%s", rec.Code, http.StatusServiceUnavailable, rec.Body.String())
+	}
+}
+
+func TestUpdateApplyInvalidJSONReturns400(t *testing.T) {
+	handler := newApplyHTTPTestServer(t, nil, true)
+	cookie := loginAs(t, handler, "owneruser", "correct horse battery staple")
+
+	req := httptest.NewRequest(http.MethodPost, "/api/updates/apply", strings.NewReader("not json"))
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d, want %d body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+}
+
+func TestUpdateApplyMissingTargetVersionReturns400(t *testing.T) {
+	handler := newApplyHTTPTestServer(t, nil, true)
+	cookie := loginAs(t, handler, "owneruser", "correct horse battery staple")
+
+	req := httptest.NewRequest(http.MethodPost, "/api/updates/apply", strings.NewReader("{}"))
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d, want %d body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+}
+
+func TestUpdateApplySuccessReturns202AndPreservesVersion(t *testing.T) {
+	var receivedVersion string
+	mockClient := &mockUpdaterClient{applyFunc: func(ctx context.Context, targetVersion string) (int, error) {
+		receivedVersion = targetVersion
+		return http.StatusAccepted, nil
+	}}
+
+	handler := newApplyHTTPTestServer(t, mockClient, true)
+	cookie := loginAs(t, handler, "owneruser", "correct horse battery staple")
+
+	req, rec := applyRequest("v0.3.0")
+	req.AddCookie(cookie)
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if receivedVersion != "v0.3.0" {
+		t.Fatalf("receivedVersion=%q, want %q", receivedVersion, "v0.3.0")
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp["ok"] != true {
+		t.Fatalf("ok=%v", resp["ok"])
+	}
+	if resp["targetVersion"] != "v0.3.0" {
+		t.Fatalf("targetVersion=%v", resp["targetVersion"])
+	}
+}
+
+func TestUpdateApplyUpdaterConflictReturns409(t *testing.T) {
+	mockClient := &mockUpdaterClient{applyFunc: func(ctx context.Context, s string) (int, error) {
+		return http.StatusConflict, nil
+	}}
+
+	handler := newApplyHTTPTestServer(t, mockClient, true)
+	cookie := loginAs(t, handler, "owneruser", "correct horse battery staple")
+
+	req, rec := applyRequest("v0.3.0")
+	req.AddCookie(cookie)
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status=%d, want %d body=%s", rec.Code, http.StatusConflict, rec.Body.String())
+	}
+}
+
+func TestUpdateApplyUpdaterErrorReturns502(t *testing.T) {
+	mockClient := &mockUpdaterClient{applyFunc: func(ctx context.Context, s string) (int, error) {
+		return http.StatusInternalServerError, nil
+	}}
+
+	handler := newApplyHTTPTestServer(t, mockClient, true)
+	cookie := loginAs(t, handler, "owneruser", "correct horse battery staple")
+
+	req, rec := applyRequest("v0.3.0")
+	req.AddCookie(cookie)
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status=%d, want %d body=%s", rec.Code, http.StatusBadGateway, rec.Body.String())
+	}
+}
+
+func TestUpdateApplyUpdaterUnavailableReturns502(t *testing.T) {
+	mockClient := &mockUpdaterClient{applyFunc: func(ctx context.Context, s string) (int, error) {
+		return 0, errors.New("connection refused")
+	}}
+
+	handler := newApplyHTTPTestServer(t, mockClient, true)
+	cookie := loginAs(t, handler, "owneruser", "correct horse battery staple")
+
+	req, rec := applyRequest("v0.3.0")
+	req.AddCookie(cookie)
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status=%d, want %d body=%s", rec.Code, http.StatusBadGateway, rec.Body.String())
+	}
+}
+
+func TestUpdateApplyRealHTTPClientForwards202(t *testing.T) {
+	// Integration-style test using httptest.Server as the fake updater.
+	updater := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Errorf("method=%s, want POST", r.Method)
+		}
+		if ct := r.Header.Get("Content-Type"); ct != "application/json" {
+			t.Errorf("Content-Type=%q, want application/json", ct)
+		}
+		var body struct {
+			TargetVersion string `json:"targetVersion"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode body: %v", err)
+		}
+		if body.TargetVersion != "v0.4.0" {
+			t.Errorf("targetVersion=%q, want v0.4.0", body.TargetVersion)
+		}
+		w.WriteHeader(http.StatusAccepted)
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+	}))
+	t.Cleanup(updater.Close)
+
+	realClient := &httpserver.UpdaterHTTPClient{
+		URL:    updater.URL,
+		Client: updater.Client(),
+	}
+
+	handler := newApplyHTTPTestServer(t, realClient, true)
+	cookie := loginAs(t, handler, "owneruser", "correct horse battery staple")
+
+	req, rec := applyRequest("v0.4.0")
+	req.AddCookie(cookie)
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp["targetVersion"] != "v0.4.0" {
+		t.Fatalf("targetVersion=%v", resp["targetVersion"])
+	}
 }

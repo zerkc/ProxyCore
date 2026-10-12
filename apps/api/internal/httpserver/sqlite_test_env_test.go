@@ -44,7 +44,9 @@ type sqliteHTTPEnv struct {
 	Identity *identity.Service
 }
 
-func newSQLiteHTTPTestServer(t *testing.T) *sqliteHTTPEnv {
+// Extra options are appended after the standard wiring so tests can add, for
+// example, an updater client.
+func newSQLiteHTTPTestServer(t *testing.T, extra ...httpserver.Option) *sqliteHTTPEnv {
 	t.Helper()
 	ctx := context.Background()
 	db, writer := openSQLiteHTTPTestDB(t)
@@ -74,17 +76,18 @@ func newSQLiteHTTPTestServer(t *testing.T) *sqliteHTTPEnv {
 		},
 	})
 
-	server := httpserver.New(config.Config{
-		UIDist:            t.TempDir(),
-		SessionCookieName: "proxycore_session",
-		SessionTTL:        time.Hour,
-	}, log.New(io.Discard, "", 0),
+	options := []httpserver.Option{
 		httpserver.WithAuthService(authSvc),
 		httpserver.WithConfigurationStore(configStore),
 		httpserver.WithDefaultIngress(ingress),
 		httpserver.WithIdentityService(identitySvc),
 		httpserver.WithEnrollmentTokenAuthority(tokenAuthority),
-	)
+	}
+	server := httpserver.New(config.Config{
+		UIDist:            t.TempDir(),
+		SessionCookieName: "proxycore_session",
+		SessionTTL:        time.Hour,
+	}, log.New(io.Discard, "", 0), append(options, extra...)...)
 	return &sqliteHTTPEnv{
 		Server:   server,
 		Handler:  server.Handler(),
