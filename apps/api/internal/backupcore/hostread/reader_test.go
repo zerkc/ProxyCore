@@ -18,7 +18,7 @@ func TestEnvFileUsesConfiguredPathAndReportsMissingPath(t *testing.T) {
 		t.Fatalf("write .env fixture: %v", err)
 	}
 
-	file, err := New(nil, Config{EnvPath: envPath}).EnvFile(context.Background())
+	file, err := NewSQLite(nil, Config{EnvPath: envPath}).EnvFile(context.Background())
 	if err != nil {
 		t.Fatalf("EnvFile: %v", err)
 	}
@@ -45,7 +45,7 @@ func TestEnvFileUsesConfiguredPathAndReportsMissingPath(t *testing.T) {
 	}
 
 	missing := filepath.Join(dir, "missing.env")
-	_, err = New(nil, Config{EnvPath: missing}).EnvFile(context.Background())
+	_, err = NewSQLite(nil, Config{EnvPath: missing}).EnvFile(context.Background())
 	var pathErr *os.PathError
 	if !errors.As(err, &pathErr) {
 		t.Fatalf("missing EnvFile error = %v, want *os.PathError", err)
@@ -74,7 +74,7 @@ func TestAppliedCertFilesListsDirectCaseInsensitiveFiles(t *testing.T) {
 		}
 	}
 
-	files, err := New(nil, Config{CandidateRoot: root}).AppliedCertFiles(context.Background(), revision)
+	files, err := NewSQLite(nil, Config{CandidateRoot: root}).AppliedCertFiles(context.Background(), revision)
 	if err != nil {
 		t.Fatalf("AppliedCertFiles: %v", err)
 	}
@@ -105,7 +105,7 @@ func TestAppliedCertFilesListsDirectCaseInsensitiveFiles(t *testing.T) {
 		t.Fatalf("file names = %v, want sorted output", names)
 	}
 
-	missing, err := New(nil, Config{CandidateRoot: root}).AppliedCertFiles(context.Background(), "missing-revision")
+	missing, err := NewSQLite(nil, Config{CandidateRoot: root}).AppliedCertFiles(context.Background(), "missing-revision")
 	if err != nil {
 		t.Fatalf("missing cert directory: %v", err)
 	}
@@ -117,7 +117,7 @@ func TestAppliedCertFilesListsDirectCaseInsensitiveFiles(t *testing.T) {
 func TestAppliedCertFilesRejectsEscapingRevisionOrEntry(t *testing.T) {
 	dir := t.TempDir()
 	root := filepath.Join(dir, "candidates")
-	reader := New(nil, Config{CandidateRoot: root})
+	reader := NewSQLite(nil, Config{CandidateRoot: root})
 
 	tests := []struct {
 		name       string
@@ -163,7 +163,7 @@ func TestAppliedCertFilesRejectsExistingNonDirectory(t *testing.T) {
 	if err := os.WriteFile(certPath, []byte("not a directory"), 0o600); err != nil {
 		t.Fatalf("write non-directory fixture: %v", err)
 	}
-	if _, err := New(nil, Config{CandidateRoot: root}).AppliedCertFiles(context.Background(), revision); err == nil {
+	if _, err := NewSQLite(nil, Config{CandidateRoot: root}).AppliedCertFiles(context.Background(), revision); err == nil {
 		t.Fatal("AppliedCertFiles accepted a non-directory cert path")
 	}
 }

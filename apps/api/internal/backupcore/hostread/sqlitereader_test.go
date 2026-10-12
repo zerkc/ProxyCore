@@ -135,8 +135,7 @@ func TestSQLiteAppliedRevisionRejectsInvalidReceiver(t *testing.T) {
 // Filesystem-only behavior must be identical for both readers.
 func TestFilesystemReadsMatchAcrossReaders(t *testing.T) {
 	constructors := map[string]func(Config) HostSnapshotReader{
-		"postgres": func(cfg Config) HostSnapshotReader { return New(nil, cfg) },
-		"sqlite":   func(cfg Config) HostSnapshotReader { return NewSQLite(nil, cfg) },
+		"sqlite": func(cfg Config) HostSnapshotReader { return NewSQLite(nil, cfg) },
 	}
 	for name, build := range constructors {
 		t.Run(name, func(t *testing.T) {
