@@ -180,3 +180,7 @@ func sqliteConstraintCode(err error) int {
 	}
 	return 0
 }
+
+type scanner interface {
+	Scan(dest ...any) error
+}

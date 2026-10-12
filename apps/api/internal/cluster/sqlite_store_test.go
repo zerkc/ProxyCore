@@ -584,3 +584,9 @@ func TestSQLiteKeyStoreImplementsKeyLoader(t *testing.T) {
 	}
 	m.Destroy()
 }
+
+func zeroClusterTestBytes(value []byte) {
+	for i := range value {
+		value[i] = 0
+	}
+}
