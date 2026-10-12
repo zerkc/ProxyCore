@@ -6,9 +6,13 @@
 # The previous release's updater runs `docker compose run --rm migrate` after it
 # builds the new images and before it restarts the stack. Ordering:
 #
+#   0. Take the lock <data>/.migrate-legacy.lock (mkdir). A second run that
+#      overlaps this one refuses here, so the two cannot clean each other's files.
 #   1. No legacy volume <project>_postgres-data      -> nothing to do, exit 0.
 #   2. SQLite database and its marker both exist      -> already converted, exit 0.
 #   3. Database without marker, or marker without it  -> refuse (fail closed).
+#   3b. Partial output (proxycore.db.tmp, sidecars) without a database -> refuse;
+#       an earlier conversion may still be running or was killed.
 #   4. PROXYCORE_MASTER_KEY_BASE64 missing            -> refuse.
 #   5. Legacy postgres:5432 not accepting connections,
 #      or it rejects the POSTGRES_* credentials       -> refuse (fail closed).
@@ -49,9 +53,11 @@ CONVERT_BIN="${PROXYCORE_CONVERT_BIN:-proxycore-convert}"
 RUN_AS="10001:10001"
 PG_HOST=postgres
 PG_PORT=5432
+LOCK_DIR="${DATA_DIR}/.migrate-legacy.lock"
 
 PROJECT=''
 LEGACY_VOLUME=''
+LOCK_HELD=0
 CONVERT_STARTED=0
 CONVERT_PID=''
 CONVERT_OK=0
@@ -98,6 +104,9 @@ on_exit() {
     fi
     restart_quiesced
   fi
+  if [ "$LOCK_HELD" = 1 ]; then
+    rmdir "$LOCK_DIR" 2>/dev/null || :
+  fi
   exit "$status"
 }
 
@@ -120,6 +129,27 @@ detect_project() {
     esac
   fi
   printf '%s\n' "${PROXYCORE_COMPOSE_PROJECT:-proxycore}"
+}
+
+# One migrate run at a time. mkdir is atomic. A lock left behind by a killed
+# run blocks later runs on purpose; the message says how to clear it.
+acquire_lock() {
+  if mkdir "$LOCK_DIR" 2>/dev/null; then
+    LOCK_HELD=1
+    return 0
+  fi
+  die "another migrate run holds ${LOCK_DIR}, or a previous run was killed. If no migrate container is running (docker ps -a --filter name=migrate), remove that directory and retry. Nothing was changed"
+}
+
+# Refuse when conversion output exists but no database does. The files are not
+# ours to delete: an earlier or concurrent conversion may still be writing them.
+refuse_partial_output() {
+  for leftover in "$SQLITE_DB.tmp" "$SQLITE_DB.tmp-wal" "$SQLITE_DB.tmp-shm" "$SQLITE_DB.tmp-journal" \
+    "$MARKER.tmp" "$SQLITE_DB-wal" "$SQLITE_DB-shm" "$SQLITE_DB-journal"; do
+    if [ -e "$leftover" ]; then
+      die "${leftover} exists but ${SQLITE_DB} does not: an earlier conversion may still be running or was killed. Nothing was changed; inspect it before removing it"
+    fi
+  done
 }
 
 urlencode() {
@@ -181,6 +211,8 @@ quiesce_writers() {
 main() {
   docker info >/dev/null 2>&1 || die "the Docker daemon is not reachable from the migrate container; the legacy PostgreSQL data was not checked, nothing was changed"
 
+  acquire_lock
+
   PROJECT=$(detect_project)
   LEGACY_VOLUME="${PROJECT}_postgres-data"
 
@@ -199,6 +231,7 @@ main() {
   if [ -f "$MARKER" ]; then
     die "${MARKER} exists without ${SQLITE_DB}. Remove the stray marker after inspection; the legacy volume was left untouched"
   fi
+  refuse_partial_output
 
   if [ -z "${PROXYCORE_MASTER_KEY_BASE64:-}" ]; then
     die "PROXYCORE_MASTER_KEY_BASE64 is not set in the install .env; the converter needs the key the installation already uses. Nothing was stopped"

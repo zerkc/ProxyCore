@@ -116,7 +116,7 @@ chmod +x "$CONVERT_STUB"
 SECRET='sup3rS3cret!x'
 
 # run_case <flags...> : fresh state, data dir and PATH stubs. Flags:
-#   legacy api_running worker_running pg_down pg_auth_fail db marker
+#   legacy api_running worker_running pg_down pg_auth_fail db marker lock tmp
 run_case() {
   STUB_STATE="$TEST_TMP_DIR/state"
   rm -rf "$STUB_STATE"
@@ -128,6 +128,8 @@ run_case() {
       legacy | api_running | worker_running | pg_down | pg_auth_fail) : > "$STUB_STATE/$flag" ;;
       db) : > "$STUB_STATE/data/proxycore.db" ;;
       marker) : > "$STUB_STATE/data/proxycore.db.converted.json" ;;
+      lock) mkdir "$STUB_STATE/data/.migrate-legacy.lock" ;;
+      tmp) : > "$STUB_STATE/data/proxycore.db.tmp" ;;
     esac
   done
   CASE_RC=0
@@ -290,7 +292,22 @@ unset STUB_STOP_FAIL
 assert_calls_lack "convert "
 assert_calls_have "docker start abc123 def456"
 
-# 14. Static guarantees on the script itself.
+# 14. Another migrate run holds the lock: refuse, stop nothing, keep the lock
+#     (this run does not own it and must not remove it).
+run_case legacy api_running lock
+[ "$CASE_RC" -ne 0 ] || fail "a held lock must refuse the run"
+assert_no_service_stopped
+[ -d "$STUB_STATE/data/.migrate-legacy.lock" ] || fail "a lock this run does not own must be kept"
+case "$CASE_OUT" in *"holds"*) ;; *) fail "held-lock message must say so" ;; esac
+
+# 15. Partial output of an earlier or concurrent conversion exists: refuse
+#     before anything is stopped and never delete the file.
+run_case legacy api_running tmp
+[ "$CASE_RC" -ne 0 ] || fail "partial output must refuse the run"
+assert_no_service_stopped
+[ -f "$STUB_STATE/data/proxycore.db.tmp" ] || fail "partial output this run did not create must be kept"
+
+# 16. Static guarantees on the script itself.
 for forbidden in 'volume rm' 'volume prune' 'compose down' 'rm -v' 'docker rm' '--pg-url' '--publish'; do
   if grep -Fq -- "$forbidden" "$REAL_SCRIPT"; then
     printf 'script must not contain: %s\n' "$forbidden" >&2
