@@ -354,7 +354,7 @@ func (e *SQLiteExporter) exportTable(ctx context.Context, tx *sql.Tx, w ZipWrite
 	var prefix map[string]any
 	if table == "secrets" {
 		var err error
-		prefix, err = (&Exporter{now: e.now, masterKeyBase64: e.masterKeyBase64}).masterKeyMarker()
+		prefix, err = masterKeyMarker(e.now, e.masterKeyBase64)
 		if err != nil {
 			return 0, 0, err
 		}
