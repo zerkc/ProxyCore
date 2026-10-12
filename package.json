@@ -20,8 +20,6 @@
     "test:watch": "vitest",
     "lint": "eslint eslint.config.mjs",
     "format:check": "prettier --check .",
-    "db:generate": "drizzle-kit generate",
-    "db:migrate": "bun run packages/db/src/migrate.ts",
     "worker": "bun run apps/worker/src/index.ts",
     "control": "bun run apps/control/src/index.ts",
     "check": "bun run typecheck && bun run test"
@@ -30,8 +28,6 @@
     "acme-client": "^5.4.0",
     "dockerode": "^5.0.1",
     "dotenv": "^17.4.2",
-    "drizzle-orm": "0.45.2",
-    "pg": "^8.22.0",
     "selfsigned": "^5.5.0",
     "typescript": "7.0.2",
     "zod": "^4.4.3"
@@ -40,9 +36,7 @@
     "@eslint/js": "^10.0.1",
     "@types/dockerode": "^4.0.1",
     "@types/node": "^26.1.2",
-    "@types/pg": "^8.20.4",
     "bun-types": "1.3.14",
-    "drizzle-kit": "^0.31.10",
     "eslint": "^10.8.0",
     "prettier": "^3.9.6",
     "vitest": "^4.1.10"
