@@ -824,12 +824,6 @@ func lockSnapshotPublicationIdentity(ctx context.Context, tx pgx.Tx) (SnapshotPu
 	return record, nil
 }
 
-func readySnapshotPublicationIdentity(record SnapshotPublicationIdentityRecord) bool {
-	return validPublicationUUID(record.InstallationID) && validPublicationUUID(record.NodeID) &&
-		(record.Role == domain.TopologyRolePrimary || record.Role == domain.TopologyRolePrimaryWithNodes) &&
-		record.LeadershipGeneration > 0 && record.LeadershipGeneration == record.LatestKnownGeneration
-}
-
 func selectLatestSnapshotPublication(ctx context.Context, tx pgx.Tx, _ SnapshotPublicationIdentityRecord, primaryID string) (SnapshotPublicationRecord, int, error) {
 	var record SnapshotPublicationRecord
 	var snapshotSize int

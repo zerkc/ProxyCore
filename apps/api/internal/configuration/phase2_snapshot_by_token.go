@@ -7,16 +7,6 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
-
-	"github.com/zerkc/ProxyCore/apps/api/internal/domain"
-)
-
-var (
-	ErrSnapshotByTokenUnauthenticated = errors.New("snapshot by token unauthenticated")
-	ErrSnapshotByTokenGone            = errors.New("snapshot by token gone")
-	ErrSnapshotByTokenDenied          = errors.New("snapshot by token denied")
-	ErrSnapshotByTokenUnavailable     = errors.New("snapshot by token unavailable")
-	ErrNoPublishableSnapshot          = errors.New("snapshot by token has no publishable snapshot")
 )
 
 // ReadSnapshotPublicationByToken reads one canonical PRIMARY publication while
@@ -158,13 +148,4 @@ func (s *PgPhase2Store) ReadSnapshotPublicationByToken(
 		return nil, ErrSnapshotByTokenUnavailable
 	}
 	return result, nil
-}
-
-func validSnapshotByTokenIdentity(identity SnapshotPublicationIdentityRecord) bool {
-	return validPublicationUUID(identity.InstallationID) &&
-		validPublicationUUID(identity.NodeID) &&
-		(identity.Role == domain.TopologyRolePrimary || identity.Role == domain.TopologyRolePrimaryWithNodes) &&
-		identity.LeadershipGeneration > 0 &&
-		identity.LeadershipGeneration == identity.LatestKnownGeneration &&
-		identity.ClusterKeyID != nil && *identity.ClusterKeyID != uuid.Nil
 }
