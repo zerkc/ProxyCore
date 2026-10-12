@@ -11,7 +11,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/zerkc/ProxyCore/apps/api/internal/auth"
 	"github.com/zerkc/ProxyCore/apps/api/internal/config"
 	"github.com/zerkc/ProxyCore/apps/api/internal/configuration"
@@ -92,14 +91,6 @@ func WithBackup(exporter BackupExporter, importer BackupImporter) Option {
 	return func(s *Server) {
 		s.backupExporter = exporter
 		s.backupImporter = importer
-	}
-}
-
-func WithDBPool(pool *pgxpool.Pool) Option {
-	return func(s *Server) {
-		if pool != nil {
-			s.auth = auth.NewService(auth.NewPostgresStore(pool), auth.ServiceOptions{SessionTTL: s.sessionTTL()})
-		}
 	}
 }
 
