@@ -24,7 +24,7 @@ func newConfigStoreCreateApplyJobAdapter(store configuration.ApplyJobEnqueuer) *
 	return &configStoreCreateApplyJobAdapter{store: store}
 }
 
-// NewApplyTrigger constructs the production apply trigger used by BackupImporter.
+// NewApplyTrigger constructs the production apply trigger used by the backup importers.
 func NewApplyTrigger(store configuration.ApplyJobEnqueuer) dbimport.ApplyTrigger {
 	return newConfigStoreCreateApplyJobAdapter(store)
 }

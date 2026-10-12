@@ -15,13 +15,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
-
 	"github.com/zerkc/ProxyCore/apps/api/internal/backupcore"
 	"github.com/zerkc/ProxyCore/apps/api/internal/backupcore/dbexport"
 	"github.com/zerkc/ProxyCore/apps/api/internal/backupcore/hostread"
 	"github.com/zerkc/ProxyCore/apps/api/internal/backupcore/zipwriter"
-	"github.com/zerkc/ProxyCore/apps/api/internal/httpserver"
 )
 
 const aggregateLimit int64 = 16 << 30
@@ -31,18 +28,6 @@ type IdentitySource interface {
 	NodeIDString() string
 	RoleString() string
 }
-
-// BackupExporter composes host and database snapshot readers into the HTTP
-// backup archive without buffering the complete archive in memory.
-type BackupExporter struct {
-	Pool            *pgxpool.Pool
-	Identity        IdentitySource
-	Version         string
-	Now             func() time.Time
-	MasterKeyBase64 string
-}
-
-var _ httpserver.BackupExporter = (*BackupExporter)(nil)
 
 type dbWriter struct {
 	zw       zipwriter.Writer
@@ -98,32 +83,8 @@ func (r *checksumReadCloser) Close() error {
 	return r.closer.Close()
 }
 
-// Export streams the host and database entries into an optional encrypted ZIP
-// and returns the SHA-256 digest of the canonical manifest bytes.
-func (e *BackupExporter) Export(ctx context.Context, w io.Writer, passphrase []byte) (manifestSHA256Hex string, err error) {
-	if e == nil {
-		return "", errors.New("httpexport: nil exporter")
-	}
-	if e.Pool == nil {
-		return "", errors.New("httpexport: nil database pool")
-	}
-	return exportBundle(ctx, w, passphrase, bundleConfig{
-		Identity:        e.Identity,
-		Version:         e.Version,
-		Now:             e.Now,
-		MasterKeyBase64: e.MasterKeyBase64,
-		Host:            hostread.New(e.Pool, hostread.Config{}),
-		ExportDB: func(ctx context.Context, entries dbexport.ZipWriter, now func() time.Time, masterKeyBase64 string) (dbexport.ExportReport, error) {
-			return dbexport.New(e.Pool, dbexport.ExporterOptions{
-				Now:             now,
-				MasterKeyBase64: masterKeyBase64,
-			}).Export(ctx, entries)
-		},
-	})
-}
-
 // bundleConfig carries the storage-specific dependencies of a backup so the
-// PostgreSQL and SQLite exporters share one bundle assembly flow.
+// SQLite exporter and any future database backend share one bundle assembly flow.
 type bundleConfig struct {
 	Identity        IdentitySource
 	Version         string

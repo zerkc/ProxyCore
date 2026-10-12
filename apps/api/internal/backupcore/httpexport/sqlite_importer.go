@@ -15,7 +15,7 @@ import (
 
 // SQLiteBackupImporter restores an uploaded backup bundle into a SQLite
 // configuration database. Validation, master-key verification, file restore
-// and the apply trigger are shared with BackupImporter; only the table replace
+// and the apply trigger are shared through importBundle; only the table replace
 // differs: one BEGIN IMMEDIATE transaction deletes the 16 bundle tables and
 // every table that depends on them (all sessions included, so everyone is
 // logged out) and reinserts the bundle.

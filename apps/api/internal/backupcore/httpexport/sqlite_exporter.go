@@ -12,7 +12,7 @@ import (
 	"github.com/zerkc/ProxyCore/apps/api/internal/httpserver"
 )
 
-// SQLiteBackupExporter produces the same HTTP backup bundle as BackupExporter
+// SQLiteBackupExporter produces the HTTP backup bundle
 // from a SQLite configuration database. The database tables are read in one
 // read transaction, so the bundle holds a consistent snapshot.
 type SQLiteBackupExporter struct {
@@ -22,7 +22,7 @@ type SQLiteBackupExporter struct {
 	Now             func() time.Time
 	MasterKeyBase64 string
 	// HostConfig overrides the host paths; the zero value resolves them from
-	// PROXYCORE_HOST_HOME exactly like BackupExporter.
+	// PROXYCORE_HOST_HOME.
 	HostConfig hostread.Config
 }
 
