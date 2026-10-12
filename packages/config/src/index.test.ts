@@ -19,10 +19,6 @@ describe("loadConfig", () => {
         .secureCookies,
     ).toBe(true);
   });
-
-  it("rejects malformed database URLs", () => {
-    expect(() => loadConfig({ DATABASE_URL: "not-a-url" })).toThrow();
-  });
 });
 
 describe("loadConfig sqlite path", () => {
@@ -30,7 +26,7 @@ describe("loadConfig sqlite path", () => {
     expect(loadConfig({ NODE_ENV: "test" }).sqlitePath).toBeUndefined();
   });
 
-  it("reads PROXYCORE_SQLITE_PATH without requiring DATABASE_URL", () => {
+  it("reads PROXYCORE_SQLITE_PATH", () => {
     const config = loadConfig({ PROXYCORE_SQLITE_PATH: "/data/proxycore.db" });
     expect(config.sqlitePath).toBe("/data/proxycore.db");
   });
