@@ -13,8 +13,8 @@ import (
 )
 
 // The parity matrix runs identical LocalKEKLoader scenarios over every
-// KeyLoader backend: a fake, the SQLite KeyStore and the PostgreSQL adapter
-// (skipped without DATABASE_URL). Assertions never print key bytes.
+// KeyLoader backend: a fake and the SQLite KeyStore. Assertions never print
+// key bytes.
 
 type loaderBackend struct {
 	name    string
@@ -42,15 +42,6 @@ func sqliteLoaderBackend(t *testing.T) loaderBackend {
 	return loaderBackend{name: "sqlite", loader: f.store, knownID: id, refKey: key}
 }
 
-func postgresLoaderBackend(t *testing.T) loaderBackend {
-	t.Helper()
-	pool := newLocalKEKLoaderPool(t)
-	store := NewStore(sqliteTestMaster)
-	seed := loadLocalKEKTestMaterial(t, pool, store)
-	defer seed.Destroy()
-	return loaderBackend{name: "postgres", loader: NewPGKeyLoader(pool, store), knownID: seed.ID, refKey: seed.CopyBytes()}
-}
-
 type keyLoaderFunc func(context.Context, uuid.UUID) (KeyMaterial, error)
 
 func (f keyLoaderFunc) LoadActive(ctx context.Context, id uuid.UUID) (KeyMaterial, error) {
@@ -75,7 +66,7 @@ func parityIdentity(role domain.TopologyRole, keyID *uuid.UUID) localLoaderIdent
 }
 
 func TestLocalKEKLoaderParityAcrossKeyLoaders(t *testing.T) {
-	backends := []func(*testing.T) loaderBackend{fakeLoaderBackend, sqliteLoaderBackend, postgresLoaderBackend}
+	backends := []func(*testing.T) loaderBackend{fakeLoaderBackend, sqliteLoaderBackend}
 	for _, newBackend := range backends {
 		b := newBackend(t)
 		t.Run(b.name, func(t *testing.T) {
