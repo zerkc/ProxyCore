@@ -309,13 +309,5 @@ func (t *pgPhase2Transaction) TransitionPrimaryToWithNodes(ctx context.Context, 
 	return nil
 }
 
-func zeroGrantBytes(value []byte) {
-	for i := range value {
-		value[i] = 0
-	}
-}
-
 var _ PrimaryGrantTransaction = (*pgPhase2Transaction)(nil)
 var _ PrimaryGrantStore = (*PgPhase2Store)(nil)
-
-const installationIDSingleton = "default"

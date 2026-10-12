@@ -10,22 +10,6 @@ import (
 	"github.com/zerkc/ProxyCore/apps/api/internal/domain"
 )
 
-type scanner interface {
-	Scan(dest ...any) error
-}
-
-type settingsRow struct {
-	id                       string
-	ingressIPv4              *string
-	ingressIPv6              *string
-	defaultResolverPool      []byte
-	forwardingRules          []byte
-	retentionMaxAgeDays      int
-	retentionMaxSizeMb       int
-	currentDesiredRevisionID *string
-	currentAppliedRevisionID *string
-}
-
 func ensureSettings(ctx context.Context, q querier) (settingsRow, error) {
 	row, found, err := selectSettings(ctx, q)
 	if err != nil {
@@ -70,57 +54,6 @@ func selectSettings(ctx context.Context, q querier) (settingsRow, bool, error) {
 		return settingsRow{}, false, err
 	}
 	return row, true, nil
-}
-
-func toSettings(row settingsRow) (domain.Settings, error) {
-	pool, err := parseDefaultPool(row.defaultResolverPool)
-	if err != nil {
-		return domain.Settings{}, err
-	}
-	rules, err := parseForwardingRules(row.forwardingRules)
-	if err != nil {
-		return domain.Settings{}, err
-	}
-	return domain.Settings{
-		Ingress:             domain.Ingress{IPv4: deref(row.ingressIPv4), IPv6: deref(row.ingressIPv6)},
-		DefaultPool:         pool,
-		ForwardingRules:     rules,
-		RetentionMaxAgeDays: row.retentionMaxAgeDays,
-		RetentionMaxSizeMb:  row.retentionMaxSizeMb,
-	}, nil
-}
-
-func parseDefaultPool(raw []byte) (*domain.ResolverPool, error) {
-	if len(raw) == 0 || string(raw) == "null" {
-		return nil, nil
-	}
-	var pool domain.ResolverPool
-	if err := json.Unmarshal(raw, &pool); err != nil {
-		return nil, nil
-	}
-	if pool.ID == "" || len(pool.Endpoints) == 0 {
-		return nil, nil
-	}
-	validated, err := domain.ValidateResolverPool(pool)
-	if err != nil {
-		return nil, nil
-	}
-	return &validated, nil
-}
-
-func parseForwardingRules(raw []byte) ([]domain.ForwardingRule, error) {
-	if len(raw) == 0 || string(raw) == "null" {
-		return []domain.ForwardingRule{}, nil
-	}
-	var rules []domain.ForwardingRule
-	if err := json.Unmarshal(raw, &rules); err != nil {
-		return []domain.ForwardingRule{}, nil
-	}
-	validated, err := domain.ValidateForwardingRules(rules)
-	if err != nil {
-		return []domain.ForwardingRule{}, nil
-	}
-	return validated, nil
 }
 
 func listZones(ctx context.Context, q querier) ([]domain.ZoneState, error) {
@@ -186,35 +119,6 @@ func recordsGroupedByZone(ctx context.Context, q querier, zoneID string) (map[st
 	return grouped, rows.Err()
 }
 
-func scanRecord(row scanner) (domain.DNSRecord, string, error) {
-	var (
-		record    domain.DNSRecord
-		zoneID    string
-		valueRaw  []byte
-		proxyRaw  []byte
-		comment   *string
-		recordTyp string
-	)
-	if err := row.Scan(&record.ID, &zoneID, &record.Name, &recordTyp, &valueRaw, &record.TTL, &record.Enabled, &record.Proxied, &proxyRaw, &comment); err != nil {
-		return domain.DNSRecord{}, "", err
-	}
-	record.Type = recordTyp
-	record.Comment = comment
-	if len(valueRaw) > 0 {
-		if err := json.Unmarshal(valueRaw, &record.Value); err != nil {
-			return domain.DNSRecord{}, "", err
-		}
-	}
-	if len(proxyRaw) > 0 && string(proxyRaw) != "null" {
-		var proxy map[string]any
-		if err := json.Unmarshal(proxyRaw, &proxy); err != nil {
-			return domain.DNSRecord{}, "", err
-		}
-		record.Proxy = proxy
-	}
-	return record, zoneID, nil
-}
-
 func getZone(ctx context.Context, q querier, id string) (domain.ZoneState, error) {
 	var zone domain.ZoneState
 	err := q.QueryRow(ctx, `select id::text, name, enabled from zones where id = $1`, id).Scan(&zone.ID, &zone.Name, &zone.Enabled)
@@ -233,47 +137,6 @@ func getZone(ctx context.Context, q querier, id string) (domain.ZoneState, error
 		zone.Records = []domain.DNSRecord{}
 	}
 	return zone, nil
-}
-
-func scanStream(row scanner) (domain.StreamRoute, error) {
-	var (
-		route       domain.StreamRoute
-		upstreamRaw []byte
-	)
-	if err := row.Scan(&route.ID, &route.Enabled, &route.Protocol, &route.ListenAddress, &route.ListenPort, &upstreamRaw); err != nil {
-		return domain.StreamRoute{}, err
-	}
-	if len(upstreamRaw) > 0 {
-		if err := json.Unmarshal(upstreamRaw, &route.Upstream); err != nil {
-			return domain.StreamRoute{}, err
-		}
-	}
-	return route, nil
-}
-
-func scanJob(row scanner) (JobRecord, error) {
-	var (
-		job          JobRecord
-		validation   []byte
-		applyOut     []byte
-		healthOut    []byte
-		errorMessage *string
-	)
-	if err := row.Scan(
-		&job.ID, &job.RevisionID, &job.ActorUserID, &job.Target, &job.Status,
-		&job.Source, &job.SourcePrimaryID, &job.SourceNodeID, &job.SourceRevisionID,
-		&job.SnapshotContentHash, &job.SnapshotVersion, &job.ReplicationVersion,
-		&job.LeadershipGeneration, &job.CorrelationID,
-		&job.CreatedAt, &job.ClaimedAt, &job.StartedAt, &job.FinishedAt,
-		&validation, &applyOut, &healthOut, &errorMessage,
-	); err != nil {
-		return JobRecord{}, err
-	}
-	job.ValidationOutput = rawJSON(validation)
-	job.ApplyOutput = rawJSON(applyOut)
-	job.HealthOutput = rawJSON(healthOut)
-	job.ErrorMessage = errorMessage
-	return job, nil
 }
 
 func listJobs(ctx context.Context, q querier) ([]JobRecord, error) {
@@ -376,18 +239,4 @@ func readDesiredSnapshot(ctx context.Context, q querier) (domain.ConfigurationSn
 		Streams:      validatedStreams,
 		Certificates: certificates,
 	}, nil
-}
-
-func rawJSON(value []byte) json.RawMessage {
-	if len(value) == 0 || string(value) == "null" {
-		return nil
-	}
-	return json.RawMessage(value)
-}
-
-func deref(value *string) string {
-	if value == nil {
-		return ""
-	}
-	return *value
 }

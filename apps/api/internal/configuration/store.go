@@ -16,7 +16,6 @@ import (
 )
 
 const (
-	installationID  = "default"
 	revisionLockKey = 1_872_641
 	jobChannel      = "proxycore_jobs"
 )
@@ -168,15 +167,6 @@ func (s *Store) UpdateSettings(ctx context.Context, patch SettingsPatch) (domain
 		return domain.Settings{}, err
 	}
 	return next, nil
-}
-
-// SettingsPatch carries a partial settings update.
-type SettingsPatch struct {
-	Ingress             *domain.Ingress
-	DefaultPool         *domain.ResolverPool
-	ForwardingRules     []domain.ForwardingRule
-	RetentionMaxAgeDays *int
-	RetentionMaxSizeMb  *int
 }
 
 // ListZones returns zones with their records.
@@ -442,13 +432,6 @@ func createApplyJobInTransaction(ctx context.Context, tx querier, actorUserID st
 // ForceApply is exposed for the apply route; identical to CreateApplyJob.
 func (s *Store) ForceApply(ctx context.Context, actorUserID string) (ApplyResult, error) {
 	return s.CreateApplyJob(ctx, actorUserID)
-}
-
-func nullableString(value string) any {
-	if value == "" {
-		return nil
-	}
-	return value
 }
 
 // Phase2Transaction is the cross-process persistence port for enrollment and

@@ -154,13 +154,6 @@ func upsertRecord(ctx context.Context, tx querier, zoneID string, record domain.
 	return err
 }
 
-func nullablePtr(value *string) any {
-	if value == nil {
-		return nil
-	}
-	return *value
-}
-
 // resolveProxySettingsInput mirrors the certificates basic-auth resolver: it
 // hashes plaintext passwords into secrets and never persists them in cleartext.
 func resolveProxySettingsInput(ctx context.Context, input map[string]any, secretStore secrets.Store, existing map[string]any) (map[string]any, error) {

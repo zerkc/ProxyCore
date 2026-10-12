@@ -648,15 +648,6 @@ func canonicalSnapshotMatches(record AppliedSnapshotRecord, write CanonicalSnaps
 		bytes.Equal(record.SnapshotBody, write.SnapshotBody)
 }
 
-func zeroCanonicalPlainSecrets(values []replicationsnapshot.PlainSecret) {
-	for index := range values {
-		for byteIndex := range values[index].Value {
-			values[index].Value[byteIndex] = 0
-		}
-		values[index].Value = nil
-	}
-}
-
 func (t *pgPhase2Transaction) GetApplyJob(ctx context.Context, id string) (JobRecord, error) {
 	row := t.tx.QueryRow(ctx, `
 		select id::text, revision_id::text, actor_user_id::text, target::text, status::text,
@@ -903,11 +894,6 @@ func selectLatestSnapshotPublication(ctx context.Context, tx pgx.Tx, _ SnapshotP
 	}
 	record.ProofComplete = proofComplete
 	return record, snapshotSize, nil
-}
-
-func validPublicationUUID(value string) bool {
-	parsed, err := uuid.Parse(value)
-	return err == nil && parsed != uuid.Nil && parsed.String() == value
 }
 
 func activeSnapshotAcknowledgementKey(ctx context.Context, tx pgx.Tx, id uuid.UUID) (bool, error) {

@@ -16,9 +16,6 @@ import (
 	"github.com/zerkc/ProxyCore/apps/api/internal/domain"
 )
 
-// ErrCertificateNotFound is returned when a certificate id does not exist.
-var ErrCertificateNotFound = errors.New("Certificate not found")
-
 // ListCertificates returns certificates newest first.
 func (s *Store) ListCertificates(ctx context.Context) ([]domain.CertificateStatus, error) {
 	return listCertificatesOrdered(ctx, s.pool, "created_at desc")
@@ -38,9 +35,6 @@ func (s *Store) GetCertificate(ctx context.Context, id string) (domain.Certifica
 	}
 	return cert, err
 }
-
-// ErrCertificateInUse is returned when a certificate is still referenced by DNS proxy settings.
-var ErrCertificateInUse = errors.New("Certificate is still assigned to one or more proxied DNS records")
 
 // DeleteCertificate removes a certificate that is not referenced by any record.
 func (s *Store) DeleteCertificate(ctx context.Context, id string) error {
@@ -87,35 +81,6 @@ func listCertificatesOrdered(ctx context.Context, q querier, orderBy string) ([]
 		certificates = append(certificates, cert)
 	}
 	return certificates, rows.Err()
-}
-
-func scanCertificate(row scanner) (domain.CertificateStatus, error) {
-	var (
-		cert          domain.CertificateStatus
-		hostnamesRaw  []byte
-		secretID      *string
-		certificate   *string
-		failureReason *string
-	)
-	if err := row.Scan(
-		&cert.ID, &hostnamesRaw, &cert.Issuer, &cert.Challenge, &cert.Environment, &cert.Status,
-		&cert.ExpiresAt, &cert.RenewAfter, &secretID, &certificate, &failureReason,
-	); err != nil {
-		return domain.CertificateStatus{}, err
-	}
-	if len(hostnamesRaw) > 0 {
-		if err := json.Unmarshal(hostnamesRaw, &cert.Hostnames); err != nil {
-			return domain.CertificateStatus{}, err
-		}
-	}
-	cert.SecretID = deref(secretID)
-	cert.CertificatePEM = deref(certificate)
-	cert.FailureReason = deref(failureReason)
-	return cert, nil
-}
-
-func renewalDate(expiresAt time.Time) time.Time {
-	return expiresAt.Add(-30 * 24 * time.Hour)
 }
 
 // IssueCertificate issues (or records the failure of) a certificate.
