@@ -56,3 +56,12 @@ func enrollmentSPKI(t *testing.T, certificate *x509.Certificate) []byte {
 	}
 	return spki
 }
+
+func TestEnrollmentSANMatchingRejectsMalformedAndIncompleteNames(t *testing.T) {
+	if sameEnrollmentHostnames(&x509.Certificate{DNSNames: []string{"192.0.2.10"}}, []string{"192.0.2.10"}) {
+		t.Fatal("accepted an IP encoded as a DNS SAN")
+	}
+	if sameEnrollmentHostnames(&x509.Certificate{DNSNames: []string{"enroll.example"}}, []string{"enroll.example", "192.0.2.10"}) {
+		t.Fatal("accepted incomplete configured SAN coverage")
+	}
+}
