@@ -12,8 +12,7 @@ The script clones or updates the checkout (default `/opt/proxycore` as root,
 otherwise `~/proxycore`), creates `.env` with generated secrets on first run,
 brings the stack up (the api creates and migrates the SQLite database on start) with the **Go
 API + Vite SPA** control plane (no Next.js) and **Nginx in `network_mode: host`**
-so HTTP/HTTPS and stream ports bind directly on the host. Configuration routes
-may still be served by the transitional `node-api` (tsx) behind the Go edge.
+so HTTP/HTTPS and stream ports bind directly on the host.
 
 Optional environment variables before `| sh`:
 

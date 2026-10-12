@@ -117,10 +117,15 @@ curl -sS -b "$COOKIES" \
   -F "passphrase=$(printf %s "$BACKUP_PASSPHRASE" | base64 -w0)"
 ```
 
-The import truncates and reinserts the 16 configuration tables inside one
-PostgreSQL transaction. A validation, truncate, or reinsert failure before
-commit leaves the database untouched. Existing rows in those configuration
-tables are intentionally replaced; runtime tables remain in place.
+The import replaces the 16 configuration tables inside one SQLite write
+transaction (`BEGIN IMMEDIATE`). Before reinserting, it also deletes the runtime
+rows that reference those tables: all `sessions`, apply jobs and applied
+snapshots, sync and enrollment state, and `audit_events` rows that name an actor.
+Actor-less audit rows, such as failed logins, are kept. A validation, delete, or
+reinsert failure before commit leaves the database untouched.
+
+Because every session is deleted, **every user is logged out after a real
+import, including the Owner who ran it.** Sign in again before the next request.
 
 After the database transaction commits, ProxyCore restores `env/env` and the
 certificate files, then triggers the apply. If the apply succeeds,
@@ -129,20 +134,66 @@ is reported as an import failure, but it rolls back **nothing**: the restored
 database transaction is already committed. Investigate the apply result and
 trigger `POST /api/apply` after correcting the operational problem.
 
+## Backing up the SQLite file
+
+The bundle is a configuration export, not a full database backup. Runtime state
+(sessions, audit, jobs, sync and enrollment rows) is not in it. ProxyCore has no
+command that copies the database file: `proxycore-admin` provides
+`reset-password` and `snapshot status` only. The internal `sqlitedb.Snapshot`
+helper (`VACUUM INTO`) is not wired to a CLI or endpoint.
+
+Use one of these two methods. Both need the `sqlite3` CLI on the host or in a
+temporary container; the ProxyCore images do not include it.
+
+- **Quiesced copy.** Stop the writers, copy the file, and start them again:
+
+  ```sh
+  docker compose stop worker api
+  # Copy proxycore.db from the sqlite-data volume, plus proxycore.db-wal and
+  # proxycore.db-shm if they exist, to protected storage.
+  docker compose start api worker
+  ```
+
+- **Live consistent copy.** `VACUUM INTO` writes a consistent snapshot to a new
+  file and never modifies the source:
+
+  ```sh
+  sqlite3 /path/to/proxycore.db \
+    "VACUUM INTO '/protected/backups/proxycore-$(date -u +%Y%m%dT%H%M%SZ).db'"
+  ```
+
+Do not copy only the main `proxycore.db` file while the stack runs. With WAL,
+recent commits can sit in the `-wal` file, so a plain copy can miss them or
+capture an inconsistent state.
+
+Before moving a copy to the backup store, check it:
+
+```sh
+sqlite3 /protected/backups/proxycore-....db "PRAGMA integrity_check"
+```
+
+The copy holds encrypted secrets and the master key is not in it. Store
+`PROXYCORE_MASTER_KEY_BASE64` separately, as the pre-flight checklist requires.
+
+To restore a raw copy, stop `api` and `worker`, replace `proxycore.db`, remove
+any `-wal` and `-shm` files that do not belong to the copy, then start the
+services. The API applies any missing migrations on start.
+
 ## Restore on a fresh host
 
 Use this recipe when the original host is unavailable:
 
 1. Install ProxyCore from a clean box with `scripts/install.sh`, supplying the
    existing `PROXYCORE_MASTER_KEY_BASE64` from the previous installation.
-2. Bootstrap a throwaway Owner on the new installation, or use the existing
-   Owner if the host shares the same database. Put that Owner session in
-   `$COOKIES`.
+2. Bootstrap a throwaway Owner on the new installation and put that Owner
+   session in `$COOKIES`. A new host has its own SQLite file, so the existing
+   Owner session cannot be reused.
 3. POST `/api/backup/import?dry_run=true` with the bundle and passphrase. Check
    the report for the expected installation identity, table counts, environment
    change, and certificate list.
 4. POST `/api/backup/import?dry_run=false` with the same bundle and passphrase.
-   Confirm the successful report and `appliedPostImport` result.
+   Confirm the successful report and `appliedPostImport` result. The import
+   clears all sessions, so sign in again and replace `$COOKIES` before step 5.
 5. Verify the restored data through `GET /api/zones`,
    `GET /api/certificates`, and `GET /api/users`; compare the results with the
    pre-restore installation.
@@ -186,7 +237,8 @@ state. It excludes these tables:
 
 It also excludes these volumes or filesystem state:
 
-- PostgreSQL row state for the runtime tables above
+- SQLite runtime rows for the tables above (use the file backup described below
+  for those)
 - The candidate staging tree outside the latest applied revision
 - The promoted CoreDNS zones
 - Updater bootstrap state

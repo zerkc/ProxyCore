@@ -10,7 +10,7 @@ installation can reproduce another installation's data plane.
 
 - Two installations of ProxyCore, A and B, on the same host (or
   reachable through any out-of-band channel). Each installation has its
-  own data directory and its own PostgreSQL database.
+  own data directory and its own SQLite database file.
 - Both installations are at version 0.3.0 or later.
 - An Owner bootstrap has been completed on A. B may be un-bootstrapped
   (a fresh install) or already-bootstrapped with a different
@@ -155,10 +155,11 @@ The standalone archive retention worker runs once per hour (default)
 and removes archives whose `expires_at` is in the past. The CLI
 surface for `proxycore-admin snapshot archive list` and
 `proxycore-admin snapshot archive purge` lands with the Phase 2
-Postgres-backed ArchiveStore; until then, the worker is wired with the
+SQLite-backed ArchiveStore; until then, the worker is wired with the
 `NoopArchiveStore` placeholder and the retention path is documented
 behavior without a visible CLI. Operators inspecting the archive queue
-during Phase 1 should query the PostgreSQL tables directly:
+during Phase 1 should query the SQLite database file directly
+(`sqlite3 <proxycore.db>`):
 
 ```sql
 select id, captured_at, expires_at, reason

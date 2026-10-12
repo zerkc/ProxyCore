@@ -23,9 +23,9 @@ The worker renders a revision, stages it, validates it, promotes it, reloads
 the target service, and checks health. A failed health check must result in a
 rollback or an explicit recovery-required job.
 
-The worker listens for PostgreSQL job notifications and wakes immediately when
-an apply is committed. It also reconciles the durable queue every 5 minutes by
-default (`WORKER_RECONCILIATION_INTERVAL_MS`). Jobs are claimed with a lease
+The worker polls the SQLite job cursor and picks up an apply shortly after it is
+committed; there is no LISTEN/NOTIFY. It also reconciles the durable queue every
+5 minutes by default (`WORKER_RECONCILIATION_INTERVAL_MS`). Jobs are claimed with a lease
 and are re-queued after the lease expires, so a missed notification or a
 restart does not discard desired state or an outstanding apply.
 
@@ -52,7 +52,8 @@ the worker a socket.
 
 ## Master-key rotation
 
-1. Stop mutations and take a verified backup of the PostgreSQL volume.
+1. Stop mutations and take a verified backup of the SQLite file (see
+   [backup-restore.md](backup-restore.md#backing-up-the-sqlite-file)).
 2. Keep the old key available only in a protected operator environment.
 3. Read each encrypted secret through the old key and write a new ciphertext
    with the new 32-byte key in one controlled migration.
