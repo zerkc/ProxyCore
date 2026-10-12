@@ -8,6 +8,9 @@
 #
 #   0. Take the lock <data>/.migrate-legacy.lock (mkdir). A second run that
 #      overlaps this one refuses here, so the two cannot clean each other's files.
+#      A lock left by a killed run is reclaimed only when no other migrate
+#      container of the project is running; then only proxycore.db.tmp* from
+#      that run is removed (never a database or marker).
 #   1. No legacy volume <project>_postgres-data      -> nothing to do, exit 0.
 #   2. SQLite database and its marker both exist      -> already converted, exit 0.
 #   3. Database without marker, or marker without it  -> refuse (fail closed).
@@ -131,14 +134,65 @@ detect_project() {
   printf '%s\n' "${PROXYCORE_COMPOSE_PROJECT:-proxycore}"
 }
 
-# One migrate run at a time. mkdir is atomic. A lock left behind by a killed
-# run blocks later runs on purpose; the message says how to clear it.
+# Is another migrate container of this project running? Returns 0 when one is,
+# 1 when none is, 2 when Docker could not be asked (fail closed). The current
+# container is excluded by its id (HOSTNAME is its short id).
+other_migrate_running() {
+  if ! ids=$(docker ps -q --no-trunc \
+    --filter "label=com.docker.compose.project=${PROJECT}" \
+    --filter "label=com.docker.compose.service=migrate" 2>/dev/null); then
+    return 2
+  fi
+  for id in $ids; do
+    if [ -n "${HOSTNAME:-}" ]; then
+      case "$id" in
+        "$HOSTNAME"*) continue ;;
+      esac
+    fi
+    return 0
+  done
+  return 1
+}
+
+# The lock exists. Reclaim it only when no other migrate container runs: then
+# the run that created it was killed and its lock is stale. The lock is moved
+# away atomically (only one run can win), a new lock is created before anything
+# else is touched, and only the conversion artifacts of that killed run are
+# removed. A database or marker is never removed here; main() decides about them.
+reclaim_stale_lock() {
+  other_migrate_running && rc=0 || rc=$?
+  case "$rc" in
+    0) die "another migrate run holds ${LOCK_DIR} and is still running (check: docker ps --filter name=migrate). Nothing was changed" ;;
+    2) die "could not list the migrate containers of project ${PROJECT}; the lock was kept. Nothing was changed" ;;
+  esac
+
+  stale_claim="${LOCK_DIR}.stale.$$"
+  mv "$LOCK_DIR" "$stale_claim" 2>/dev/null \
+    || die "${LOCK_DIR} changed while it was checked; another migrate run may have started. Nothing was changed"
+  rmdir "$stale_claim" 2>/dev/null || :
+  mkdir "$LOCK_DIR" 2>/dev/null \
+    || die "another migrate run took ${LOCK_DIR} while this run reclaimed it. Nothing was changed"
+  LOCK_HELD=1
+  log "Reclaimed the stale migrate lock left by a killed run"
+
+  if [ -e "$SQLITE_DB" ] || [ -e "$MARKER" ]; then
+    return 0
+  fi
+  for artifact in "$SQLITE_DB".tmp*; do
+    [ -e "$artifact" ] || continue
+    log "Removing partial conversion output of the killed run: ${artifact}"
+    rm -f -- "$artifact"
+  done
+}
+
+# One migrate run at a time. mkdir is atomic. A lock whose run was killed is
+# reclaimed by reclaim_stale_lock; a lock held by a running migrate is refused.
 acquire_lock() {
   if mkdir "$LOCK_DIR" 2>/dev/null; then
     LOCK_HELD=1
     return 0
   fi
-  die "another migrate run holds ${LOCK_DIR}, or a previous run was killed. If no migrate container is running (docker ps -a --filter name=migrate), remove that directory and retry. Nothing was changed"
+  reclaim_stale_lock
 }
 
 # Refuse when conversion output exists but no database does. The files are not
@@ -211,10 +265,10 @@ quiesce_writers() {
 main() {
   docker info >/dev/null 2>&1 || die "the Docker daemon is not reachable from the migrate container; the legacy PostgreSQL data was not checked, nothing was changed"
 
-  acquire_lock
-
   PROJECT=$(detect_project)
   LEGACY_VOLUME="${PROJECT}_postgres-data"
+
+  acquire_lock
 
   if ! docker volume inspect "$LEGACY_VOLUME" >/dev/null 2>&1; then
     log "No legacy PostgreSQL data (${LEGACY_VOLUME}); nothing to convert"

@@ -33,6 +33,10 @@ case "$1" in
     case "$*" in
       *com.docker.compose.service=api*) [ -f "$STUB_STATE/api_running" ] && echo abc123 || : ;;
       *com.docker.compose.service=worker*) [ -f "$STUB_STATE/worker_running" ] && echo def456 || : ;;
+      *com.docker.compose.service=migrate*)
+        # Running migrate containers: the current one (HOSTNAME prefix) and/or another run.
+        [ -f "$STUB_STATE/migrate_self" ] && echo 0123456789abcdef0123 || :
+        [ -f "$STUB_STATE/other_migrate" ] && echo mig999 || : ;;
     esac
     exit 0 ;;
   stop)
@@ -116,7 +120,8 @@ chmod +x "$CONVERT_STUB"
 SECRET='sup3rS3cret!x'
 
 # run_case <flags...> : fresh state, data dir and PATH stubs. Flags:
-#   legacy api_running worker_running pg_down pg_auth_fail db marker lock tmp
+#   legacy api_running worker_running pg_down pg_auth_fail migrate_self other_migrate
+#   db marker lock tmp tmp_wal tmp_shm stray
 run_case() {
   STUB_STATE="$TEST_TMP_DIR/state"
   rm -rf "$STUB_STATE"
@@ -125,11 +130,14 @@ run_case() {
   export STUB_STATE
   for flag in "$@"; do
     case "$flag" in
-      legacy | api_running | worker_running | pg_down | pg_auth_fail) : > "$STUB_STATE/$flag" ;;
+      legacy | api_running | worker_running | pg_down | pg_auth_fail | migrate_self | other_migrate) : > "$STUB_STATE/$flag" ;;
       db) : > "$STUB_STATE/data/proxycore.db" ;;
       marker) : > "$STUB_STATE/data/proxycore.db.converted.json" ;;
       lock) mkdir "$STUB_STATE/data/.migrate-legacy.lock" ;;
       tmp) : > "$STUB_STATE/data/proxycore.db.tmp" ;;
+      tmp_wal) : > "$STUB_STATE/data/proxycore.db.tmp-wal" ;;
+      tmp_shm) : > "$STUB_STATE/data/proxycore.db.tmp-shm" ;;
+      stray) : > "$STUB_STATE/data/unrelated.txt" ;;
     esac
   done
   CASE_RC=0
@@ -294,8 +302,8 @@ assert_calls_have "docker start abc123 def456"
 
 # 14. Another migrate run holds the lock: refuse, stop nothing, keep the lock
 #     (this run does not own it and must not remove it).
-run_case legacy api_running lock
-[ "$CASE_RC" -ne 0 ] || fail "a held lock must refuse the run"
+run_case legacy api_running lock other_migrate
+[ "$CASE_RC" -ne 0 ] || fail "a lock held by another running migrate must refuse the run"
 assert_no_service_stopped
 [ -d "$STUB_STATE/data/.migrate-legacy.lock" ] || fail "a lock this run does not own must be kept"
 case "$CASE_OUT" in *"holds"*) ;; *) fail "held-lock message must say so" ;; esac
@@ -306,6 +314,54 @@ run_case legacy api_running tmp
 [ "$CASE_RC" -ne 0 ] || fail "partial output must refuse the run"
 assert_no_service_stopped
 [ -f "$STUB_STATE/data/proxycore.db.tmp" ] || fail "partial output this run did not create must be kept"
+
+# 16. Stale lock (killed run), no other migrate container running: the lock is
+#     removed, only the conversion artifacts (proxycore.db.tmp*) are removed,
+#     and the run continues and converts. Unrelated files are kept.
+run_case legacy api_running lock tmp tmp_wal tmp_shm stray
+[ "$CASE_RC" -eq 0 ] || fail "stale lock with no other migrate must recover (got $CASE_RC)"
+[ ! -d "$STUB_STATE/data/.migrate-legacy.lock" ] || fail "stale lock must be removed"
+[ ! -e "$STUB_STATE/data/proxycore.db.tmp" ] || fail "stale run's temp database must be removed"
+[ ! -e "$STUB_STATE/data/proxycore.db.tmp-wal" ] || fail "stale run's -wal must be removed"
+[ ! -e "$STUB_STATE/data/proxycore.db.tmp-shm" ] || fail "stale run's -shm must be removed"
+[ -f "$STUB_STATE/data/unrelated.txt" ] || fail "files that are not conversion artifacts must be kept"
+assert_calls_have "docker stop abc123"
+assert_calls_have "convert --out $STUB_STATE/data/proxycore.db"
+[ -f "$STUB_STATE/data/proxycore.db.converted.json" ] || fail "recovered run must write the marker"
+assert_no_secret
+
+# 17. Same as 16, but the lock's own container (HOSTNAME) is still listed as
+#     running: it is the current run and must not count as another run.
+run_case legacy api_running lock migrate_self tmp
+[ "$CASE_RC" -eq 0 ] || fail "current container must not block stale-lock recovery (got $CASE_RC)"
+[ ! -d "$STUB_STATE/data/.migrate-legacy.lock" ] || fail "stale lock must be removed with the current container listed"
+[ ! -e "$STUB_STATE/data/proxycore.db.tmp" ] || fail "stale temp database must be removed"
+
+# 18. Stale lock, another migrate container running: refuse, stop nothing,
+#     remove nothing (lock and partial output kept).
+run_case legacy api_running lock other_migrate tmp tmp_wal
+[ "$CASE_RC" -ne 0 ] || fail "another running migrate must refuse even with a stale-looking lock"
+assert_no_service_stopped
+[ -d "$STUB_STATE/data/.migrate-legacy.lock" ] || fail "lock must be kept while another migrate runs"
+[ -f "$STUB_STATE/data/proxycore.db.tmp" ] || fail "partial output must be kept while another migrate runs"
+[ -f "$STUB_STATE/data/proxycore.db.tmp-wal" ] || fail "-wal must be kept while another migrate runs"
+
+# 19. Stale lock with a final database but no marker: fail closed. Nothing is
+#     stopped, the database and the partial output are kept.
+run_case legacy api_running lock db tmp
+[ "$CASE_RC" -ne 0 ] || fail "stale lock with an unmarked database must be refused"
+assert_no_service_stopped
+[ -f "$STUB_STATE/data/proxycore.db" ] || fail "unmarked database must be kept"
+[ -f "$STUB_STATE/data/proxycore.db.tmp" ] || fail "partial output must be kept when a database exists"
+
+# 20. Stale lock with a database and its marker: already converted. The lock is
+#     cleared, nothing is stopped, the database, marker and partial output stay.
+run_case legacy api_running lock db marker tmp
+[ "$CASE_RC" -eq 0 ] || fail "stale lock after a completed conversion must exit 0"
+assert_no_service_stopped
+[ -f "$STUB_STATE/data/proxycore.db" ] && [ -f "$STUB_STATE/data/proxycore.db.converted.json" ] \
+  || fail "committed database and marker must be kept"
+[ -f "$STUB_STATE/data/proxycore.db.tmp" ] || fail "partial output must be kept when a marker exists"
 
 # 16. Static guarantees on the script itself.
 for forbidden in 'volume rm' 'volume prune' 'compose down' 'rm -v' 'docker rm' '--pg-url' '--publish'; do
