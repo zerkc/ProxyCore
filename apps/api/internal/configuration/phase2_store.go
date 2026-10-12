@@ -19,11 +19,6 @@ import (
 	replicationsnapshot "github.com/zerkc/ProxyCore/apps/api/internal/snapshot"
 )
 
-// PgPhase2Store is the PostgreSQL implementation of the continuity
-// transaction port. It intentionally exposes only typed operations; callers
-// cannot bypass the row-lock/compare-and-set boundary with arbitrary SQL.
-const EnrollmentTokenHashVersion = "sha256-v1"
-
 type PgPhase2Store struct {
 	pool                         *pgxpool.Pool
 	clusterKeyStore              cluster.KeyStore
@@ -216,8 +211,6 @@ type pgPhase2Transaction struct {
 	clusterKeyStore cluster.KeyStore
 	masterKeyBase64 string
 }
-
-var errEnrollmentTokenDenied = errors.New("enrollment token denied")
 
 func (t *pgPhase2Transaction) CreateEnrollmentToken(ctx context.Context, id, selector, hash, version, ownerID string, createdAt, expiresAt time.Time) (domain.TopologyRole, error) {
 	if version != EnrollmentTokenHashVersion {
