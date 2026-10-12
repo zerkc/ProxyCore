@@ -1,0 +1,33 @@
+# syntax=docker/dockerfile:1.10
+
+# Migrate service: one-shot conversion of a legacy PostgreSQL installation to
+# SQLite, run by the dashboard updater (and the installer) before the stack is
+# restarted. It runs as root only because it needs the Docker socket to stop the
+# api and worker containers while the data is converted. The converter itself
+# runs as the runtime user 10001 (su-exec), so the published database is owned
+# exactly like the one the api uses.
+
+# Converter: the same static binary the api image ships as proxycore-convert.
+FROM golang:1.25-alpine AS convert
+WORKDIR /src
+
+# Layer 1: dependencies only.
+COPY apps/api/go.mod apps/api/go.sum ./
+RUN --mount=type=cache,id=go-mod,target=/go/pkg/mod \
+    go mod download
+
+# Layer 2: source + build.
+COPY apps/api/ ./
+RUN --mount=type=cache,id=go-mod,target=/go/pkg/mod \
+    --mount=type=cache,id=go-build,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=linux go build -trimpath \
+       -ldflags="-s -w" -o /out/proxycore-convert ./cmd/convert
+
+# Runtime: docker CLI (quiesce), psql/pg_isready (pre-checks), su-exec (drop to 10001).
+FROM alpine:3.22
+RUN apk add --no-cache docker-cli postgresql17-client su-exec \
+  && mkdir -p /var/lib/proxycore-db \
+  && chown 10001:10001 /var/lib/proxycore-db
+COPY --from=convert /out/proxycore-convert /usr/local/bin/proxycore-convert
+COPY scripts/migrate-legacy-postgres.sh /usr/local/bin/migrate-legacy-postgres
+ENTRYPOINT ["/usr/local/bin/migrate-legacy-postgres"]
