@@ -29,7 +29,7 @@ case "$1" in
   info) exit 0 ;;
   volume)
     # docker volume inspect <name>
-    [ -f "$STUB_STATE/legacy" ] && [ "$3" = proxycore_postgres-data ] ;;
+    [ -f "$STUB_STATE/legacy" ] && [ "$3" = "${STUB_PROJECT:-proxycore}_postgres-data" ] ;;
   ps)
     case "$*" in
       *com.docker.compose.service=api*) [ -f "$STUB_STATE/api_running" ] && echo abc123 || : ;;
@@ -49,6 +49,7 @@ case "$1" in
     case "$*" in
       *"--entrypoint test api -f /var/lib/proxycore-db/proxycore.db.converted.json"*) [ -f "$STUB_STATE/marker" ] ;;
       *"--entrypoint test api -f /var/lib/proxycore-db/proxycore.db"*) [ -f "$STUB_STATE/db" ] ;;
+      *"--entrypoint sh api -c command -v proxycore-convert"*) [ ! -f "$STUB_STATE/no_converter" ] ;;
       *"--entrypoint proxycore-convert"*)
         # Record only presence of the URL variable, never its value.
         if [ -n "${PROXYCORE_CONVERT_PG_URL:-}" ]; then
@@ -82,7 +83,7 @@ run_case() {
   export STUB_STATE
   for flag in "$@"; do
     case "$flag" in
-      legacy | api_running | worker_running | volume_user | stale | db | marker) : > "$STUB_STATE/$flag" ;;
+      legacy | api_running | worker_running | volume_user | stale | db | marker | no_converter) : > "$STUB_STATE/$flag" ;;
     esac
   done
   CASE_RC=0
@@ -210,6 +211,49 @@ CASE_OUT=$(env -u PROXYCORE_MASTER_KEY_BASE64 PATH="$BIN:$PATH" sh "$SCRIPT" 2>&
 CASE_CALLS=$(tr -d '\r' < "$STUB_STATE/calls")
 [ "$CASE_RC" -ne 0 ] || fail "missing master key must be refused"
 assert_calls_lack "run -d"
+
+# 9b. The api image has no proxycore-convert (an older release): refuse before
+#     anything is stopped or started, with the build hint and exit 1.
+run_case legacy no_converter
+[ "$CASE_RC" -eq 1 ] || fail "missing converter binary must exit 1 (got $CASE_RC)"
+assert_calls_lack "run -d"
+assert_calls_lack "network create"
+assert_calls_lack "--entrypoint proxycore-convert"
+case "$CASE_OUT" in *"docker compose build api"*) ;; *) fail "missing-converter message must give the build hint" ;; esac
+case "$CASE_OUT" in *proxycore-convert*) ;; *) fail "missing-converter message must name the binary" ;; esac
+assert_no_secret
+
+# 9c. COMPOSE_PROJECT_NAME is read from the install .env when the environment
+#     does not set it. The .env values are used as data: the project selects
+#     the volume, POSTGRES_PASSWORD reaches the converter URL, and the password
+#     is not printed or logged.
+printf 'COMPOSE_PROJECT_NAME=proxycore-t68\nPOSTGRES_PASSWORD=sup3rS3cret!x\n' > "$TEST_TMP_DIR/root/.env"
+STUB_STATE="$TEST_TMP_DIR/state"
+rm -rf "$STUB_STATE"
+mkdir -p "$STUB_STATE"
+: > "$STUB_STATE/calls"
+: > "$STUB_STATE/legacy"
+export STUB_STATE
+CASE_RC=0
+CASE_OUT=$(env -u COMPOSE_PROJECT_NAME -u POSTGRES_PASSWORD -u POSTGRES_USER -u POSTGRES_DB \
+  PATH="$BIN:$PATH" PROXYCORE_MASTER_KEY_BASE64=dummy-key STUB_PROJECT=proxycore-t68 \
+  sh "$SCRIPT" 2>&1) || CASE_RC=$?
+CASE_CALLS=$(tr -d '\r' < "$STUB_STATE/calls")
+[ "$CASE_RC" -eq 0 ] || fail ".env project must be honored and convert (got $CASE_RC)"
+assert_calls_have "volume inspect proxycore-t68_postgres-data"
+assert_calls_have "--entrypoint proxycore-convert api"
+assert_calls_have "PGURL_ENCODED"
+assert_no_secret
+
+# 9d. The environment wins over .env.
+CASE_RC=0
+CASE_OUT=$(env -u POSTGRES_PASSWORD -u POSTGRES_USER -u POSTGRES_DB \
+  PATH="$BIN:$PATH" PROXYCORE_MASTER_KEY_BASE64=dummy-key COMPOSE_PROJECT_NAME=proxycore STUB_PROJECT=proxycore \
+  sh "$SCRIPT" 2>&1) || CASE_RC=$?
+CASE_CALLS=$(tr -d '\r' < "$STUB_STATE/calls")
+[ "$CASE_RC" -eq 0 ] || fail "environment project must be honored (got $CASE_RC)"
+assert_calls_have "volume inspect proxycore_postgres-data"
+rm -f "$TEST_TMP_DIR/root/.env"
 
 # 10. Static guarantees on the script itself.
 for forbidden in 'volume rm' 'down -v' 'rm -v' 'docker run .* -p ' '--publish'; do

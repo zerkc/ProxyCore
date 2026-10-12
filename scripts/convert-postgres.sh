@@ -20,7 +20,8 @@
 # exits 0 without touching anything.
 #
 # Optional environment:
-#   COMPOSE_PROJECT_NAME        Compose project (default: proxycore)
+#   COMPOSE_PROJECT_NAME        Compose project (default: the value in .env, read as
+#                               data, then proxycore)
 #   POSTGRES_USER/POSTGRES_DB/POSTGRES_PASSWORD
 #                               Legacy credentials. Default: values from .env
 #                               (read as data, never sourced), then the old
@@ -40,8 +41,8 @@ LC_ALL=C
 export LC_ALL
 
 ROOT=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
-PROJECT="${COMPOSE_PROJECT_NAME:-proxycore}"
-LEGACY_VOLUME="${PROJECT}_postgres-data"
+PROJECT=''
+LEGACY_VOLUME=''
 PG_IMAGE="${PROXYCORE_LEGACY_PG_IMAGE:-postgres:17-alpine}"
 PG_CONTAINER=proxycore-legacy-pg
 PG_NETWORK=proxycore-legacy-pg-net
@@ -168,6 +169,12 @@ main() {
   docker compose version >/dev/null 2>&1 || die "Docker Compose v2 is required (docker compose)"
   docker info >/dev/null 2>&1 || die "Docker daemon is not reachable (is the user in the docker group?)"
 
+  # The project decides the legacy volume name. It comes from the environment,
+  # then from the install .env (the same file compose reads), then the default.
+  PROJECT="${COMPOSE_PROJECT_NAME:-$(env_value COMPOSE_PROJECT_NAME)}"
+  PROJECT="${PROJECT:-proxycore}"
+  LEGACY_VOLUME="${PROJECT}_postgres-data"
+
   if ! docker volume inspect "$LEGACY_VOLUME" >/dev/null 2>&1; then
     log "No legacy PostgreSQL volume (${LEGACY_VOLUME}); nothing to convert"
     return 0
@@ -185,6 +192,13 @@ main() {
 
   if [ -z "${PROXYCORE_MASTER_KEY_BASE64:-}" ] && [ -z "$(env_value PROXYCORE_MASTER_KEY_BASE64)" ]; then
     die "PROXYCORE_MASTER_KEY_BASE64 is not set in ${ROOT}/.env or the environment; the converter needs the key the installation already uses"
+  fi
+
+  # The converter runs from the api image. An image built before the converter
+  # existed (an older release, or a rollback that rebuilt the old tag) has no
+  # proxycore-convert. Refuse now, before anything is stopped or started.
+  if ! compose run --rm --no-deps -T --entrypoint sh api -c 'command -v proxycore-convert' >/dev/null 2>&1; then
+    die "the api image has no proxycore-convert (it was built from an older release, or was never built). Nothing was changed. Check out the new release, run: docker compose build api, then run this script again"
   fi
 
   if [ -n "$(docker ps -aq --filter "name=^/${PG_CONTAINER}\$")" ]; then
