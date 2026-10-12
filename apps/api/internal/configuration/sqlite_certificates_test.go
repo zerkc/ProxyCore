@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"reflect"
 	"strings"
 	"sync"
@@ -475,33 +474,6 @@ func dueOrder(cases []struct {
 		out = append(out, dueID(i))
 	}
 	return out
-}
-
-// PG parity: the same matrix against postgres selects and orders identically.
-func TestSQLiteCertificateDueMatrixMatchesPostgres(t *testing.T) {
-	if os.Getenv("DATABASE_URL") == "" {
-		t.Skip("DATABASE_URL is not configured")
-	}
-	pg := newImportPostgresFixture(t)
-	ctx := context.Background()
-	cases := dueMatrix()
-	for i, c := range cases {
-		var renew any
-		if c.renewSec != nil {
-			renew = time.Unix(*c.renewSec, 0).UTC()
-		}
-		if _, err := pg.pool.Exec(ctx, `insert into certificates (id,hostnames,issuer,challenge,environment,status,renew_after)
-			values ($1,'["a"]',$2,$3,'custom',$4,$5)`, dueID(i), c.issuer, c.challenge, c.status, renew); err != nil {
-			t.Fatal(err)
-		}
-	}
-	got, err := pg.store.ListCertificatesDueForRenewal(ctx, dueNow)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if want := dueOrder(cases); !reflect.DeepEqual(certIDs(got), want) {
-		t.Fatalf("postgres due %v differs from SQLite expectation %v", certIDs(got), want)
-	}
 }
 
 func (f *certFixture) write(t *testing.T, fn func(sqlitedb.WriteValue) error) error {

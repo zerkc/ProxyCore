@@ -82,7 +82,7 @@ func TestHandlersWorkAgainstMinimalConfigurationBackend(t *testing.T) {
 }
 
 func TestTypedNilConfigurationStoreMeansNotConfigured(t *testing.T) {
-	server, cookie := newStoreSeamServer(t, httpserver.WithConfigurationStore((*configuration.Store)(nil)))
+	server, cookie := newStoreSeamServer(t, httpserver.WithConfigurationStore((*configuration.SQLiteConfigurationBackend)(nil)))
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/settings", nil)
 	req.AddCookie(cookie)

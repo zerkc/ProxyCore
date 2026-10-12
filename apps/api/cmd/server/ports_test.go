@@ -20,10 +20,10 @@ func TestTypedNilStoresKeepNilSemantics(t *testing.T) {
 	if !nodeConverterRoleEligible(identitySvc) {
 		t.Fatal("test identity must be role-eligible to reach the store check")
 	}
-	if got := buildNodeConverter(true, (*configuration.Store)(nil), identitySvc, nil); got != nil {
+	if got := buildNodeConverter(true, (*configuration.SQLitePhase2Store)(nil), identitySvc, nil); got != nil {
 		t.Fatal("buildNodeConverter built a converter from a typed-nil store")
 	}
-	if got := productionSnapshotByTokenStore((*configuration.PgPhase2Store)(nil)); got != nil {
+	if got := productionSnapshotByTokenStore((*configuration.SQLitePhase2Store)(nil)); got != nil {
 		t.Fatal("productionSnapshotByTokenStore returned a store for a typed-nil Phase2 store")
 	}
 	if got := productionSnapshotByTokenStore(nil); got != nil {
@@ -34,7 +34,7 @@ func TestTypedNilStoresKeepNilSemantics(t *testing.T) {
 func TestEnrollmentTLSConfigurationAdapterTreatsTypedNilStoreAsUnconfigured(t *testing.T) {
 	for name, store := range map[string]enrollmentTLSConfigurationStore{
 		"nil interface": nil,
-		"typed nil":     (*configuration.Store)(nil),
+		"typed nil":     (*configuration.SQLiteConfigurationBackend)(nil),
 	} {
 		adapter := &enrollmentTLSConfigurationAdapter{store: store}
 		if _, err := adapter.GetEnrollmentHostnames(context.Background()); !errors.Is(err, enrollment.ErrEnrollmentTLSConfigurationUnavailable) {

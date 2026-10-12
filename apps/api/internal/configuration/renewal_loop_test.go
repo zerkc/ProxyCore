@@ -105,7 +105,7 @@ func TestRenewalLoopStopsAndResumesAcrossLiveRoleTransitions(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
-		runRenewalLoop(ctx, &Store{}, RenewalOptions{
+		runRenewalLoop(ctx, &SQLiteCertificateIssueStore{}, RenewalOptions{
 			Identity: fixture.current,
 			Log:      log.New(&logs, "", 0),
 		}, time.Minute, renewalLoopRuntime{
@@ -170,7 +170,7 @@ func TestRenewalLoopSkipsUnloadedIdentity(t *testing.T) {
 	defer cancel()
 	done := make(chan struct{})
 	go func() {
-		runRenewalLoop(ctx, &Store{}, RenewalOptions{Identity: fixture.current}, time.Minute, renewalLoopRuntime{
+		runRenewalLoop(ctx, &SQLiteCertificateIssueStore{}, RenewalOptions{Identity: fixture.current}, time.Minute, renewalLoopRuntime{
 			InitialDelay: time.Second,
 			NewTimer: func(time.Duration) renewalLoopTimer {
 				timer := newRenewalLoopTestTimer()
@@ -203,7 +203,7 @@ func TestRenewalLoopDoesNotRenewAfterContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
-		runRenewalLoop(ctx, &Store{}, RenewalOptions{Identity: fixture.current}, time.Minute, renewalLoopRuntime{
+		runRenewalLoop(ctx, &SQLiteCertificateIssueStore{}, RenewalOptions{Identity: fixture.current}, time.Minute, renewalLoopRuntime{
 			InitialDelay: time.Second,
 			NewTimer: func(time.Duration) renewalLoopTimer {
 				timer := newRenewalLoopTestTimer()
@@ -263,17 +263,4 @@ func TestRenewalLoopRunsAgainstMinimalRenewalStore(t *testing.T) {
 	}
 	cancel()
 	<-done
-}
-
-func TestRenewalLoopTypedNilStoreReturnsImmediately(t *testing.T) {
-	done := make(chan struct{})
-	go func() {
-		runRenewalLoop(context.Background(), (*Store)(nil), RenewalOptions{}, time.Minute, renewalLoopRuntime{})
-		close(done)
-	}()
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("runRenewalLoop did not return for a typed-nil *Store")
-	}
 }

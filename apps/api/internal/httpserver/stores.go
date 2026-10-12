@@ -50,8 +50,5 @@ type ConfigurationBackend interface {
 }
 
 var (
-	_ ConfigurationStore   = (*configuration.Store)(nil)
-	_ CertificateStore     = (*configuration.Store)(nil)
-	_ ConfigurationBackend = (*configuration.Store)(nil)
 	_ ConfigurationBackend = (*configuration.SQLiteConfigurationBackend)(nil)
 )

@@ -25,7 +25,6 @@ type sqliteSnapshotPublicationContract interface {
 
 var (
 	_ sqliteSnapshotPublicationContract = (*SQLiteSnapshotPublicationStore)(nil)
-	_ sqliteSnapshotPublicationContract = (*PgPhase2Store)(nil)
 )
 
 // SQLiteSnapshotPublicationStore is the unwired SQLite counterpart of the

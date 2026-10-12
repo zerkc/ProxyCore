@@ -36,8 +36,7 @@ func RunRenewalLoop(ctx context.Context, store RenewalStore, opts RenewalOptions
 }
 
 func runRenewalLoop(ctx context.Context, store RenewalStore, opts RenewalOptions, interval time.Duration, runtime renewalLoopRuntime) {
-	// A typed-nil *Store must keep meaning "no store".
-	if concrete, ok := store.(*Store); ctx == nil || store == nil || (ok && concrete == nil) {
+	if ctx == nil || store == nil {
 		return
 	}
 	if interval <= 0 {

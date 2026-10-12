@@ -386,5 +386,3 @@ func writeSnapshotAcknowledgementError(w http.ResponseWriter, status int) {
 	w.WriteHeader(status)
 	_, _ = w.Write([]byte(`{"error":"` + message + `"}`))
 }
-
-var _ configuration.SnapshotAcknowledgementStore = (*configuration.PgPhase2Store)(nil)

@@ -320,7 +320,7 @@ func (snapshotByTokenMainMaterial) CopyBytes() []byte { return []byte{1} }
 func (snapshotByTokenMainMaterial) Destroy()          {}
 
 func TestProductionSnapshotByTokenStoreIsNonNil(t *testing.T) {
-	store := productionSnapshotByTokenStore(&configuration.PgPhase2Store{})
+	store := productionSnapshotByTokenStore(&configuration.SQLitePhase2Store{})
 	if store == nil {
 		t.Fatal("production snapshot-by-token store is nil")
 	}
@@ -464,7 +464,7 @@ func TestBuildNodeConverterRequiresFlagAndEligibleIdentity(t *testing.T) {
 			if err != nil {
 				t.Fatalf("bootstrapIdentity: %v", err)
 			}
-			got := buildNodeConverter(test.enabled, &configuration.Store{}, service, nil)
+			got := buildNodeConverter(test.enabled, &configuration.SQLitePhase2Store{}, service, nil)
 			if (got != nil) != test.want {
 				t.Fatalf("converter present=%t, want %t", got != nil, test.want)
 			}

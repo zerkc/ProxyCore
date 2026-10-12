@@ -465,8 +465,8 @@ func nodeConverterEnabled(args []string) bool {
 }
 
 func buildNodeConverter(enabled bool, configStore nodeConverterStore, identitySvc *identity.Service, logger *log.Logger) *enrollment.NodeConverter {
-	// A typed-nil *configuration.Store must keep meaning "no store".
-	if concrete, ok := configStore.(*configuration.Store); ok && concrete == nil {
+	// A typed-nil *configuration.SQLitePhase2Store must keep meaning "no store".
+	if concrete, ok := configStore.(*configuration.SQLitePhase2Store); ok && concrete == nil {
 		configStore = nil
 	}
 	if !enabled || configStore == nil || identitySvc == nil || !nodeConverterRoleEligible(identitySvc) {
@@ -572,7 +572,7 @@ func (s snapshotByTokenStoreAdapter) ReadSnapshotPublicationByToken(ctx context.
 }
 
 func productionSnapshotByTokenStore(store snapshotByTokenStoreReader) httpserver.SnapshotByTokenStore {
-	if concrete, ok := store.(*configuration.PgPhase2Store); store == nil || (ok && concrete == nil) {
+	if concrete, ok := store.(*configuration.SQLitePhase2Store); store == nil || (ok && concrete == nil) {
 		return nil
 	}
 	return snapshotByTokenStoreAdapter{store: store}

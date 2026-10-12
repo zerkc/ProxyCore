@@ -15,6 +15,6 @@ type ApplyJobEnqueuer interface {
 }
 
 var (
-	_ RenewalStore     = (*Store)(nil)
-	_ ApplyJobEnqueuer = (*Store)(nil)
+	_ RenewalStore     = (*SQLiteConfigurationBackend)(nil)
+	_ ApplyJobEnqueuer = (*SQLiteConfigurationBackend)(nil)
 )

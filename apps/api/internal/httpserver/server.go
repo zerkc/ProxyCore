@@ -45,8 +45,8 @@ func WithAuthService(service *auth.Service) Option {
 
 func WithConfigurationStore(store ConfigurationBackend) Option {
 	return func(s *Server) {
-		// A typed-nil *configuration.Store must keep meaning "not configured".
-		if concrete, ok := store.(*configuration.Store); ok && concrete == nil {
+		// A typed-nil *configuration.SQLiteConfigurationBackend must keep meaning "not configured".
+		if concrete, ok := store.(*configuration.SQLiteConfigurationBackend); ok && concrete == nil {
 			s.config = nil
 			return
 		}

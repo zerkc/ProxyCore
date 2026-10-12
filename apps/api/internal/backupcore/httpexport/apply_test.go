@@ -24,7 +24,7 @@ func TestApplyTriggerUsesMinimalEnqueuerAndTypedNilIsNilStore(t *testing.T) {
 	if err := NewApplyTrigger(fake).Trigger(context.Background(), "actor"); err != nil || fake.calls != 1 {
 		t.Fatalf("Trigger err=%v calls=%d", err, fake.calls)
 	}
-	if err := NewApplyTrigger((*configuration.Store)(nil)).Trigger(context.Background(), "actor"); err == nil {
+	if err := NewApplyTrigger((*configuration.SQLiteConfigurationBackend)(nil)).Trigger(context.Background(), "actor"); err == nil {
 		t.Fatal("typed-nil store must produce the nil-store error, not a panic")
 	}
 }

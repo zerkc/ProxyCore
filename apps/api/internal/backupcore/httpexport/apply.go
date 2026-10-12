@@ -17,8 +17,8 @@ type configStoreCreateApplyJobAdapter struct {
 var _ dbimport.ApplyTrigger = (*configStoreCreateApplyJobAdapter)(nil)
 
 func newConfigStoreCreateApplyJobAdapter(store configuration.ApplyJobEnqueuer) *configStoreCreateApplyJobAdapter {
-	// A typed-nil *configuration.Store must keep meaning "nil store".
-	if concrete, ok := store.(*configuration.Store); ok && concrete == nil {
+	// A typed-nil *configuration.SQLiteConfigurationBackend must keep meaning "nil store".
+	if concrete, ok := store.(*configuration.SQLiteConfigurationBackend); ok && concrete == nil {
 		store = nil
 	}
 	return &configStoreCreateApplyJobAdapter{store: store}

@@ -40,7 +40,6 @@ type sqliteConfigurationBackendContract interface {
 
 var (
 	_ sqliteConfigurationBackendContract = (*SQLiteConfigurationBackend)(nil)
-	_ sqliteConfigurationBackendContract = (*Store)(nil)
 )
 
 // SQLiteConfigurationBackend is the unwired SQLite composition of the

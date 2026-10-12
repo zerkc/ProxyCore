@@ -29,7 +29,7 @@ func TestDirectoryURLForEnvironment(t *testing.T) {
 }
 
 func TestRenewLetsEncryptCertificateRejectsNonLE(t *testing.T) {
-	store := &Store{}
+	store := &SQLiteCertificateIssueStore{}
 	_, err := store.RenewLetsEncryptCertificate(context.Background(), domain.CertificateStatus{
 		ID:     "cert-1",
 		Issuer: "self-signed",
@@ -41,7 +41,7 @@ func TestRenewLetsEncryptCertificateRejectsNonLE(t *testing.T) {
 }
 
 func TestRenewSelfSignedCertificateRejectsNonSelfSigned(t *testing.T) {
-	store := &Store{}
+	store := &SQLiteCertificateIssueStore{}
 	_, err := store.RenewSelfSignedCertificate(context.Background(), domain.CertificateStatus{
 		ID:     "cert-1",
 		Issuer: "letsencrypt",
@@ -53,7 +53,7 @@ func TestRenewSelfSignedCertificateRejectsNonSelfSigned(t *testing.T) {
 }
 
 func TestRenewSelfSignedCertificateRequiresSecrets(t *testing.T) {
-	store := &Store{}
+	store := &SQLiteCertificateIssueStore{}
 	_, err := store.RenewSelfSignedCertificate(context.Background(), domain.CertificateStatus{
 		ID:        "cert-1",
 		Hostnames: []string{"app.home.arpa"},
@@ -81,7 +81,7 @@ func TestRenewLetsEncryptCertificateUsesOverrideIssuer(t *testing.T) {
 		return acme.Material{}, errors.New("forced failure")
 	}
 
-	store := &Store{}
+	store := &SQLiteCertificateIssueStore{}
 	_, err := store.RenewLetsEncryptCertificate(context.Background(), domain.CertificateStatus{
 		ID:          "cert-1",
 		Hostnames:   []string{"app.example.test"},
