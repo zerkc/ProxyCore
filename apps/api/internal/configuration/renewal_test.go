@@ -67,9 +67,6 @@ func TestRenewSelfSignedCertificateRequiresSecrets(t *testing.T) {
 }
 
 func TestRenewLetsEncryptCertificateUsesOverrideIssuer(t *testing.T) {
-	if testing.Short() {
-		t.Skip("requires DATABASE_URL for full renew path")
-	}
 	// Pure override smoke: ensure the hook is invoked for a crafted call that
 	// fails before DB writes when secrets/store are unset.
 	original := issueLetsEncryptFn
