@@ -29,7 +29,7 @@ Replicated fields MUST include managed zones and records; resolver pools and for
 
 ### Requirement: Field classification
 
-Every snapshot-capable field MUST be classified as replicated, node-local, or transient. Node ID, role, local DNS and ingress addresses, primary endpoint, enrollment credentials, service health, applied timestamps, host paths, and runtime settings MUST be node-local or excluded. Locks, jobs, logs, metrics, caches, sessions, updater state, and PostgreSQL files MUST be transient and excluded.
+Every snapshot-capable field MUST be classified as replicated, node-local, or transient. Node ID, role, local DNS and ingress addresses, primary endpoint, enrollment credentials, service health, applied timestamps, host paths, and runtime settings MUST be node-local or excluded. Locks, jobs, logs, metrics, caches, sessions, updater state, and SQLite database files MUST be transient and excluded.
 
 #### Scenario: Local and transient data are not copied
 

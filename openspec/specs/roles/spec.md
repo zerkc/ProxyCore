@@ -19,13 +19,13 @@ Each installation MUST generate exactly one immutable installation ID on first i
 
 ### Requirement: Durable role and leadership generation
 
-The system MUST persist role and leadership generation in PostgreSQL. A fresh installation MUST default to standalone-primary behavior. Leadership generations MUST be monotonically ordered and snapshots MUST NOT reduce the latest generation known locally.
+The system MUST persist role and leadership generation in the local SQLite database. A fresh installation MUST default to standalone-primary behavior. Leadership generations MUST be monotonically ordered and snapshots MUST NOT reduce the latest generation known locally.
 
 #### Scenario: Restart preserves role state
 
 - GIVEN an Operator restarts an installation with persisted role and leadership state
 - WHEN startup completes
-- THEN the installation MUST restore that role and generation from PostgreSQL
+- THEN the installation MUST restore that role and generation from the local SQLite database
 
 ### Requirement: Phase 0/1 transition boundary
 

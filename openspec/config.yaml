@@ -3,10 +3,11 @@ schema: spec-driven
 context: |
   Product: ProxyCore, a single-installation homelab control plane for local DNS,
   Cloudflare-style DNS records, Nginx ingress, certificates, and local users.
-  Stack (active migration): Go HTTP API + Vite/React SPA for the control plane,
-  PostgreSQL (Drizzle migrations via Node one-shot until Go owns them), Node
+  Stack: Go HTTP API + Vite/React SPA for the control plane,
+  SQLite (single WAL file; Go API owns migrations; worker polls), Node
   worker, Node service-control helper, CoreDNS, Nginx, Docker Compose.
-  Legacy: Next.js App Router under apps/web is not on the default Compose path.
+  PostgreSQL is no longer a runtime dependency; it is read only by the offline
+  converter. The legacy Next.js app (apps/web) has been removed.
   Testing: TDD with Go tests for the API, Vitest for remaining Node packages,
   Docker-backed verification only in the final phase.
   Style: Spanish collaboration, English technical artifacts, typed validation,
