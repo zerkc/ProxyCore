@@ -8,10 +8,6 @@ import (
 	"io"
 	"strings"
 
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgtype"
-	"github.com/jackc/pgx/v5/pgxpool"
-
 	"github.com/zerkc/ProxyCore/apps/api/internal/backupcore/dbexport"
 	"github.com/zerkc/ProxyCore/apps/api/internal/backupcore/zipextract"
 )
@@ -19,11 +15,6 @@ import (
 type tablePayload struct {
 	name string
 	rows []map[string]any
-}
-
-type tableColumn struct {
-	name string
-	oid  uint32
 }
 
 var configTableNames = func() map[string]struct{} {
@@ -102,165 +93,6 @@ func decodeTableRows(data []byte) ([]map[string]any, error) {
 		return nil, err
 	}
 	return rows, nil
-}
-
-// postgresTableImporter is the PostgreSQL TableImporter: one transaction, a
-// transaction-scoped advisory lock, TRUNCATE ... CASCADE and COPY per table.
-type postgresTableImporter struct {
-	pool *pgxpool.Pool
-}
-
-func newPostgresTableImporter(pool *pgxpool.Pool) *postgresTableImporter {
-	return &postgresTableImporter{pool: pool}
-}
-
-func (i *postgresTableImporter) ReplaceTables(ctx context.Context, payloads []tablePayload) ([]TablePreview, error) {
-	tx, err := i.pool.BeginTx(ctx, pgx.TxOptions{})
-	if err != nil {
-		return nil, fmt.Errorf("begin backup import transaction: %w", err)
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			_ = tx.Rollback(ctx)
-		}
-	}()
-	if err := acquireImportLock(ctx, tx); err != nil {
-		return nil, err
-	}
-	previews, err := importConfigTables(ctx, tx, payloads)
-	if err != nil {
-		return previews, err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return previews, fmt.Errorf("commit backup import: %w", err)
-	}
-	committed = true
-	return previews, nil
-}
-
-func importConfigTables(ctx context.Context, tx pgx.Tx, payloads []tablePayload) ([]TablePreview, error) {
-	previews := make([]TablePreview, 0, len(payloads))
-	for _, payload := range payloads {
-		if err := contextError(ctx); err != nil {
-			return previews, err
-		}
-		quoted := quoteTableIdentifier(payload.name)
-		if _, err := tx.Exec(ctx, "TRUNCATE "+quoted+" RESTART IDENTITY CASCADE"); err != nil {
-			return previews, fmt.Errorf("truncate table %q: %w", payload.name, err)
-		}
-		columns, err := tableColumns(ctx, tx, payload.name)
-		if err != nil {
-			return previews, fmt.Errorf("read columns for %q: %w", payload.name, err)
-		}
-		if err := registerImportTableTypes(ctx, tx, payload.name); err != nil {
-			return previews, fmt.Errorf("register types for %q: %w", payload.name, err)
-		}
-		rows, err := coerceTableRows(columns, payload.rows)
-		if err != nil {
-			return previews, fmt.Errorf("coerce table %q: %w", payload.name, err)
-		}
-		if len(rows) > 0 {
-			columnNames := make([]string, len(columns))
-			for index, column := range columns {
-				columnNames[index] = column.name
-			}
-			if _, err := tx.CopyFrom(ctx, pgx.Identifier{payload.name}, columnNames, pgx.CopyFromRows(rows)); err != nil {
-				return previews, fmt.Errorf("insert table %q: %w", payload.name, err)
-			}
-		}
-		previews = append(previews, TablePreview{Name: payload.name, RowCount: len(payload.rows), Action: "truncate+reinsert"})
-	}
-	return previews, nil
-}
-
-func registerImportTableTypes(ctx context.Context, tx pgx.Tx, table string) error {
-	conn := tx.Conn()
-	if conn == nil {
-		return fmt.Errorf("nil transaction connection")
-	}
-	rows, err := tx.Query(ctx, `
-		select distinct n.nspname || '.' || t.typname, t.oid, t.typtype, t.typname
-		from pg_catalog.pg_attribute a
-		join pg_catalog.pg_class c on c.oid = a.attrelid
-		join pg_catalog.pg_namespace n on n.oid = c.relnamespace
-		join pg_catalog.pg_type t on t.oid = a.atttypid
-		where n.nspname = current_schema()
-		  and c.relname = $1
-		  and a.attnum > 0
-		  and not a.attisdropped
-		  and (t.typtype <> 'b' or t.typname = 'citext')
-	`, table)
-	if err != nil {
-		return err
-	}
-	var derivedNames []string
-	for rows.Next() {
-		var qualifiedName, typeName, typeKind string
-		var oid uint32
-		if err := rows.Scan(&qualifiedName, &oid, &typeKind, &typeName); err != nil {
-			rows.Close()
-			return err
-		}
-		if strings.EqualFold(typeName, "citext") && typeKind == "b" {
-			conn.TypeMap().RegisterType(&pgtype.Type{Name: qualifiedName, OID: oid, Codec: pgtype.TextCodec{}})
-			continue
-		}
-		derivedNames = append(derivedNames, qualifiedName)
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return err
-	}
-	rows.Close()
-	if len(derivedNames) == 0 {
-		return nil
-	}
-	_, err = conn.LoadTypes(ctx, derivedNames)
-	return err
-}
-
-func tableColumns(ctx context.Context, tx pgx.Tx, table string) ([]tableColumn, error) {
-	rows, err := tx.Query(ctx, "select * from "+quoteTableIdentifier(table)+" limit 0")
-	if err != nil {
-		return nil, err
-	}
-	fields := rows.FieldDescriptions()
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	columns := make([]tableColumn, len(fields))
-	for index, field := range fields {
-		columns[index] = tableColumn{name: field.Name, oid: field.DataTypeOID}
-	}
-	return columns, nil
-}
-
-func coerceTableRows(columns []tableColumn, source []map[string]any) ([][]any, error) {
-	known := make(map[string]struct{}, len(columns))
-	for _, column := range columns {
-		known[column.name] = struct{}{}
-	}
-	result := make([][]any, len(source))
-	for rowIndex, sourceRow := range source {
-		for name := range sourceRow {
-			if _, ok := known[name]; !ok {
-				return nil, fmt.Errorf("unknown column %q in row %d", name, rowIndex)
-			}
-		}
-		row := make([]any, len(columns))
-		for columnIndex, column := range columns {
-			value := sourceRow[column.name]
-			coerced, err := coerceImportValue(column.oid, value)
-			if err != nil {
-				return nil, fmt.Errorf("column %q in row %d: %w", column.name, rowIndex, err)
-			}
-			row[columnIndex] = coerced
-		}
-		result[rowIndex] = row
-	}
-	return result, nil
 }
 
 func quoteTableIdentifier(table string) string {

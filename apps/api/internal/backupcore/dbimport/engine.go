@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/zerkc/ProxyCore/apps/api/internal/backupcore/zipextract"
 )
@@ -23,18 +22,14 @@ type AuditEmitter interface {
 }
 
 // TableImporter atomically replaces the configuration tables with the decoded
-// bundle payloads. It owns the transaction and the import lock, so the engine
-// stays independent of the database. A failure must leave the database
+// bundle payloads. It owns the transaction and the single-flight guard, so the
+// engine stays independent of the database. A failure must leave the database
 // unchanged; an in-flight second import must return ErrImportAlreadyInProgress.
 type TableImporter interface {
 	ReplaceTables(ctx context.Context, payloads []tablePayload) ([]TablePreview, error)
 }
 
 type Options struct {
-	// Pool is the PostgreSQL convenience: when Tables is nil it is wrapped in
-	// the PostgreSQL TableImporter.
-	Pool *pgxpool.Pool
-	// Tables overrides Pool (for example the SQLite importer).
 	Tables                  TableImporter
 	MasterKeyBase64         string
 	EnvRestorePath          string
@@ -94,12 +89,8 @@ func New(opts Options) (*Engine, error) {
 	if now == nil {
 		now = time.Now
 	}
-	tables := opts.Tables
-	if tables == nil && opts.Pool != nil {
-		tables = newPostgresTableImporter(opts.Pool)
-	}
 	return &Engine{
-		tables:                  tables,
+		tables:                  opts.Tables,
 		masterKeyBase64:         opts.MasterKeyBase64,
 		envRestorePath:          opts.EnvRestorePath,
 		candidateRoot:           opts.CandidateRoot,

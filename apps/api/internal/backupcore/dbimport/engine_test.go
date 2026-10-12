@@ -157,11 +157,10 @@ func (a *testArchive) Close() error {
 var _ zipextract.Archive = (*testArchive)(nil)
 
 func TestApplyDoesNotMarkApplied_FlagTrue(t *testing.T) {
-	pool := openImportTestPool(t)
 	masterKey := testMasterKey(0x91)
 	apply := &recordingApply{}
 	engine, err := New(Options{
-		Pool:                    pool,
+		Tables:                  noopTableImporter{},
 		MasterKeyBase64:         masterKey,
 		EnvRestorePath:          filepath.Join(t.TempDir(), "env"),
 		CandidateRoot:           t.TempDir(),
@@ -186,11 +185,10 @@ func TestApplyDoesNotMarkApplied_FlagTrue(t *testing.T) {
 }
 
 func TestApplyDoesNotMarkApplied_FlagFalse(t *testing.T) {
-	pool := openImportTestPool(t)
 	masterKey := testMasterKey(0x92)
 	apply := &recordingApply{}
 	engine, err := New(Options{
-		Pool:            pool,
+		Tables:          noopTableImporter{},
 		MasterKeyBase64: masterKey,
 		EnvRestorePath:  filepath.Join(t.TempDir(), "env"),
 		CandidateRoot:   t.TempDir(),
@@ -216,10 +214,9 @@ func TestApplyDoesNotMarkApplied_FlagFalse(t *testing.T) {
 func TestApplyNil_AlwaysFalse(t *testing.T) {
 	for _, flag := range []bool{false, true} {
 		t.Run(fmt.Sprintf("flag_%t", flag), func(t *testing.T) {
-			pool := openImportTestPool(t)
 			masterKey := testMasterKey(byte(0x93 + btoi(flag)))
 			engine, err := New(Options{
-				Pool:                    pool,
+				Tables:                  noopTableImporter{},
 				MasterKeyBase64:         masterKey,
 				EnvRestorePath:          filepath.Join(t.TempDir(), "env"),
 				CandidateRoot:           t.TempDir(),
@@ -239,6 +236,14 @@ func TestApplyNil_AlwaysFalse(t *testing.T) {
 			}
 		})
 	}
+}
+
+// noopTableImporter stands in for the database so engine-level apply behavior
+// is tested without a PostgreSQL pool.
+type noopTableImporter struct{}
+
+func (noopTableImporter) ReplaceTables(context.Context, []tablePayload) ([]TablePreview, error) {
+	return nil, nil
 }
 
 func newApplyTestArchive(t *testing.T, masterKey string) *testArchive {
