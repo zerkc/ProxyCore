@@ -66,7 +66,7 @@ func newTestPG(t *testing.T) string {
 		t.Fatal(err)
 	}
 	defer conn.Close(ctx)
-	files, err := filepath.Glob(filepath.Join("..", "..", "..", "..", "packages", "db", "migrations", "*.sql"))
+	files, err := filepath.Glob(filepath.Join("..", "..", "internal", "pgconvert", "testdata", "pg-migrations", "*.sql"))
 	if err != nil || len(files) != 9 {
 		t.Fatalf("drizzle migrations: %v (%d files)", err, len(files))
 	}

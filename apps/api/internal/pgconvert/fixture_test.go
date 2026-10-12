@@ -76,7 +76,7 @@ func newPGFixture(t *testing.T) pgFixture {
 	parsed.Path = "/" + name
 	f := pgFixture{URL: parsed.String()}
 	conn := f.connect(t)
-	files, err := filepath.Glob(filepath.Join("..", "..", "..", "..", "packages", "db", "migrations", "*.sql"))
+	files, err := filepath.Glob(filepath.Join("testdata", "pg-migrations", "*.sql"))
 	if err != nil || len(files) != 9 {
 		t.Fatalf("drizzle migrations: %v (%d files)", err, len(files))
 	}
