@@ -28,7 +28,9 @@ The previous release's updater builds the new images, then runs
 and `nginx`. The `migrate` service (`scripts/migrate-legacy-postgres.sh`) does
 the conversion inside that step. It does, in order:
 
-1. Takes a lock (`<data>/.migrate-legacy.lock`) so two runs cannot overlap.
+1. Takes a lock (`<data>/.migrate-legacy.lock`) so two runs cannot overlap. A
+   lock left by a killed run is reclaimed when no other migrate container runs
+   (see "Killed run" below).
 2. Exits 0 without doing anything when there is no legacy volume, or when
    `proxycore.db` and its `.converted.json` marker already exist.
 3. Refuses (exit 1) when `proxycore.db` exists without its marker, when partial
@@ -85,10 +87,33 @@ on a large installation.
   but the migrate container keeps running. Do not start another update. Wait for
   it to finish (`docker ps --filter name=migrate` lists it while it runs). This
   path was not tested with a long conversion.
-- **Lock left behind:** a killed run leaves `<data>/.migrate-legacy.lock`. The
-  next run refuses and says so. When `docker ps -a --filter name=migrate` shows
-  no running migrate container, remove the directory from the `sqlite-data`
-  volume and retry.
+- **Killed run (lock and partial output left behind):** if the `migrate`
+  container is killed (for example `docker kill`, or SIGKILL), api and worker
+  stay stopped and the volume keeps `.migrate-legacy.lock`, and possibly
+  `proxycore.db.tmp`, `proxycore.db.tmp-wal` and `proxycore.db.tmp-shm`. The
+  next run recovers by itself when no other migrate container of the project is
+  running: it removes the lock and those `proxycore.db.tmp*` files, then
+  converts. It refuses, and changes nothing, while another migrate container is
+  still running. It also refuses, and keeps every file, when `proxycore.db`
+  exists without its marker.
+
+  To clear it by hand, check that no migrate container runs, remove only the
+  lock and the partial output, then convert again. Do not start api or worker
+  first: they open the SQLite path on start and would create an empty database,
+  and the legacy data would then be refused as unconverted.
+
+  ```sh
+  docker ps --filter name=migrate                  # must print no container
+  docker run --rm -v proxycore_sqlite-data:/data alpine \
+    sh -c 'rm -rf /data/.migrate-legacy.lock && rm -f /data/proxycore.db.tmp*'
+  docker compose --profile tools run --rm migrate  # converts; api and worker stay stopped
+  docker compose up -d                             # only after that run succeeded
+  ```
+
+  Never remove `proxycore.db` or `proxycore.db.converted.json` to make a run
+  pass: a database with its marker is the converted result, and one without a
+  marker must be inspected first. Use `docker compose up -d`, not
+  `--remove-orphans`, so the legacy `postgres` container is not removed.
 
 A successful update is idempotent: running the `migrate` service again prints
 `Already converted` and exits 0.
@@ -107,16 +132,27 @@ every step yourself.
    docker stop $(docker ps -q --filter volume=proxycore_postgres-data)
    ```
 
-2. Back up the legacy volume (keep this until you have confirmed the upgrade):
+2. Back up the legacy volume (keep this until you have confirmed the upgrade).
+   Write the archive outside the install directory: that directory is the git
+   checkout the dashboard update fetches, and an untracked archive in it makes
+   the update fail at fetch-source with `managed source directory has
+   uncommitted changes`.
 
    ```sh
-   docker run --rm -v proxycore_postgres-data:/data:ro -v "$PWD":/backup alpine \
+   mkdir -p "$HOME/proxycore-backups"
+   docker run --rm -v proxycore_postgres-data:/data:ro -v "$HOME/proxycore-backups":/backup alpine \
      tar czf /backup/postgres-data-backup.tgz -C /data .
    ```
 
-3. Convert:
+3. Convert. The converter runs from the api image, so that image must contain
+   `proxycore-convert`. An image built from an older release does not, and the
+   script then refuses with exit 1 and `the api image has no proxycore-convert`
+   before anything is stopped. Check out the new release and build the image
+   first:
 
    ```sh
+   git checkout <new-tag>
+   docker compose build api
    sh scripts/convert-postgres.sh
    ```
 
@@ -182,16 +218,26 @@ automatic path prints it in the updater's `migrate` step output.
 | 3 | PostgreSQL unreachable, or a schema or data shape the converter does not know. |
 
 The manual script exits with the converter's code, or 1 for its own refusals
-(running containers, missing master key, missing marker). The `migrate` service
-uses the same converter codes and adds its own refusals as exit 1.
+(running containers, missing master key, missing marker, an api image without
+`proxycore-convert`). The `migrate` service uses the same converter codes and
+adds its own refusals as exit 1.
 
 ## Orphaned legacy PostgreSQL container
 
-The new release has no `postgres` service. After the automatic update, the old
-`postgres` container keeps running as an orphan (`docker compose` reports
-`Found orphan containers ([<project>-postgres-1])`). This is intended: it keeps
-the rollback path open, and the converter reads its data. It uses resources
-until you remove it.
+The new release has no `postgres` service, and the two paths treat the old
+container differently:
+
+- **Dashboard update (automatic):** the old `postgres` container keeps running as
+  an orphan (`docker compose` reports `Found orphan containers
+  ([<project>-postgres-1])`). This is intended: it keeps the rollback path open,
+  and the converter reads its data from the running container. It uses resources
+  until you remove it.
+- **Installer (`scripts/install.sh`):** the installer runs `docker compose up -d
+  --remove-orphans`, so it removes the legacy `postgres` container. The volume
+  `<project>_postgres-data` is kept. The automatic conversion needs that container
+  running, so the installer path only works after the manual
+  `sh scripts/convert-postgres.sh` has converted the data. The installer refuses
+  to start while unconverted legacy data exists and no SQLite database does.
 
 Remove it only when you will not roll back:
 
@@ -219,7 +265,11 @@ Changes made on SQLite after cutover are not copied back. To retry the
 conversion after a rollback, first remove the unwanted SQLite copy (confirm it
 holds nothing you need): `docker compose rm -sf api worker` with the new
 release checked out, then `docker volume rm proxycore_sqlite-data`, then update
-again, or run `scripts/convert-postgres.sh`.
+again, or run `scripts/convert-postgres.sh`. The rollback left the previous
+release's api image in place, and that image has no `proxycore-convert`. Before
+the manual script, check out the new release and run `docker compose build api`
+(otherwise the script refuses with exit 1 and changes nothing). The dashboard
+update builds the new images itself, so it needs no extra step.
 
 Do not delete `<project>_postgres-data` until the new release has run
 correctly for as long as you need the ability to go back. Remove it only when

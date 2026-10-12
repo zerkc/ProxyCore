@@ -107,7 +107,13 @@ written.
    run, starts a temporary PostgreSQL on the legacy volume, and runs
    `proxycore-convert` from the api image (which reads
    `PROXYCORE_CONVERT_PG_URL` and `PROXYCORE_MASTER_KEY_BASE64`; the output
-   path is `/var/lib/proxycore-db/proxycore.db`).
+   path is `/var/lib/proxycore-db/proxycore.db`). It needs the converter in the
+   api image: build the new release's image first (`docker compose build api`).
+   The installer (`scripts/install.sh`) runs `up -d --remove-orphans`, which
+   removes the legacy `postgres` container; the volume is kept. Because the
+   automatic conversion needs that container running, convert with this script
+   before the installer. The installer refuses to start until the data is
+   converted.
 3. The converter validates independently of the copy: per-table row counts
    and canonical hashes on both sides, `foreign_key_check`,
    `integrity_check`, schema version, every encrypted secret decrypts with the
