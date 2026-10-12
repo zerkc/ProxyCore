@@ -162,7 +162,7 @@ HTTP/HTTPS ingress is Cloudflare-style: configured on proxied DNS records. There
 | FR-JOB-001 | Mutations affecting CoreDNS or Nginx MUST create an identifiable job. |
 | FR-JOB-002 | A job MUST record revision, actor, target, timestamps, validation/apply/health output, and final status. |
 | FR-JOB-003 | Worker MUST render from a consistent snapshot, validate, then reload through a least-privileged path. |
-| FR-JOB-004 | The Next.js web process MUST NOT execute privileged reload commands or hold the Docker socket. |
+| FR-JOB-004 | The API process MUST NOT execute privileged reload commands or hold the Docker socket. |
 | FR-JOB-005 | Concurrent jobs for the same service MUST be serialized or safely coalesced. |
 | FR-JOB-006 | Health failure after reload MUST trigger documented rollback or an explicit recovery action. |
 | FR-JOB-007 | Worker-to-service control MUST go through a private Unix socket to the service-control helper and use fixed operations for staging, validation, promotion, reload, health, and rollback. The worker MUST NOT receive a raw Docker socket, user input MUST NOT become shell commands, and custom Nginx input MUST pass server-context validation before rendering. |

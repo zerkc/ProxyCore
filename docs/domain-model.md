@@ -1,6 +1,6 @@
 # ProxyCore Domain Model
 
-Desired configuration and operational history live in PostgreSQL. CoreDNS and Nginx are applied targets.
+Desired configuration and operational history live in one SQLite file. CoreDNS and Nginx are applied targets.
 
 ## Principles
 
