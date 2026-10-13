@@ -435,7 +435,7 @@ export default function DashboardShell({ children }: { children: ReactNode }) {
                 update={update}
                 loading={updateLoading}
                 error={updateError}
-                onRetry={() => void refreshUpdate()}
+                onRetry={() => void refreshUpdate({ force: true })}
               />
             </div>
           </aside>
