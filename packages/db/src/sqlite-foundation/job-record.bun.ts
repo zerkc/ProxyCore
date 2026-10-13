@@ -261,8 +261,12 @@ try {
     assert.deepEqual(jobs(), before); assert.equal(read(), undefined);
   });
   check("own-cursor-finalized-caller-cache-preserved", () => {
-    const cached = db.query("SELECT * FROM main.apply_jobs WHERE id = ?"); const owned: Statement[] = [];
-    const observed = new Proxy(db, {
+    // Bun 1.3.14 stops returning identical db.query() objects once a connection
+    // has cached about 20 statements (1.4.2 keeps them), so this identity probe
+    // uses a connection that holds only the statement under test.
+    const cacheDb = openSQLite(path);
+    const cached = cacheDb.query("SELECT * FROM main.apply_jobs WHERE id = ?"); const owned: Statement[] = [];
+    const observed = new Proxy(cacheDb, {
       get(target, property) {
         if (property === "prepare") return (sql: string) => {
           const statement = target.prepare(sql); owned.push(statement); return statement;
@@ -275,7 +279,8 @@ try {
     assert.equal(getSQLiteJobRecord(observed, "missing"), undefined);
     assert.equal(owned.length, 2); for (const statement of owned) assert.throws(() => statement.get(originalID));
     assert.deepEqual(cached.get(originalID), original);
-    assert.strictEqual(db.query("SELECT * FROM main.apply_jobs WHERE id = ?"), cached);
+    assert.strictEqual(cacheDb.query("SELECT * FROM main.apply_jobs WHERE id = ?"), cached);
+    cacheDb.close();
   });
   const invalid: [string, unknown][] = [
     ["JSON", { ...original, validation_output: "{" }],

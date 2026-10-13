@@ -261,8 +261,12 @@ try {
     } finally { other.close(); }
   });
   await check("uncached-owned-cursor-finalized-before-real-projection-and-publication", async () => {
-    const cached = db.query(sql); const cursors: Statement[] = []; let finalized = false;
-    const connection = observed(db, (raw) => new Proxy(raw as object, {
+    // Bun 1.3.14 stops returning identical db.query() objects once a connection
+    // has cached about 20 statements (1.4.2 keeps them), so this identity probe
+    // uses a connection that holds only the statement under test.
+    const cacheDb = openSQLite(path);
+    const cached = cacheDb.query(sql); const cursors: Statement[] = []; let finalized = false;
+    const connection = observed(cacheDb, (raw) => new Proxy(raw as object, {
       ownKeys(target) {
         assert.equal(finalized, true, "column validation before finalize");
         return Reflect.ownKeys(target);
@@ -278,7 +282,8 @@ try {
     finalized = false;
     assert.equal((await latestSQLiteRevisionRecord(connection))!.id, originalID);
     assert.equal(cursors.length, 2); assert.notStrictEqual(cursors[0], cursors[1]);
-    assert.deepEqual(cached.get(), original); assert.strictEqual(db.query(sql), cached);
+    assert.deepEqual(cached.get(), original); assert.strictEqual(cacheDb.query(sql), cached);
+    cacheDb.close();
   });
   const invalid: [string, unknown][] = [["undefined-row", undefined], ["array", []], ["scalar", 1], ["extra", { ...original, extra: 1 }]];
   for (const column of columns) {

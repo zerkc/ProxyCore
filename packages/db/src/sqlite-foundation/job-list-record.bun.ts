@@ -83,7 +83,7 @@ async function unchanged(connection = db) {
 // Local facade around a real statement. No global monkeypatches, ID reads,
 // transaction methods or cached query method are available to the implementation.
 function facade(options: { transform?: (values: Record<string, unknown>[]) => unknown[];
-  prepareError?: Error; allError?: Error; finalizeError?: Error } = {}) {
+  prepareError?: Error; allError?: Error; finalizeError?: Error } = {}, source: Database = db) {
   const state = { prepares: 0, all: 0, completions: 0, finalizations: 0 };
   const owned: Statement[] = [];
   const connection = {
@@ -91,7 +91,7 @@ function facade(options: { transform?: (values: Record<string, unknown>[]) => un
       state.prepares++;
       assert.equal(actual, sql);
       if (options.prepareError) throw options.prepareError;
-      const statement = db.prepare<Record<string, unknown>, []>(actual);
+      const statement = source.prepare<Record<string, unknown>, []>(actual);
       owned.push(statement);
       return {
         all(...bindings: unknown[]) {
@@ -371,13 +371,18 @@ try {
     }
   });
   await test("private-cursor-finalization-caller-cache-preserved", async () => {
-    const cached = db.query(sql);
+    // Bun 1.3.14 stops returning identical db.query() objects once a connection
+    // has cached about 20 statements (1.4.2 keeps them), so this identity probe
+    // uses a connection that holds only the statement under test.
+    const cacheDb = openSQLite(path);
+    const cached = cacheDb.query(sql);
     const cachedBefore = cached.all();
-    const first = facade(); const second = facade();
+    const first = facade({}, cacheDb); const second = facade({}, cacheDb);
     await list(first.connection); await list(second.connection);
     assert.notStrictEqual(first.owned[0], second.owned[0]);
     for (const statement of [...first.owned, ...second.owned]) assert.throws(() => statement.all());
-    assert.strictEqual(db.query(sql), cached); assert.deepEqual(cached.all(), cachedBefore);
+    assert.strictEqual(cacheDb.query(sql), cached); assert.deepEqual(cached.all(), cachedBefore);
+    cacheDb.close();
   });
   await test("explicit-existing-columns-ignore-unrelated-fixture-column", async () => {
     db.exec("ALTER TABLE main.apply_jobs ADD COLUMN fixture_only TEXT");

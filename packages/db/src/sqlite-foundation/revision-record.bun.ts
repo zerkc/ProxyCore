@@ -180,15 +180,20 @@ try {
     assert.deepEqual(rows(), before); assert.equal(read(), undefined);
   });
   check("private-finalization-preserves-caller-cached-cursor", () => {
-    const sql = "SELECT * FROM main.config_revisions WHERE id = ?", cached = db.query(sql), owned: Statement[] = [];
-    const observed = new Proxy(db, { get(target, property) {
+    // Bun 1.3.14 stops returning identical db.query() objects once a connection
+    // has cached about 20 statements (1.4.2 keeps them), so this identity probe
+    // uses a connection that holds only the statement under test.
+    const cacheDb = openSQLite(path);
+    const sql = "SELECT * FROM main.config_revisions WHERE id = ?", cached = cacheDb.query(sql), owned: Statement[] = [];
+    const observed = new Proxy(cacheDb, { get(target, property) {
       if (property === "prepare") return (sql: string) => { const s = target.prepare(sql); owned.push(s); return s; };
       const value = Reflect.get(target, property); return typeof value === "function" ? value.bind(target) : value;
     } });
     assert.equal(getSQLiteRevisionRecord(observed, originalID)!.id, originalID);
     assert.equal(getSQLiteRevisionRecord(observed, "missing"), undefined);
     assert.equal(owned.length, 2); for (const s of owned) assert.throws(() => s.get(originalID));
-    assert.deepEqual(cached.get(originalID), original); assert.strictEqual(db.query(sql), cached);
+    assert.deepEqual(cached.get(originalID), original); assert.strictEqual(cacheDb.query(sql), cached);
+    cacheDb.close();
   });
   const invalid: [string, unknown][] = [["undefined-row", undefined], ["array-row", []], ["extra-column", { ...original, extra: 1 }]];
   for (const column of Object.keys(original)) {

@@ -182,9 +182,13 @@ try {
     assert.equal(getSQLiteJobRow(db, id(1)), undefined);
   });
   check("own-statement-finalized-caller-cache-preserved", () => {
-    const cached = db.query("SELECT * FROM main.apply_jobs WHERE id = ?");
+    // Bun 1.3.14 stops returning identical db.query() objects once a connection
+    // has cached about 20 statements (1.4.2 keeps them), so this identity probe
+    // uses a connection that holds only the statement under test.
+    const cacheDb = openSQLite(path);
+    const cached = cacheDb.query("SELECT * FROM main.apply_jobs WHERE id = ?");
     const owned: Statement[] = [];
-    const observed = new Proxy(db, {
+    const observed = new Proxy(cacheDb, {
       get(target, property) {
         if (property === "prepare") return (sql: string) => {
           const statement = target.prepare(sql);
@@ -200,7 +204,8 @@ try {
     assert.equal(owned.length, 2);
     for (const statement of owned) assert.throws(() => statement.get(originalID));
     assert.deepEqual(cached.get(originalID), original);
-    assert.strictEqual(db.query("SELECT * FROM main.apply_jobs WHERE id = ?"), cached);
+    assert.strictEqual(cacheDb.query("SELECT * FROM main.apply_jobs WHERE id = ?"), cached);
+    cacheDb.close();
   });
   test("numeric-driver-projection-rejected", () => {
     insert(); update("leadership_generation", 9223372036854775807n);
