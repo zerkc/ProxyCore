@@ -462,3 +462,151 @@ function normalizeTokenCreation(value: unknown): EnrollmentTokenCreation {
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
+
+export type BackupApiErrorKind =
+  | "master_key_mismatch"
+  | "passphrase_required"
+  | "passphrase_mismatch"
+  | "invalid_bundle"
+  | "too_large"
+  | "unavailable"
+  | "unauthorized"
+  | "forbidden"
+  | "unknown";
+
+export class BackupApiError extends ApiError {
+  constructor(
+    status: number,
+    public readonly kind: BackupApiErrorKind,
+    message: string,
+  ) {
+    super(status, message);
+    this.name = "BackupApiError";
+  }
+}
+
+export type BackupImportTable = {
+  name: string;
+  rowCount: number;
+  action: string;
+};
+
+export type BackupImportReport = {
+  dryRun: boolean;
+  bundleSha256: string;
+  formatVersion: number;
+  exporterVersion: string;
+  createdAt: string;
+  installationId: string;
+  nodeId: string;
+  tables: BackupImportTable[];
+  envWouldChange: boolean;
+  certsToRestore: string[];
+  appliedPostImport: boolean;
+  compatibilityConflicts?: string[];
+};
+
+export type BackupDownload = { blob: Blob; filename: string };
+
+const BACKUP_FILENAME = "proxycore-backup.zip";
+const BACKUP_PASSPHRASE_HEADER = "X-Proxycore-Backup-Passphrase";
+
+// Encodes the passphrase as unpadded base64url over its UTF-8 bytes, as the
+// backup endpoints expect. The result must never be logged or put in a URL.
+export function encodeBackupPassphrase(passphrase: string): string {
+  const bytes = new TextEncoder().encode(passphrase);
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+export async function exportBackup(passphrase?: string): Promise<BackupDownload> {
+  const headers: Record<string, string> = {};
+  if (passphrase) headers[BACKUP_PASSPHRASE_HEADER] = encodeBackupPassphrase(passphrase);
+  const response = await backupFetch("/api/backup/export", {
+    method: "POST",
+    credentials: "include",
+    cache: "no-store",
+    headers,
+  });
+  return {
+    blob: await response.blob(),
+    filename: backupFilename(response.headers.get("content-disposition")),
+  };
+}
+
+export async function importBackup(
+  file: Blob,
+  options: { passphrase?: string; dryRun: boolean },
+): Promise<BackupImportReport> {
+  const form = new FormData();
+  form.append("bundle", file);
+  if (options.passphrase) {
+    form.append("passphrase", encodeBackupPassphrase(options.passphrase));
+  }
+  // No explicit content-type: the browser must set the multipart boundary.
+  const response = await backupFetch(
+    `/api/backup/import?dry_run=${options.dryRun ? "true" : "false"}`,
+    { method: "POST", credentials: "include", cache: "no-store", body: form },
+  );
+  try {
+    return (await response.json()) as BackupImportReport;
+  } catch {
+    throw new BackupApiError(
+      response.status,
+      "unknown",
+      "Backup service returned an invalid response.",
+    );
+  }
+}
+
+async function backupFetch(path: string, init: RequestInit): Promise<Response> {
+  let response: Response;
+  try {
+    response = await fetch(path, init);
+  } catch {
+    throw new BackupApiError(0, "unknown", "Backup service is unavailable.");
+  }
+  if (!response.ok) throw await backupResponseError(response);
+  return response;
+}
+
+async function backupResponseError(response: Response) {
+  const body = (await response.json().catch(() => ({}))) as {
+    error?: unknown;
+    code?: unknown;
+  };
+  const message =
+    typeof body.error === "string" && body.error
+      ? body.error
+      : `Request failed (${response.status})`;
+  const status = response.status;
+  let kind: BackupApiErrorKind = "unknown";
+  if (status === 409 && body.code === "master_key_mismatch") {
+    kind = "master_key_mismatch";
+  } else if (status === 401) {
+    kind = message === "passphrase mismatch" ? "passphrase_mismatch" : "unauthorized";
+  } else if (status === 400) {
+    kind = message === "passphrase required" ? "passphrase_required" : "invalid_bundle";
+  } else if (status === 413) {
+    kind = "too_large";
+  } else if (status === 503) {
+    kind = "unavailable";
+  } else if (status === 403) {
+    kind = "forbidden";
+  }
+  return new BackupApiError(status, kind, message);
+}
+
+function backupFilename(disposition: string | null): string {
+  const match = disposition?.match(/filename\*?=(?:UTF-8'')?"?([^";]+)"?/i);
+  if (!match?.[1]) return BACKUP_FILENAME;
+  let name = match[1].trim();
+  try {
+    name = decodeURIComponent(name);
+  } catch {
+    // Keep the raw value when it is not percent-encoded.
+  }
+  const base = name.split(/[\\/]/).pop()?.trim();
+  return base && base !== "." && base !== ".." ? base : BACKUP_FILENAME;
+}
