@@ -559,19 +559,85 @@ func TestApplyBuildMode(t *testing.T) {
 	if status.Steps[0].Name != UpdateModeBuild {
 		t.Fatalf("first step=%q want %q", status.Steps[0].Name, UpdateModeBuild)
 	}
-	fc.mu.Lock()
-	firstArgs := append([]string(nil), fc.calls[0].Args...)
-	fc.mu.Unlock()
-	joined := strings.Join(firstArgs, " ")
-	for _, want := range []string{"build", "api", "worker"} {
-		if !strings.Contains(joined, want) {
-			t.Errorf("build command %q does not contain %q", joined, want)
+	builds := buildCalls(fc)
+	if len(builds) != 2 {
+		t.Fatalf("expected 2 sequential build calls, got %d: %v", len(builds), builds)
+	}
+	for i, svc := range []string{"api", "worker"} {
+		got := builds[i]
+		if len(got) != 1 || got[0] != svc {
+			t.Errorf("build call %d services=%v want [%s]", i, got, svc)
 		}
 	}
+	fc.mu.Lock()
+	joined := strings.Join(fc.calls[0].Args, " ")
+	fc.mu.Unlock()
 	for _, unwanted := range []string{"--profile", "tools", "migrate"} {
 		if strings.Contains(joined, unwanted) {
 			t.Errorf("build command %q must not contain %q", joined, unwanted)
 		}
+	}
+}
+
+// buildCalls returns, per recorded `docker compose ... build` call, the service
+// names that follow the build subcommand.
+func buildCalls(fc *fakeCommander) [][]string {
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+	var out [][]string
+	for _, c := range fc.calls {
+		for i, a := range c.Args {
+			if a == "build" {
+				out = append(out, append([]string(nil), c.Args[i+1:]...))
+				break
+			}
+		}
+	}
+	return out
+}
+
+func TestApplyBuildModeStopsAtFirstFailingService(t *testing.T) {
+	fc := &fakeCommander{}
+	fc.ExecOverride = func(ctx context.Context, name string, args ...string) (string, error) {
+		out, err := fc.exec(ctx, name, args...) // records the call
+		if strings.Contains(strings.Join(args, " "), "build worker") {
+			return "oom killed", errFake("exit 137")
+		}
+		return out, err
+	}
+	u := New(Options{
+		UpdateMode:           UpdateModeBuild,
+		ProjectName:          "proxycore",
+		Services:             []string{"api", "worker", "nginx"},
+		BootstrapRequestFile: filepath.Join(t.TempDir(), "request.json"),
+		HealthURL:            "http://api:3000/api/health",
+		HealthTimeout:        2 * time.Second,
+		PollInterval:         50 * time.Millisecond,
+		Exec:                 fc.Exec,
+		HTTPGet:              func(ctx context.Context, url string) (int, error) { return 200, nil },
+		Logger:               &recordingLogger{},
+	})
+
+	status, err := u.Apply(context.Background(), "0.1.5")
+	if !errors.Is(err, ErrStepFailed) {
+		t.Fatalf("err=%v want ErrStepFailed", err)
+	}
+	if status.Status != "failed" {
+		t.Fatalf("status=%q want failed", status.Status)
+	}
+	builds := buildCalls(fc)
+	if len(builds) != 2 {
+		t.Fatalf("expected build to stop after worker (2 calls), got %d: %v", len(builds), builds)
+	}
+	last := status.Steps[len(status.Steps)-1]
+	if last.Name != UpdateModeBuild || last.Status != "failed" {
+		t.Fatalf("last step=%+v want failed build", last)
+	}
+	if !strings.Contains(last.Error, "worker") {
+		t.Errorf("error %q must name the failing service", last.Error)
+	}
+	if len(status.Steps) != 1 {
+		t.Errorf("expected only the build step, got %v", stepNames(status.Steps))
 	}
 }
 
