@@ -8,6 +8,18 @@ import { getSQLiteJobRecord, projectSQLiteJobRecord } from "./job-record.js";
 import { claimNextSQLiteJobRecord } from "./job-claim-record.js";
 import type { JobRecord, JobStore } from "../ports.js";
 
+// Bun 1.3.14 node:assert deepEqual treats two Invalid Date values as unequal
+// (1.4.2 accepts them), and the projection returns Invalid Date for infinities.
+// Compare Dates by time value, keeping Invalid Date distinct from any instant.
+function wire(value: unknown): unknown {
+  if (value instanceof Date) return { Date: Number.isNaN(value.getTime()) ? "Invalid Date" : value.getTime() };
+  if (Array.isArray(value)) return value.map(wire);
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, wire(item)]));
+  }
+  return value;
+}
+
 type Identical<A, B> =
   (<T>() => T extends A ? 1 : 2) extends (<T>() => T extends B ? 1 : 2)
     ? (<T>() => T extends B ? 1 : 2) extends (<T>() => T extends A ? 1 : 2)
@@ -118,9 +130,9 @@ async function unit() {
     assert.equal(got.createdAt.getTime(), 123000);
     assert(got.claimedAt instanceof Date);
     assert.equal(got.claimedAt.getTime(), got.startedAt!.getTime());
-    assert.deepEqual(got, projectSQLiteJobRecord(getSQLiteJobRow(db, originalID)!));
+    assert.deepEqual(wire(got), wire(projectSQLiteJobRecord(getSQLiteJobRow(db, originalID)!)));
     const reopened = openSQLite(path);
-    try { assert.deepEqual(getSQLiteJobRecord(reopened, originalID), got); }
+    try { assert.deepEqual(wire(getSQLiteJobRecord(reopened, originalID)), wire(got)); }
     finally { reopened.close(); }
     assert.deepEqual(getSQLiteJobRow(db, originalID), {
       ...original, status: "validating", claimed_at: getSQLiteJobRow(db, originalID)!.claimed_at,
@@ -172,7 +184,7 @@ async function unit() {
       const after = raw();
       assert.deepEqual(after, { ...before, status: "validating", claimed_at: after.claimed_at,
         started_at: started ?? after.claimed_at });
-      assert.deepEqual(got, projectSQLiteJobRecord(after));
+      assert.deepEqual(wire(got), wire(projectSQLiteJobRecord(after)));
       assert.equal(got.errorMessage, "retained 雪");
       assert.equal(got.snapshotContentHash, "");
       assert.equal(got.sourcePrimaryId, id(7));
@@ -277,7 +289,7 @@ async function unit() {
     (got.healthOutput as { healthy: boolean }).healthy = false;
     assert.deepEqual(raw(), before);
     const first = getSQLiteJobRecord(db, id(1))!, second = projectSQLiteJobRecord(before);
-    assert.deepEqual(first, second); assert.notEqual(first.createdAt, second.createdAt);
+    assert.deepEqual(wire(first), wire(second)); assert.notEqual(first.createdAt, second.createdAt);
     assert.notEqual(first.validationOutput, second.validationOutput);
     assert.notEqual(first.applyOutput, second.applyOutput); assert.notEqual(first.healthOutput, second.healthOutput);
   });

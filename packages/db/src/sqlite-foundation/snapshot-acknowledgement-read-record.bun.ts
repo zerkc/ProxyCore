@@ -42,7 +42,18 @@ function rawRow(): Record<string, unknown> {
   };
 }
 let checks = 0, scenarios = 0;
-function equal(actual: unknown, wanted: unknown) { assert.deepEqual(actual, wanted); checks++; }
+// Bun 1.3.14 node:assert deepEqual treats two Invalid Date values as unequal
+// (1.4.2 accepts them); out-of-range timestamps project to Invalid Date by design.
+// Compare Dates by time value, keeping Invalid Date distinct from any instant.
+function wire(value: unknown): unknown {
+  if (value instanceof Date) return { Date: Number.isNaN(value.getTime()) ? "Invalid Date" : value.getTime() };
+  if (Array.isArray(value)) return value.map(wire);
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, wire(item)]));
+  }
+  return value;
+}
+function equal(actual: unknown, wanted: unknown) { assert.deepEqual(wire(actual), wire(wanted)); checks++; }
 function ok(value: unknown) { assert.ok(value); checks++; }
 async function rejects(body: () => Promise<unknown>, wanted?: Error | RegExp) {
   await assert.rejects(body, error => {
