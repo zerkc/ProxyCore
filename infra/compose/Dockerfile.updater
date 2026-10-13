@@ -5,6 +5,8 @@
 # /var/run/docker.sock and the project's
 # compose.yaml to be mounted at runtime.
 FROM golang:1.25-alpine AS builder
+# Cap compiler CPU/heap so the build fits small (1 GB) nodes.
+ENV GOMAXPROCS=2 GOGC=50
 WORKDIR /src
 
 # Layer 1: deps (cached on go.mod/go.sum changes only).

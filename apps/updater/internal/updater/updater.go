@@ -286,15 +286,16 @@ func (u *Updater) Apply(ctx context.Context, targetVersion string) (*Status, err
 	}
 
 	updateStep := UpdateModePull
-	updateArgs := []string{"pull"}
 	if u.opts.UpdateMode == UpdateModeBuild {
 		updateStep = UpdateModeBuild
-		updateArgs = []string{"build"}
 	}
-	updateArgs = append(updateArgs, u.opts.Services...)
 	runStep(updateStep, func() (string, error) {
+		if u.opts.UpdateMode == UpdateModeBuild {
+			return u.buildSequentially(ctx)
+		}
 		args := append([]string{"compose"}, u.composeArgs()...)
-		args = append(args, updateArgs...)
+		args = append(args, "pull")
+		args = append(args, u.opts.Services...)
 		return u.opts.Exec(ctx, "docker", args...)
 	})
 	if lastStepFailed(steps) {
@@ -364,6 +365,27 @@ func (u *Updater) Apply(ctx context.Context, targetVersion string) (*Status, err
 	status.Status = "ok"
 	u.mu.Unlock()
 	return status, nil
+}
+
+// buildSequentially builds the configured services one at a time, in order.
+//
+// A single multi-service `compose build` runs the builds in parallel, which
+// exhausts small (1 GB RAM) nodes. Building serially keeps peak memory at one
+// image build. It stops at the first failure and names the failing service.
+// A service without a build section (it reuses another service's image) is a
+// no-op for compose, so it is safe to include in the list.
+func (u *Updater) buildSequentially(ctx context.Context) (string, error) {
+	var outs []string
+	for _, svc := range u.opts.Services {
+		args := append([]string{"compose"}, u.composeArgs()...)
+		args = append(args, "build", svc)
+		out, err := u.opts.Exec(ctx, "docker", args...)
+		if err != nil {
+			return strings.Join(append(outs, out), "\n"), fmt.Errorf("build %s: %w", svc, err)
+		}
+		outs = append(outs, out)
+	}
+	return strings.Join(outs, "\n"), nil
 }
 
 // preflightLegacyPostgres refuses the update when a legacy PostgreSQL data

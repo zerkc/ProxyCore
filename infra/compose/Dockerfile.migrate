@@ -9,6 +9,8 @@
 
 # Converter: the same static binary the api image ships as proxycore-convert.
 FROM golang:1.25-alpine AS convert
+# Cap compiler CPU/heap so the build fits small (1 GB) nodes.
+ENV GOMAXPROCS=2 GOGC=50
 WORKDIR /src
 
 # Layer 1: dependencies only.
