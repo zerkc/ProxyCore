@@ -239,6 +239,74 @@ esac
 run_legacy_check 0 0 >/dev/null || { printf 'fresh install was refused\n' >&2; exit 1; }
 run_legacy_check 1 1 >/dev/null || { printf 'converted install was refused\n' >&2; exit 1; }
 
+# The legacy volume name follows the compose project: environment first, then
+# the install .env (read as data, never sourced or printed), then proxycore.
+# The docker stub reports only $project_volume as present.
+project_legacy_output=''
+project_legacy_refused() {
+  project_volume=$1
+  project_env=$2
+  project_env_content=$3
+  project_home=$(mktemp -d "${TMPDIR:-/tmp}/proxycore-install-test.XXXXXX")
+  if [ -n "$project_env_content" ]; then
+    printf '%s\n' "$project_env_content" > "$project_home/.env"
+  fi
+  if project_legacy_output=$( (
+    unset COMPOSE_PROJECT_NAME
+    if [ -n "$project_env" ]; then
+      COMPOSE_PROJECT_NAME=$project_env
+      export COMPOSE_PROJECT_NAME
+    fi
+    PROXYCORE_INSTALL_NO_MAIN=1 . "$ROOT/scripts/install.sh"
+    PROXYCORE_HOME=$project_home
+    docker() {
+      # if-chain rather than case: bash 3.2 mis-parses case inside $( ( ... ) ).
+      if [ "$1 $2" = 'volume inspect' ]; then
+        [ "$3" = "$project_volume" ]
+      else
+        return 1
+      fi
+    }
+    refuse_unconverted_legacy_postgres
+  ) 2>&1 ); then
+    rm -rf "$project_home"
+    return 1
+  fi
+  rm -rf "$project_home"
+  return 0
+}
+
+# .env selects a non-default project: the refusal must name its volume.
+project_env_t69='COMPOSE_PROJECT_NAME=proxycore-t69
+POSTGRES_PASSWORD=sup3rS3cret-t69'
+project_legacy_refused proxycore-t69_postgres-data '' "$project_env_t69" \
+  || { printf '.env project did not trigger the legacy refusal\n' >&2; exit 1; }
+case "$project_legacy_output" in
+  *proxycore-t69_postgres-data*) ;;
+  *) printf 'legacy refusal does not name the .env project volume: %s\n' "$project_legacy_output" >&2; exit 1 ;;
+esac
+case "$project_legacy_output" in
+  *sup3rS3cret-t69*) printf 'legacy refusal printed a .env value\n' >&2; exit 1 ;;
+esac
+
+# The default volume is not the .env project's volume: no refusal.
+project_legacy_refused proxycore_postgres-data '' "$project_env_t69" \
+  && { printf 'default volume refused although .env selects another project\n' >&2; exit 1; }
+
+# The environment wins over .env.
+project_legacy_refused proxycore-env_postgres-data proxycore-env "$project_env_t69" \
+  || { printf 'environment project did not win over .env\n' >&2; exit 1; }
+
+# Without COMPOSE_PROJECT_NAME anywhere, the default project still refuses.
+project_legacy_refused proxycore_postgres-data '' 'POSTGRES_PASSWORD=unused-secret' \
+  || { printf 'default project did not trigger the legacy refusal\n' >&2; exit 1; }
+project_legacy_refused proxycore_postgres-data '' '' \
+  || { printf 'default project without .env did not trigger the legacy refusal\n' >&2; exit 1; }
+
+# Fresh install: no .env yet and no legacy volume is accepted without error.
+project_legacy_refused none '' '' \
+  && { printf 'fresh install with no .env was refused\n' >&2; exit 1; }
+
 # Operator-facing docs distinguish the direct enrollment socket from Nginx.
 contains "$ROOT/README.md" 'ENROLLMENT_PORT'
 contains "$ROOT/README.md" 'not Nginx proxy ingress'

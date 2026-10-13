@@ -316,8 +316,22 @@ random_b64() {
 # A legacy PostgreSQL install is detected by its named volume. It is only a
 # problem while no SQLite database exists yet: the converter never runs here
 # automatically and the volume is never touched.
+# The compose project decides the legacy volume name. It comes from the
+# environment, then from the install .env (read as data, never sourced or
+# printed; a missing .env is fine), then the default project.
+compose_project_name() {
+  project_name="${COMPOSE_PROJECT_NAME:-}"
+  if [ -z "$project_name" ] && [ -n "${PROXYCORE_HOME:-}" ] && [ -f "${PROXYCORE_HOME}/.env" ]; then
+    project_name=$(tr -d '\r' < "${PROXYCORE_HOME}/.env" \
+      | sed -n 's/^[[:space:]]*COMPOSE_PROJECT_NAME[[:space:]]*=[[:space:]]*//p' \
+      | sed -n '1p' \
+      | sed -e 's/^"\(.*\)"$/\1/' -e "s/^'\(.*\)'\$/\1/")
+  fi
+  printf '%s\n' "${project_name:-proxycore}"
+}
+
 legacy_postgres_unconverted() {
-  legacy_volume="${COMPOSE_PROJECT_NAME:-proxycore}_postgres-data"
+  legacy_volume="$(compose_project_name)_postgres-data"
   docker volume inspect "$legacy_volume" >/dev/null 2>&1 || return 1
   if docker compose run --rm --no-deps -T --entrypoint test api -f "$SQLITE_DB_PATH" >/dev/null 2>&1; then
     return 1
@@ -327,7 +341,7 @@ legacy_postgres_unconverted() {
 
 refuse_unconverted_legacy_postgres() {
   if legacy_postgres_unconverted; then
-    die "legacy PostgreSQL data found (volume ${COMPOSE_PROJECT_NAME:-proxycore}_postgres-data) and no SQLite database exists yet. Nothing was changed. Convert it offline first: cd ${PROXYCORE_HOME} && sh scripts/convert-postgres.sh (see docs/runbooks/upgrade-from-postgres.md), then run this installer again"
+    die "legacy PostgreSQL data found (volume $(compose_project_name)_postgres-data) and no SQLite database exists yet. Nothing was changed. Convert it offline first: cd ${PROXYCORE_HOME} && sh scripts/convert-postgres.sh (see docs/runbooks/upgrade-from-postgres.md), then run this installer again"
   fi
 }
 
@@ -449,8 +463,10 @@ main() {
   # not inside the sidecar container.
   export PROXYCORE_HOST_HOME="$(pwd)"
 
-  # Export compose project name for stable container names across updates.
-  export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-proxycore}"
+  # Export compose project name for stable container names across updates. The
+  # same resolution (environment, .env, default) drives the legacy volume check.
+  COMPOSE_PROJECT_NAME="$(compose_project_name)"
+  export COMPOSE_PROJECT_NAME
 
   # Compose reads .env itself. Export only the validated values this script
   # needs so explicit process environment values retain precedence.
