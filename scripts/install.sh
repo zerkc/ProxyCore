@@ -13,6 +13,11 @@
 #                      not Nginx proxy ingress)
 #   DNS_PORT           Published CoreDNS port (default: 53)
 #   SKIP_BUILD=1       Skip image rebuild (update config only)
+#   PROXYCORE_SKIP_MEMORY_CHECK=1
+#                      Silence the low-memory/swap warning shown before builds
+#   BUILDX_NO_DEFAULT_ATTESTATIONS
+#                      Defaults to 1 for the build phase (no provenance/SBOM
+#                      attestations); set it to 0 to keep them
 #
 # The script is idempotent: first run installs, later runs pull + recreate. The
 # api applies SQLite schema migrations on start. Installs that still hold a
@@ -31,6 +36,17 @@ ENROLLMENT_PORT="${ENROLLMENT_PORT-3443}"
 DNS_PORT="${DNS_PORT-53}"
 # Precedence is explicit process environment, then safe .env data, then defaults.
 SKIP_BUILD="${SKIP_BUILD:-0}"
+# Images are built one at a time (never concurrently) so peak memory stays at a
+# single image build, which matters on 1 GB hosts. These are the services with
+# a build section in compose.yaml, excluding the profile-gated `migrate`. The
+# shared runtime image is built once through `worker`; `control` only reuses it.
+# Order is fixed and documented: small images first, the heavy api (UI + Go) and
+# worker runtime images last. scripts/install.test.sh fails when this list
+# drifts from compose.yaml.
+BUILD_SERVICES="coredns nginx updater-bootstrap updater api worker"
+# Low-memory guard thresholds, in kB (as reported by /proc/meminfo).
+LOW_MEMORY_KB=1572864
+LOW_SWAP_KB=1048576
 # SQLite database path inside the api image (compose sqlite-data volume).
 SQLITE_DB_PATH=/var/lib/proxycore-db/proxycore.db
 
@@ -434,6 +450,56 @@ verify_coredns_published() {
   die "CoreDNS is running but host port ${DNS_PORT} is not published (ports=${ports:-none})"
 }
 
+# Warn (never fail, never change the system) when the host is likely to be slow
+# or OOM-killed while building. Silent where /proc/meminfo does not exist.
+check_build_memory() {
+  [ "${PROXYCORE_SKIP_MEMORY_CHECK:-0}" = "1" ] && return 0
+  meminfo="${PROXYCORE_MEMINFO_PATH:-/proc/meminfo}"
+  [ -r "$meminfo" ] || return 0
+  mem_kb=$(awk '/^MemTotal:/ { print $2; exit }' "$meminfo" 2>/dev/null || true)
+  swap_kb=$(awk '/^SwapTotal:/ { print $2; exit }' "$meminfo" 2>/dev/null || true)
+  case "$mem_kb" in ''|*[!0-9]*) return 0 ;; esac
+  case "$swap_kb" in ''|*[!0-9]*) swap_kb=0 ;; esac
+  if [ "$mem_kb" -lt "$LOW_MEMORY_KB" ] && [ "$swap_kb" -lt "$LOW_SWAP_KB" ]; then
+    warn "low memory host (RAM $((mem_kb / 1024)) MB, swap $((swap_kb / 1024)) MB): image builds may be very slow or be killed by the OOM killer. Add at least 1 GB of swap first, for example: sudo fallocate -l 1G /swapfile && sudo chmod 600 /swapfile && sudo mkswap /swapfile && sudo swapon /swapfile (this script never changes swap). Set PROXYCORE_SKIP_MEMORY_CHECK=1 to silence this warning"
+  fi
+  return 0
+}
+
+# Build every service in BUILD_SERVICES one at a time with progress output.
+build_services() {
+  : "${BUILDX_NO_DEFAULT_ATTESTATIONS:=1}"
+  export BUILDX_NO_DEFAULT_ATTESTATIONS
+  build_total=0
+  for svc in $BUILD_SERVICES; do
+    build_total=$((build_total + 1))
+  done
+  build_index=0
+  for svc in $BUILD_SERVICES; do
+    build_index=$((build_index + 1))
+    log "[${build_index}/${build_total}] building ${svc}"
+    build_start=$(date +%s)
+    if ! docker compose build "$svc"; then
+      die "build of service '${svc}' failed; nothing was started. Retry with: docker compose build ${svc} (then run this installer again)"
+    fi
+    build_end=$(date +%s)
+    log "[${build_index}/${build_total}] built ${svc} in $((build_end - build_start))s"
+  done
+}
+
+deploy_stack() {
+  if [ "$SKIP_BUILD" = "1" ]; then
+    log "Recreating services (no rebuild)"
+    docker compose up -d --remove-orphans
+  else
+    check_build_memory
+    log "Building images one at a time (Go API + Vite SPA; first build can take a long time on small hosts)"
+    build_services
+    log "Starting services (nginx host network)"
+    docker compose up -d --remove-orphans
+  fi
+}
+
 main() {
   validate_runtime_values
 
@@ -477,13 +543,7 @@ main() {
   log "Checking for unconverted legacy PostgreSQL data"
   refuse_unconverted_legacy_postgres
 
-  if [ "$SKIP_BUILD" = "1" ]; then
-    log "Recreating services (no rebuild)"
-    docker compose up -d --remove-orphans
-  else
-    log "Building and starting services (Go API + Vite SPA; nginx host network)"
-    docker compose up -d --build --remove-orphans
-  fi
+  deploy_stack
 
   log "Verifying CoreDNS is published on host port ${DNS_PORT}"
   verify_coredns_published

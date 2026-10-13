@@ -311,3 +311,160 @@ project_legacy_refused none '' '' \
 contains "$ROOT/README.md" 'ENROLLMENT_PORT'
 contains "$ROOT/README.md" 'not Nginx proxy ingress'
 contains "$ROOT/docs/runbooks/primary-node.md" 'NODE trust entry/import is deferred to preview'
+
+# Sequential build: every buildable service is built on its own, in a fixed
+# order, then `up` runs once without --build. The docker stub records calls.
+CALLS_DIR=$(mktemp -d "${TMPDIR:-/tmp}/proxycore-install-calls.XXXXXX")
+trap 'rm -rf "$CALLS_DIR"' EXIT HUP INT TERM
+
+# run_deploy <skip_build> [failing_service] [attestations: unset|<value>]
+# Prints the recorded docker calls and installer output; returns the exit code.
+run_deploy() {
+  deploy_skip=$1
+  deploy_fail=${2:-}
+  deploy_att=${3:-unset}
+  : > "$CALLS_DIR/calls"
+  (
+    PROXYCORE_INSTALL_NO_MAIN=1 . "$ROOT/scripts/install.sh"
+    SKIP_BUILD=$deploy_skip
+    PROXYCORE_SKIP_MEMORY_CHECK=1
+    unset BUILDX_NO_DEFAULT_ATTESTATIONS
+    if [ "$deploy_att" != unset ]; then
+      BUILDX_NO_DEFAULT_ATTESTATIONS=$deploy_att
+      export BUILDX_NO_DEFAULT_ATTESTATIONS
+    fi
+    docker() {
+      printf 'docker %s att=%s\n' "$*" "${BUILDX_NO_DEFAULT_ATTESTATIONS:-unset}" >> "$CALLS_DIR/calls"
+      if [ "$1 $2" = 'compose build' ] && [ "$3" = "$deploy_fail" ]; then
+        return 1
+      fi
+      return 0
+    }
+    deploy_stack
+  ) 2>&1
+}
+
+expected_services='coredns nginx updater-bootstrap updater api worker'
+
+output=$(run_deploy 0) || { printf 'sequential deploy failed: %s\n' "$output" >&2; exit 1; }
+built=$(sed -n 's/^docker compose build \([^ ]*\) att=.*/\1/p' "$CALLS_DIR/calls" | tr '\n' ' ')
+[ "$built" = "$expected_services " ] || {
+  printf 'unexpected build order: %s\n' "$built" >&2
+  exit 1
+}
+if grep -Fq -- '--build' "$CALLS_DIR/calls"; then
+  printf 'up must not use --build\n' >&2
+  exit 1
+fi
+[ "$(grep -c '^docker compose up ' "$CALLS_DIR/calls")" -eq 1 ] || {
+  printf 'up must run exactly once\n' >&2
+  exit 1
+}
+grep -Fq 'docker compose up -d --remove-orphans att=' "$CALLS_DIR/calls" || {
+  printf 'unexpected up invocation\n' >&2
+  exit 1
+}
+[ "$(sed -n '$p' "$CALLS_DIR/calls" | cut -c1-17)" = 'docker compose up' ] || {
+  printf 'up must run after every build\n' >&2
+  exit 1
+}
+case "$output" in
+  *'[1/6] building coredns'*'[6/6] building worker'*) ;;
+  *) printf 'missing progress lines: %s\n' "$output" >&2; exit 1 ;;
+esac
+case "$output" in
+  *'built coredns in '*s*) ;;
+  *) printf 'missing elapsed time line: %s\n' "$output" >&2; exit 1 ;;
+esac
+
+# Attestations default to off, and a preset value is never overridden.
+grep -Fq 'compose build api att=1' "$CALLS_DIR/calls" || {
+  printf 'attestations were not disabled by default\n' >&2
+  exit 1
+}
+run_deploy 0 '' 0 >/dev/null
+grep -Fq 'compose build api att=0' "$CALLS_DIR/calls" || {
+  printf 'preset BUILDX_NO_DEFAULT_ATTESTATIONS was overridden\n' >&2
+  exit 1
+}
+
+# SKIP_BUILD=1 keeps the old behavior: no build, one up.
+run_deploy 1 >/dev/null || { printf 'SKIP_BUILD deploy failed\n' >&2; exit 1; }
+if grep -Fq 'compose build' "$CALLS_DIR/calls"; then
+  printf 'SKIP_BUILD=1 must not build\n' >&2
+  exit 1
+fi
+[ "$(grep -c '^docker compose up -d --remove-orphans' "$CALLS_DIR/calls")" -eq 1 ] || {
+  printf 'SKIP_BUILD=1 must run up once\n' >&2
+  exit 1
+}
+
+# A failed build stops before up, names the service, and exits non-zero.
+if output=$(run_deploy 0 updater); then
+  printf 'failed build did not stop the install\n' >&2
+  exit 1
+fi
+if grep -Fq 'compose up' "$CALLS_DIR/calls"; then
+  printf 'up ran after a failed build\n' >&2
+  exit 1
+fi
+if grep -Fq 'compose build api' "$CALLS_DIR/calls"; then
+  printf 'builds continued after a failure\n' >&2
+  exit 1
+fi
+case "$output" in
+  *'updater'*'docker compose build updater'*) ;;
+  *) printf 'failure message does not name the service/retry: %s\n' "$output" >&2; exit 1 ;;
+esac
+
+# The ordered list must match the services that carry a build section in
+# compose.yaml (profile-gated `migrate` excluded; `control` reuses worker's image).
+compose_buildable=$(awk '
+  /^services:/ { in_services = 1; next }
+  /^[a-z]/ { in_services = 0 }
+  in_services && /^  [a-z][a-z0-9-]*:[[:space:]]*$/ { svc = $1; sub(":", "", svc); next }
+  in_services && /^    build:/ { print svc }
+' "$ROOT/compose.yaml" | grep -vx migrate | sort | tr '\n' ' ')
+listed=$(printf '%s\n' $expected_services | sort | tr '\n' ' ')
+[ "$compose_buildable" = "$listed" ] || {
+  printf 'BUILD_SERVICES drifted from compose.yaml: compose=[%s] list=[%s]\n' "$compose_buildable" "$listed" >&2
+  exit 1
+}
+(
+  PROXYCORE_INSTALL_NO_MAIN=1 . "$ROOT/scripts/install.sh"
+  [ "$BUILD_SERVICES" = "$expected_services" ]
+) || { printf 'install.sh BUILD_SERVICES differs from the expected order\n' >&2; exit 1; }
+
+# Low-memory guard: warns on a small host without swap, never fails, and can
+# be silenced. /proc/meminfo is replaced through PROXYCORE_MEMINFO_PATH.
+run_memory_check() {
+  mem_total=$1
+  mem_swap=$2
+  mem_skip=${3:-0}
+  mem_file="$CALLS_DIR/meminfo"
+  printf 'MemTotal:       %s kB\nMemFree: 1 kB\nSwapTotal:      %s kB\n' "$mem_total" "$mem_swap" > "$mem_file"
+  (
+    PROXYCORE_INSTALL_NO_MAIN=1 . "$ROOT/scripts/install.sh"
+    PROXYCORE_MEMINFO_PATH=$mem_file
+    PROXYCORE_SKIP_MEMORY_CHECK=$mem_skip
+    check_build_memory
+  ) 2>&1
+}
+output=$(run_memory_check 920000 0) || { printf 'memory check must never fail\n' >&2; exit 1; }
+case "$output" in
+  *swap*) ;;
+  *) printf 'low-memory host did not warn: %s\n' "$output" >&2; exit 1 ;;
+esac
+output=$(run_memory_check 920000 0 1)
+[ -z "$output" ] || { printf 'PROXYCORE_SKIP_MEMORY_CHECK=1 did not silence the check: %s\n' "$output" >&2; exit 1; }
+output=$(run_memory_check 920000 2097152)
+[ -z "$output" ] || { printf 'host with enough swap warned: %s\n' "$output" >&2; exit 1; }
+output=$(run_memory_check 8000000 0)
+[ -z "$output" ] || { printf 'host with enough RAM warned: %s\n' "$output" >&2; exit 1; }
+output=$(
+  PROXYCORE_INSTALL_NO_MAIN=1 . "$ROOT/scripts/install.sh"
+  PROXYCORE_MEMINFO_PATH=/path/that/does/not/exist
+  PROXYCORE_SKIP_MEMORY_CHECK=0
+  check_build_memory
+) 2>&1
+[ -z "$output" ] || { printf 'missing meminfo must be silent: %s\n' "$output" >&2; exit 1; }
