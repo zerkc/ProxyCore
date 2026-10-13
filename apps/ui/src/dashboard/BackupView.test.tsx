@@ -153,6 +153,9 @@ describe("BackupView export", () => {
       (init.headers as Record<string, string>)["X-Proxycore-Backup-Passphrase"],
     ).toBeTruthy();
     expect(clicked).toEqual(["backup-1.zip"]);
+    // The blob URL must outlive the click: revoking it synchronously can
+    // leave the browser with an empty download.
+    expect(URL.revokeObjectURL).not.toHaveBeenCalled();
     expect(byRole(container, "status")[0]!.textContent).toContain(
       "Backup exported",
     );
