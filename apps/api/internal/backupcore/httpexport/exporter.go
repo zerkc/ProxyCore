@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"strings"
 	"time"
@@ -118,48 +119,66 @@ func exportBundle(ctx context.Context, w io.Writer, passphrase []byte, cfg bundl
 		return "", errors.New("httpexport: incomplete identity")
 	}
 
-	zw, err := zipwriter.OpenEncrypted(w, passphrase, zipwriter.WithAggregateLimit(aggregateLimit))
-	if err != nil {
-		return "", fmt.Errorf("open backup archive: %w", err)
-	}
-	closed := false
-	defer func() {
-		if !closed {
-			_ = zw.Close()
-		}
-	}()
-
-	entries := &dbWriter{zw: zw, manifest: &manifest}
+	// Every host read that can fail runs before the archive is opened, so a
+	// failure here leaves the output untouched and the caller can still answer
+	// with an error instead of a truncated or empty archive.
 	host := cfg.Host
 	envFile, err := host.EnvFile(ctx)
-	if err != nil {
+	envPresent := true
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		// A host without a readable .env (for example a container that does not
+		// mount it) is exported without the env entry.
+		envFile, envPresent = backupcore.NamedFile{}, false
+	case err != nil:
 		return "", fmt.Errorf("read env snapshot: %w", err)
 	}
 	masterKeyBase64, err := resolveMasterKey(cfg.MasterKeyBase64, envFile)
 	if err != nil {
 		return "", err
 	}
-	if err := entries.Add(envFile.Path, envFile.Size, envFile.Open); err != nil {
-		return "", fmt.Errorf("write env snapshot: %w", err)
-	}
-	manifest.EnvPresent = true
-
+	var certFiles []backupcore.NamedFile
 	appliedRevision, err := host.AppliedRevision(ctx)
 	if err != nil {
 		if !errors.Is(err, hostread.ErrNoAppliedRevision) {
 			return "", fmt.Errorf("read applied revision: %w", err)
 		}
 	} else {
-		certFiles, certErr := host.AppliedCertFiles(ctx, appliedRevision)
-		if certErr != nil {
-			return "", fmt.Errorf("read applied certificates: %w", certErr)
+		certFiles, err = host.AppliedCertFiles(ctx, appliedRevision)
+		if err != nil {
+			return "", fmt.Errorf("read applied certificates: %w", err)
 		}
-		for _, certFile := range certFiles {
-			if err := entries.Add(certFile.Path, certFile.Size, certFile.Open); err != nil {
-				return "", fmt.Errorf("write certificate %q: %w", certFile.Path, err)
-			}
-			manifest.Certs = append(manifest.Certs, certFile.Path)
+	}
+
+	zw, err := zipwriter.OpenEncrypted(w, passphrase, zipwriter.WithAggregateLimit(aggregateLimit))
+	if err != nil {
+		return "", fmt.Errorf("open backup archive: %w", err)
+	}
+	closed := false
+	defer func() {
+		if closed {
+			return
 		}
+		// A failed export must not write the archive footer onto the output.
+		if aborter, ok := zw.(interface{ Abort() error }); ok {
+			_ = aborter.Abort()
+			return
+		}
+		_ = zw.Close()
+	}()
+
+	entries := &dbWriter{zw: zw, manifest: &manifest}
+	if envPresent {
+		if err := entries.Add(envFile.Path, envFile.Size, envFile.Open); err != nil {
+			return "", fmt.Errorf("write env snapshot: %w", err)
+		}
+	}
+	manifest.EnvPresent = envPresent
+	for _, certFile := range certFiles {
+		if err := entries.Add(certFile.Path, certFile.Size, certFile.Open); err != nil {
+			return "", fmt.Errorf("write certificate %q: %w", certFile.Path, err)
+		}
+		manifest.Certs = append(manifest.Certs, certFile.Path)
 	}
 
 	databaseReport, err := cfg.ExportDB(ctx, entries, now, masterKeyBase64)

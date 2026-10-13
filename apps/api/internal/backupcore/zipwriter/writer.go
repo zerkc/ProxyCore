@@ -135,6 +135,18 @@ func (w *writer) Close() error {
 	return w.closeErr
 }
 
+// Abort discards the archive without writing the ZIP footer or closing the
+// output. It is used when the export fails, so a truncated stream is never a
+// well-formed archive. Abort after Close is a no-op.
+func (w *writer) Abort() error {
+	if w.closed {
+		return nil
+	}
+	w.closed = true
+	w.closeErr = errWriterClosed
+	return nil
+}
+
 func exceeds(current, addition, limit int64) bool {
 	if current > limit {
 		return true

@@ -615,3 +615,34 @@ func TestSQLiteBackupImporterRejectsAPostgresEraBundleWithUnknownColumn(t *testi
 		t.Fatal("database changed after rejecting the bundle")
 	}
 }
+
+func TestSQLiteBackupImporterAcceptsABundleWithoutEnv(t *testing.T) {
+	fixture := newSQLiteBundleFixture(t)
+	fixture.exporter.HostConfig.EnvPath = filepath.Join(t.TempDir(), "missing.env")
+	bundle := exportSQLiteBundle(t, fixture, nil)
+	target := populatedTarget(t)
+	h := newImporterHarness(t, target, sqliteMasterKey)
+	const original = "PROXYCORE_KEEP=1\n"
+	if err := os.WriteFile(h.envPath, []byte(original), 0o600); err != nil {
+		t.Fatalf("seed env: %v", err)
+	}
+
+	dry, err := h.run(t, bundle, nil, true, sqliteOwnerID)
+	if err != nil {
+		t.Fatalf("dry run: %v", err)
+	}
+	if dry.EnvWouldChange {
+		t.Fatal("dry run reports envWouldChange for an env-less bundle")
+	}
+	report, err := h.run(t, bundle, nil, false, sqliteOwnerID)
+	if err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	if report.DryRun || report.EnvWouldChange {
+		t.Fatalf("report = %+v", report)
+	}
+	got, err := os.ReadFile(h.envPath)
+	if err != nil || string(got) != original {
+		t.Fatalf("host env changed: %q, %v", got, err)
+	}
+}

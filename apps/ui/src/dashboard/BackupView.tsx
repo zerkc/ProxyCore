@@ -105,6 +105,14 @@ export function BackupView() {
             Optionally protect secrets in the bundle with a passphrase. You will
             need the same passphrase to restore it.
           </p>
+          <p
+            className="mt-2 max-w-2xl text-sm leading-6 text-mute"
+            data-testid="backup-export-env-note"
+          >
+            The bundle includes the host .env only when the API can read it.
+            Keep your .env (ports, ACME and ingress settings, master key) backed
+            up separately.
+          </p>
         </div>
         <div className="max-w-md">
           <PasswordInput

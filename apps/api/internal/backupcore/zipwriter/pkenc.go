@@ -129,6 +129,25 @@ func (w *encryptedWriter) Close() error {
 	return w.closeErr
 }
 
+// Abort drops the spooled archive and key material without emitting the
+// envelope or closing the output. Abort after Close is a no-op.
+func (w *encryptedWriter) Abort() error {
+	if w.closed {
+		return nil
+	}
+	w.closed = true
+	w.closeErr = errEncryptedWriterClosed
+	if aborter, ok := w.archive.(interface{ Abort() error }); ok {
+		_ = aborter.Abort()
+	}
+	err := w.cleanup()
+	wipe(w.salt)
+	wipe(w.headerNonce)
+	wipe(w.verifier)
+	wipe(w.bodyKey)
+	return err
+}
+
 func (w *encryptedWriter) writeEnvelope() error {
 	stat, err := w.spool.Stat()
 	if err != nil {

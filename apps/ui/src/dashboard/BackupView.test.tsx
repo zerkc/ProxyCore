@@ -126,6 +126,14 @@ afterEach(() => {
 });
 
 describe("BackupView export", () => {
+  it("explains that the host .env is only bundled when the API can read it", async () => {
+    const container = await mount(view());
+    const note = byTestId(container, "backup-export-env-note");
+    expect(note).toBeDefined();
+    expect(note!.textContent).toContain("only when the API can read it");
+    expect(note!.textContent).toContain("backed up separately");
+  });
+
   it("downloads the bundle with the server filename and reports success", async () => {
     const fetchMock = queueFetch(
       new Response("zip", {

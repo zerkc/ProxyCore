@@ -318,8 +318,10 @@ func TestSQLiteBackupExporterRejectsInvalidSetup(t *testing.T) {
 	}
 	noEnv := *fixture.exporter
 	noEnv.HostConfig.EnvPath = filepath.Join(t.TempDir(), "missing.env")
-	if _, _, err := export(&noEnv); err == nil {
-		t.Error("missing env file accepted")
+	noEnv.MasterKeyBase64 = ""
+	t.Setenv("PROXYCORE_MASTER_KEY_BASE64", "")
+	if _, n, err := export(&noEnv); err == nil || n != 0 {
+		t.Errorf("missing env file and master key: err=%v bytes=%d", err, n)
 	}
 	badKey := *fixture.exporter
 	badKey.MasterKeyBase64 = "not-a-key"
@@ -338,5 +340,87 @@ func TestSQLiteBackupExporterFailsOnClosedDatabaseAndCanceledContext(t *testing.
 	fixture.db.Close()
 	if _, err := fixture.exporter.Export(context.Background(), &bytes.Buffer{}, nil); err == nil {
 		t.Fatal("closed database accepted")
+	}
+}
+
+func TestSQLiteBackupExporterWithoutEnvFileOmitsEnvEntry(t *testing.T) {
+	for name, passphrase := range map[string][]byte{"raw": nil, "encrypted": []byte("correct horse battery staple")} {
+		t.Run(name, func(t *testing.T) {
+			fixture := newSQLiteBundleFixture(t)
+			fixture.exporter.HostConfig.EnvPath = filepath.Join(t.TempDir(), "missing.env")
+			var bundle bytes.Buffer
+			digest, err := fixture.exporter.Export(context.Background(), &bundle, passphrase)
+			if err != nil {
+				t.Fatalf("Export: %v", err)
+			}
+			if bundle.Len() <= 139 {
+				t.Fatalf("bundle is only %d bytes", bundle.Len())
+			}
+			files := openSQLiteBundle(t, bundle.Bytes(), passphrase)
+			if _, ok := files["env/env"]; ok {
+				t.Fatal("bundle contains env/env although the host env file does not exist")
+			}
+			manifest := validateBundleLikeImporter(t, files, digest)
+			if manifest.EnvPresent {
+				t.Fatalf("manifest.EnvPresent = true")
+			}
+			if _, ok := files["db/users.json"]; !ok {
+				t.Fatal("bundle misses database tables")
+			}
+		})
+	}
+}
+
+type failingHost struct {
+	env      backupcore.NamedFile
+	envErr   error
+	revision string
+	revErr   error
+	certErr  error
+}
+
+func (h failingHost) EnvFile(context.Context) (backupcore.NamedFile, error) { return h.env, h.envErr }
+func (h failingHost) AppliedRevision(context.Context) (string, error)       { return h.revision, h.revErr }
+func (h failingHost) AppliedCertFiles(context.Context, string) ([]backupcore.NamedFile, error) {
+	return nil, h.certErr
+}
+
+func TestExportBundleWritesNothingWhenFailureHappensBeforeStreaming(t *testing.T) {
+	okDB := func(context.Context, dbexport.ZipWriter, func() time.Time, string) (dbexport.ExportReport, error) {
+		return dbexport.ExportReport{}, nil
+	}
+	envBody := backupcore.NamedFile{Path: "env/env", Size: 4, Open: func() (io.ReadCloser, error) {
+		return io.NopCloser(strings.NewReader("a=b\n")), nil
+	}}
+	denied := errors.New("permission denied")
+	cases := map[string]bundleConfig{
+		"env permission": {Host: failingHost{envErr: denied}},
+		"revision":       {Host: failingHost{env: envBody, revErr: denied}},
+		"certs":          {Host: failingHost{env: envBody, revision: "rev", certErr: denied}},
+		"no master key":  {MasterKeyBase64: "", Host: failingHost{envErr: os.ErrNotExist, revErr: hostread.ErrNoAppliedRevision}},
+		"database export": {Host: failingHost{env: envBody, revErr: hostread.ErrNoAppliedRevision}, ExportDB: func(context.Context, dbexport.ZipWriter, func() time.Time, string) (dbexport.ExportReport, error) {
+			return dbexport.ExportReport{}, errors.New("db down")
+		}},
+	}
+	for name, cfg := range cases {
+		for _, passphrase := range [][]byte{nil, []byte("pass phrase")} {
+			t.Run(name, func(t *testing.T) {
+				t.Setenv("PROXYCORE_MASTER_KEY_BASE64", "")
+				cfg.Identity = staticIdentitySource{}
+				if cfg.MasterKeyBase64 == "" && name != "no master key" {
+					cfg.MasterKeyBase64 = sqliteMasterKey
+				}
+				if cfg.ExportDB == nil {
+					cfg.ExportDB = okDB
+				}
+				var out bytes.Buffer
+				if _, err := exportBundle(context.Background(), &out, passphrase, cfg); err == nil {
+					t.Fatal("export succeeded")
+				}
+				if out.Len() != 0 {
+					t.Fatalf("wrote %d bytes to the output before failing", out.Len())
+				}
+			})
+		}
 	}
 }

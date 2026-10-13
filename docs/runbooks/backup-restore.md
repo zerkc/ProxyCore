@@ -4,8 +4,9 @@
 
 ProxyCore can export the configuration required to rebuild an installation into
 one ZIP bundle and restore that bundle through the Owner-only API. The bundle
-contains the configuration tables, the deployed `.env`, and certificates from
-the latest applied candidate. It is intended for disaster recovery on the same
+contains the configuration tables, the deployed `.env` when the API can read
+it (see [The host `.env`](#the-host-env)), and certificates from the latest
+applied candidate. It is intended for disaster recovery on the same
 host or on a clean host with the same installation identity and master key.
 
 The API streams the ZIP; it does not keep a server-side backup file. In the
@@ -64,6 +65,24 @@ byte-preserving encoder; the final header value must still be base64url.
 The response body is the ZIP. Verify that the file exists and protect it before
 moving it to the backup store. A passphrase-protected bundle must be imported
 with the same passphrase.
+
+### The host `.env`
+
+The bundle includes `env/env` only when the API process can read the host
+`.env` file. In the stock compose deployment the `api` container cannot read
+it (the file is not mounted and `PROXYCORE_HOST_HOME` is not set), so the
+export succeeds without it: the manifest reports `envPresent: false` and the
+archive has no `env/env` entry. The master key still comes from the runtime
+configuration, and the database tables are exported either way.
+
+Keep your own copy of the host `.env` (ports, ACME and ingress settings, master
+key) in the protected backup location. Restoring on a new host then requires
+the same `PROXYCORE_MASTER_KEY_BASE64` plus your own `.env`. Importing a bundle
+without `env/env` succeeds, reports `envWouldChange: false`, and leaves the
+target host's `.env` untouched. If the export fails before streaming starts
+(for example the `.env` exists but is unreadable, or no master key is
+configured), the API answers HTTP 500 with `{"error":"backup export failed"}`
+and logs the cause; it never returns an empty ZIP.
 
 ## Dry-run import
 
