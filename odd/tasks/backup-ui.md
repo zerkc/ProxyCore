@@ -38,15 +38,19 @@ Test-first: RED then GREEN with vitest (runner available, offline).
 - [x] **BU-2 — BackupView + wiring**: `apps/ui/src/dashboard/BackupView.tsx` (+ test), route in `App.tsx`, nav entry in `nav.ts`, icon in `DashboardShell.tsx`. Flow: pick file -> dry-run preview table -> confirm -> real import -> redirect to login.
 - [x] **BU-3 — Docs and stale text**: runbook UI section (`docs/runbooks/backup-restore.md`), fix stale "intentionally NOT wired" comment (`apps/api/cmd/server/sqlite_runtime.go:119-122`, `sqlite_runtime_test.go:140`), mark backend FB-* state in `full-backup-export-import.md`.
 
+- [x] **BU-4 — Export returns an empty ZIP when `.env` is unreadable (bug found validating in Docker)**: in the stock compose deployment the `api` container has no `.env` (no `PROXYCORE_HOST_HOME`, no mount), so `exportBundle` fails reading the env snapshot *after* `zipwriter.OpenEncrypted` opened the archive on the live response; the deferred `Close()` writes an empty-ZIP footer and the handler answers 200 with a 22-byte file. Decision (user): export WITHOUT the `.env` when it does not exist (`manifest.EnvPresent=false`; the master key comes from the runtime config, DB tables carry the rest). Required: (a) missing `.env` is not an error; (b) any other failure before the first byte yields a 500 JSON, never a 200 ZIP; no archive footer is written on the failure path; (c) the handler logs the underlying error (no secrets); (d) importing an env-less bundle works (`envWouldChange=false`, env untouched); (e) UI/runbook note that the host `.env` (ports, ACME, ingress settings, master key) is not part of the bundle when the API cannot read it. Strict TDD (RED on the 22-byte case first).
+
 ## Route declaration
 - Exploration: delegated (2 read-only explorers: backend verification, UI mapping) — mapping trigger.
 - BU-1..BU-3: delegated, one bounded writer (2+ non-trivial files).
+- BU-4: diagnosis delegated (Docker reproduction, evidence: 22-byte vs 4035-byte ZIP with/without `/app/.env`); implementation delegated to one writer (2+ non-trivial files).
 
 ## Progress
 - Branch `feat/backup-ui` created from `main`.
 - BU-1 done: commit 875e173 (API client + tests in `api.test.ts`).
 - BU-2 done: commit 1605b24 (`BackupView`, route, nav, icon, tests).
 - BU-3 done: runbook UI section, stale comments fixed, cross-reference note (commit f99dcdb).
+- BU-4 done: commit e742cc2. Host reads moved before `OpenEncrypted`; missing `.env` -> `envPresent=false`; zipwriter `Abort()` (raw + encrypted) used on failure so no footer is written; handler logs cause. RED observed (22/139-byte output, missing log cause, missing UI note), then GREEN. Docker (isolated image/volume): no-.env export 200, 3764 B, no `env/env`; dry-run import `envWouldChange=false`; forced stat failure (symlink loop) -> 500 `{"error":"backup export failed"}` with cause logged.
 
 ## Verification evidence
 - Backend: `go vet` clean; `go test -short -timeout 300s ./internal/httpserver/... ./internal/backupcore/... ./cmd/server/...` all pass (non-short suite not run).
