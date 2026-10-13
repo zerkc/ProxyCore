@@ -46,7 +46,7 @@ Test-first: RED then GREEN with vitest (runner available, offline).
 - Branch `feat/backup-ui` created from `main`.
 - BU-1 done: commit 875e173 (API client + tests in `api.test.ts`).
 - BU-2 done: commit 1605b24 (`BackupView`, route, nav, icon, tests).
-- BU-3 done: runbook UI section, stale comments fixed, cross-reference note (see commit below).
+- BU-3 done: runbook UI section, stale comments fixed, cross-reference note (commit f99dcdb).
 
 ## Verification evidence
 - Backend: `go vet` clean; `go test -short -timeout 300s ./internal/httpserver/... ./internal/backupcore/... ./cmd/server/...` all pass (non-short suite not run).
