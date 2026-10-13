@@ -155,6 +155,8 @@ services:
       context: .
       dockerfile: infra/compose/Dockerfile.runtime
     image: proxycore-runtime:local
+    # Built locally only; never pull it from a registry.
+    pull_policy: never
     command: ["bun", "run", "worker"]
     environment:
       NODE_ENV: production
@@ -192,7 +194,10 @@ services:
 
   control:
     # No build section: reuses the image built by the worker service.
+    # pull_policy never: the image exists only locally, so compose must not try
+    # a registry pull (it only prints a misleading "pull access denied").
     image: proxycore-runtime:local
+    pull_policy: never
     command: ["bun", "run", "control"]
     environment:
       NODE_ENV: production
