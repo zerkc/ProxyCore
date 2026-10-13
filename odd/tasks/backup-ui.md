@@ -36,14 +36,17 @@ Test-first: RED then GREEN with vitest (runner available, offline).
 ## Tasks
 - [x] **BU-1 — API client**: `exportBackup(passphrase?)` returning `{blob, filename}`, `importBackup(file, {passphrase, dryRun})` returning `ImportReport`, typed `BackupApiError` with kind (`master_key_mismatch`, `passphrase_required`, `passphrase_mismatch`, `invalid_bundle`, `too_large`, `unavailable`, `forbidden`, `unknown`), base64url passphrase encoding. Tests in `api.test.ts` (or `backupApi.test.ts`).
 - [x] **BU-2 — BackupView + wiring**: `apps/ui/src/dashboard/BackupView.tsx` (+ test), route in `App.tsx`, nav entry in `nav.ts`, icon in `DashboardShell.tsx`. Flow: pick file -> dry-run preview table -> confirm -> real import -> redirect to login.
-- [ ] **BU-3 — Docs and stale text**: runbook UI section (`docs/runbooks/backup-restore.md`), fix stale "intentionally NOT wired" comment (`apps/api/cmd/server/sqlite_runtime.go:119-122`, `sqlite_runtime_test.go:140`), mark backend FB-* state in `full-backup-export-import.md`.
+- [x] **BU-3 — Docs and stale text**: runbook UI section (`docs/runbooks/backup-restore.md`), fix stale "intentionally NOT wired" comment (`apps/api/cmd/server/sqlite_runtime.go:119-122`, `sqlite_runtime_test.go:140`), mark backend FB-* state in `full-backup-export-import.md`.
 
 ## Route declaration
 - Exploration: delegated (2 read-only explorers: backend verification, UI mapping) — mapping trigger.
 - BU-1..BU-3: delegated, one bounded writer (2+ non-trivial files).
 
 ## Progress
-- Branch `feat/backup-ui` created from `main`. No tasks started.
+- Branch `feat/backup-ui` created from `main`.
+- BU-1 done: commit 875e173 (API client + tests in `api.test.ts`).
+- BU-2 done: commit 1605b24 (`BackupView`, route, nav, icon, tests).
+- BU-3 done: runbook UI section, stale comments fixed, cross-reference note (see commit below).
 
 ## Verification evidence
 - Backend: `go vet` clean; `go test -short -timeout 300s ./internal/httpserver/... ./internal/backupcore/... ./cmd/server/...` all pass (non-short suite not run).
@@ -52,4 +55,4 @@ Test-first: RED then GREEN with vitest (runner available, offline).
 - Strategy: ask-on-risk (default). Forecast well under 400 authored changed lines per task.
 
 ## Next step
-Launch writer for BU-1.
+Review and delivery decision (push/PR remain user decisions).

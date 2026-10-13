@@ -1,5 +1,7 @@
 # Full Configuration Export/Import (Disaster Recovery ZIP)
 
+> **Status note:** the backend of this feature shipped on SQLite (export/import wired through `backupOptions` when a master key is configured). The dashboard UI that was out of scope here is tracked in `odd/tasks/backup-ui.md`. The history below is left unchanged.
+
 ## Objective
 
 Provide Owner-authenticated ZIP export/import of every configuration ProxyCore needs to fully restore on the same or a fresh host, while keeping the on-disk layout JSON-friendly so the future Postgres → SQLite migration does not require re-inventing the format.
