@@ -1,12 +1,16 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   ApiError,
+  BackupApiError,
   EnrollmentApiError,
   confirmEnrollment,
   createEnrollmentToken,
   downloadEnrollmentTrustCA,
   draftEnrollment,
+  encodeBackupPassphrase,
+  exportBackup,
   getEnrollmentTrust,
+  importBackup,
   listEnrollmentTokens,
   previewEnrollment,
   recoverEnrollment,
@@ -321,5 +325,160 @@ describe("enrollment workflow API client", () => {
     expect(error).toBeInstanceOf(EnrollmentApiError);
     expect(error).toMatchObject({ kind: "payload-too-large" });
     expect((error as Error).message).not.toContain(secret);
+  });
+});
+
+describe("backup API client", () => {
+  it("exports with the base64url passphrase header and uses the response filename", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response("zip-bytes", {
+        status: 200,
+        headers: {
+          "content-type": "application/zip",
+          "content-disposition":
+            'attachment; filename="proxycore-backup-2030-01-01T00-00-00Z.zip"',
+        },
+      }),
+    );
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const result = await exportBackup("pässphrase/+?");
+
+    expect(result.filename).toBe("proxycore-backup-2030-01-01T00-00-00Z.zip");
+    expect(await result.blob.text()).toBe("zip-bytes");
+    const [url, init] = fetchMock.mock.calls[0]! as [string, RequestInit];
+    expect(url).toBe("/api/backup/export");
+    expect(init.method).toBe("POST");
+    expect(init.credentials).toBe("include");
+    const header = (init.headers as Record<string, string>)[
+      "X-Proxycore-Backup-Passphrase"
+    ];
+    expect(header).toMatch(/^[A-Za-z0-9_-]+$/);
+    expect(encodeBackupPassphrase("pässphrase/+?")).toBe(header);
+    const padded = header.padEnd(Math.ceil(header.length / 4) * 4, "=");
+    const bytes = Uint8Array.from(
+      atob(padded.replace(/-/g, "+").replace(/_/g, "/")),
+      (char) => char.charCodeAt(0),
+    );
+    expect(new TextDecoder().decode(bytes)).toBe("pässphrase/+?");
+  });
+
+  it("omits the passphrase header and falls back to a default filename", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(new Response("zip", { status: 200 }));
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const result = await exportBackup();
+
+    expect(result.filename).toBe("proxycore-backup.zip");
+    const init = fetchMock.mock.calls[0]![1] as RequestInit;
+    expect(init.headers).not.toHaveProperty("X-Proxycore-Backup-Passphrase");
+  });
+
+  it("rejects path-like filenames from Content-Disposition", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue(
+      new Response("zip", {
+        status: 200,
+        headers: { "content-disposition": 'attachment; filename="../../evil.zip"' },
+      }),
+    ) as unknown as typeof fetch;
+
+    expect((await exportBackup()).filename).toBe("evil.zip");
+  });
+
+  it("imports as multipart without a JSON content type and returns the report", async () => {
+    const report = {
+      dryRun: true,
+      bundleSha256: "ab",
+      formatVersion: 1,
+      exporterVersion: "0.5.2",
+      createdAt: "2030-01-01T00:00:00Z",
+      installationId: "inst",
+      nodeId: "node",
+      tables: [{ name: "zones", rowCount: 2, action: "replace" }],
+      envWouldChange: false,
+      certsToRestore: [],
+      appliedPostImport: false,
+    };
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify(report), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    const file = new File(["zip"], "bundle.zip", { type: "application/zip" });
+
+    await expect(
+      importBackup(file, { passphrase: "secret", dryRun: true }),
+    ).resolves.toEqual(report);
+
+    const [url, init] = fetchMock.mock.calls[0]! as [string, RequestInit];
+    expect(url).toBe("/api/backup/import?dry_run=true");
+    expect(url).not.toContain("secret");
+    expect(init.method).toBe("POST");
+    expect(init.credentials).toBe("include");
+    expect(init.headers).toBeUndefined();
+    const form = init.body as FormData;
+    expect(form.get("bundle")).toBeInstanceOf(File);
+    expect(form.get("passphrase")).toBe(encodeBackupPassphrase("secret"));
+  });
+
+  it("sends dry_run=false and omits an empty passphrase", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(new Response("{}", { status: 200 }));
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    await importBackup(new File(["zip"], "b.zip"), { dryRun: false });
+
+    expect(fetchMock.mock.calls[0]![0]).toBe("/api/backup/import?dry_run=false");
+    const form = (fetchMock.mock.calls[0]![1] as RequestInit).body as FormData;
+    expect(form.has("passphrase")).toBe(false);
+  });
+
+  it.each([
+    [409, { code: "master_key_mismatch", error: "master key mismatch" }, "master_key_mismatch"],
+    [401, { error: "passphrase mismatch" }, "passphrase_mismatch"],
+    [400, { error: "passphrase required" }, "passphrase_required"],
+    [400, { error: "invalid backup archive" }, "invalid_bundle"],
+    [400, { error: "unsupported backup version" }, "invalid_bundle"],
+    [413, { error: "backup bundle is too large" }, "too_large"],
+    [503, { error: "backup service is not configured" }, "unavailable"],
+    [403, { error: "forbidden" }, "forbidden"],
+    [401, { error: "unauthorized" }, "unauthorized"],
+    [500, { error: "boom" }, "unknown"],
+  ])("maps status %i %j to kind %s", async (status, body, kind) => {
+    globalThis.fetch = vi.fn().mockImplementation(
+      async () =>
+        new Response(JSON.stringify(body), {
+          status,
+          headers: { "content-type": "application/json" },
+        }),
+    ) as unknown as typeof fetch;
+
+    for (const call of [
+      () => importBackup(new File(["z"], "b.zip"), { dryRun: true }),
+      () => exportBackup(),
+    ]) {
+      const caught = await call().catch((error: unknown) => error);
+      expect(caught).toBeInstanceOf(BackupApiError);
+      expect(caught).toBeInstanceOf(ApiError);
+      expect((caught as BackupApiError).kind).toBe(kind);
+      expect((caught as BackupApiError).status).toBe(status);
+    }
+  });
+
+  it("reports network failures as unknown without leaking details", async () => {
+    globalThis.fetch = vi
+      .fn()
+      .mockRejectedValue(new TypeError("secret detail")) as unknown as typeof fetch;
+
+    const caught = await exportBackup("pw").catch((error: unknown) => error);
+
+    expect(caught).toBeInstanceOf(BackupApiError);
+    expect((caught as BackupApiError).kind).toBe("unknown");
+    expect((caught as BackupApiError).message).not.toContain("secret detail");
   });
 });

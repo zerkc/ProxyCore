@@ -137,8 +137,8 @@ func TestOpenSQLiteStackBuildsWithOnlyASQLitePath(t *testing.T) {
 	if handler == nil {
 		t.Fatal("handler is nil")
 	}
-	// Backup is intentionally unwired on SQLite until T61; the route reports
-	// that instead of panicking.
+	// stack.options does not include backup (see backupOptions); the handler
+	// must still build and serve without it.
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/health", nil))
 	if rec.Code >= 500 {

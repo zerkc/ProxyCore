@@ -1,5 +1,6 @@
 import { useEffect } from "react";
 import { Navigate, Route, Routes, useParams } from "react-router-dom";
+import { BackupView } from "./dashboard/BackupView";
 import { CertificatesView } from "./dashboard/CertificatesView";
 import { ContinuityView } from "./dashboard/ContinuityView";
 import { DashboardProvider, useDashboard } from "./dashboard/dashboard-context";
@@ -41,6 +42,7 @@ function DashboardRoutes() {
           <Route path="continuity" element={<DashboardContinuityPage />} />
           <Route path="ingress" element={<IngressView />} />
           <Route path="streams" element={<DashboardStreamsPage />} />
+          <Route path="backup" element={<BackupView />} />
           <Route path="*" element={<Navigate to="/dashboard" replace />} />
         </Routes>
       </DashboardShell>

@@ -18,6 +18,23 @@ describe("dashboard continuity navigation", () => {
     });
     expect(resolveDashboardNav("/dashboard/continuity").id).toBe("continuity");
   });
+
+  it("exposes backup navigation and hides it on node-only surfaces", () => {
+    expect(dashboardNav).toContainEqual({
+      href: "/dashboard/backup",
+      id: "backup",
+      label: "backup",
+      title: "backup",
+      icon: "backup",
+    });
+    expect(resolveDashboardNav("/dashboard/backup").id).toBe("backup");
+    expect(
+      getDashboardNavigation("ordinary").some((item) => item.id === "backup"),
+    ).toBe(true);
+    expect(
+      getDashboardNavigation("node-only").some((item) => item.id === "backup"),
+    ).toBe(false);
+  });
 });
 
 describe("topology inspector identity", () => {

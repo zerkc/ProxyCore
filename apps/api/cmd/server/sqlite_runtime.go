@@ -117,9 +117,8 @@ func openSQLiteStack(ctx context.Context, cfg config.Config, logger *log.Logger)
 }
 
 // options are the HTTP options for the SQLite path. Backup export/import is
-// intentionally NOT wired: BackupExporter/BackupImporter/PostgresAuditEmitter
-// have no SQLite implementation until T61, and the backup handlers already
-// treat a nil exporter/importer as unavailable.
+// wired separately by backupOptions, and only when a master key is configured;
+// without it the backup handlers treat a nil exporter/importer as unavailable.
 func (s *sqliteStack) options(cfg config.Config) []httpserver.Option {
 	return []httpserver.Option{
 		httpserver.WithAuthService(auth.NewService(s.authStore, auth.ServiceOptions{SessionTTL: cfg.SessionTTL})),

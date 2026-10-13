@@ -134,6 +134,58 @@ is reported as an import failure, but it rolls back **nothing**: the restored
 database transaction is already committed. Investigate the apply result and
 trigger `POST /api/apply` after correcting the operational problem.
 
+## Using the dashboard
+
+The same export and import are available in the dashboard at
+**Backup** (`/dashboard/backup`) without `curl`. The page calls the same
+Owner-only endpoints described above.
+
+Requirements:
+
+- Sign in as an **Owner**. Operators and anonymous sessions are rejected and the
+  page reports that Owner access is required.
+- The installation must have a master key configured. Without one the backup
+  endpoints answer `503` and the page reports that backup is unavailable.
+- The passphrase is optional. If you set one on export, the same passphrase is
+  required to import that bundle. The page sends it base64url-encoded in the
+  request header or multipart field, never in the URL.
+- The Backup entry is only shown on primary surfaces. It is hidden on a NODE
+  that has been converted to NODE-only mode.
+
+Export:
+
+1. Open **Backup**, optionally enter a passphrase, and select **Export backup**.
+2. The browser downloads the ZIP using the filename supplied by the server
+   (`proxycore-backup-<UTC timestamp>.zip`). Store it in the protected backup
+   location; it carries configuration, certificates, and the master-key
+   environment.
+
+Import:
+
+1. Select the `.zip` bundle and enter its passphrase if it has one.
+2. Select **Preview import**. This runs a dry run (`dry_run=true`) and shows the
+   bundle metadata (created time, exporter and format version, node ID), the
+   table list with row counts and actions, whether the environment would
+   change, how many certificates would be restored, and any compatibility
+   conflicts. Nothing is written.
+3. Review the preview, then select **Restore backup**. This runs the real
+   import (`dry_run=false`) and replaces all configuration on the installation.
+4. **All sessions are invalidated after a real import, including yours.** The
+   page clears its local session state and sends you to the login screen.
+   Sign in again with an account from the restored configuration.
+
+Errors the page reports:
+
+| Situation                        | Message meaning                                                                               |
+| -------------------------------- | --------------------------------------------------------------------------------------------- |
+| `409` `master_key_mismatch`      | The bundle was made with a different master key. Configure the original master key and retry. |
+| `401` passphrase mismatch        | The passphrase is incorrect for this bundle.                                                  |
+| `400` passphrase required        | The bundle is encrypted; enter its passphrase.                                                |
+| `400` invalid archive or version | The file is corrupt or from an unsupported version.                                           |
+| `413`                            | The bundle exceeds the 4 GiB limit.                                                           |
+| `503`                            | Backup is unavailable because the master key is not configured.                               |
+| `401`/`403`                      | Owner access is required.                                                                     |
+
 ## Backing up the SQLite file
 
 The bundle is a configuration export, not a full database backup. Runtime state
