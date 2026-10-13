@@ -261,3 +261,14 @@ Independentmur21chd-g-yr6tPASSno correctnessblockers/LOWduplicatedprivatevalidat
   - Residual risk, accepted: the lock is reclaimed by moving it away; a run that checked "stale" just before another run's reclaim could in theory reclaim that run's fresh lock. The window is a few milliseconds and requires two migrate runs of one project at once, which the updater does not start.
 - Docker cleanup: all `proxycore-t68*` containers, volumes and networks removed, the pulled alpine image and the built migrate images removed, scratch worktree removed. `docker ps -a` empty; networks bridge/host/none; 21 pre-existing anonymous volumes kept; images only `proxycore-t65-control`, `pc-t63-worker:tmp`, `postgres:17-alpine`.
 - Next: push and the PR #4 update are human decisions. Remaining gaps for the full upgrade proof: the real api and worker stack around a killed run, and the positive converter pre-check with a built api image.
+
+## T69 outcome (2026-10-12): installer legacy check reads COMPOSE_PROJECT_NAME from .env
+- Status: DONE for the stub tests; real Docker not run (not needed for this change). Route: one writer, inline edits, no sub-agents. Test-first: RED observed before the script change.
+- Commit (feature branch, not pushed): 9849490 `fix(install): read the compose project name from .env for the legacy check`. This entry is the next commit (`docs(odd): record T69 outcome`).
+- Fix (scripts/install.sh): `compose_project_name` resolves the project from the environment, then `${PROXYCORE_HOME}/.env` (read as data with the same sed reading as convert-postgres.sh, never sourced, value not printed; a missing .env falls back), then `proxycore`. It drives the legacy volume check, its refusal message, and the `COMPOSE_PROJECT_NAME` export in `main`. The export previously forced `proxycore`, which also overrode the .env value for compose itself; it now uses the same resolution, so the check and compose agree. This closes the F5 open item from T68 for install.sh.
+- Tests (scripts/install.test.sh): `.env` project triggers the refusal and names `proxycore-t69_postgres-data` without printing the .env secret; the default volume is not refused when .env selects another project; the environment wins over .env; the default project refuses with no .env and with a .env lacking the key; a fresh install with no .env is accepted. The docker stub uses an if-chain (bash 3.2 mis-parses case inside command substitution).
+- Gates:
+  1. RED: `sh scripts/install.test.sh` and `dash scripts/install.test.sh`: `.env project did not trigger the legacy refusal` (rc 1, both shells).
+  2. GREEN: `sh scripts/install.test.sh` rc 0; `dash scripts/install.test.sh` rc 0; `sh` and `dash scripts/install_env.test.sh` rc 0.
+  3. shellcheck (0.11.0): install.sh has 3 findings, identical to HEAD (SC1090 line 292, SC2034 line 372, SC2155 line 464); none new.
+- Not verified: a real Docker stack with a non-default project in `.env` (stub cases only).
