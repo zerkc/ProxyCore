@@ -35,16 +35,22 @@ COPY VERSION ./VERSION
 COPY apps/api/ ./
 
 # Layer 3: build. Cache mounts persist compiled objects between runs.
+# One `go build` invocation compiles the three binaries in a single pass (shared
+# packages are compiled once). -X only affects binaries that link the version
+# package, which is the server alone (admin and convert do not import it), so
+# the stamp is applied to all three targets safely. `go build -o <dir>` names
+# each binary after its package directory, hence the renames afterwards.
+# GOMAXPROCS/GOGC cap the compiler's CPU and heap use on small (1 GB) nodes.
+ENV GOMAXPROCS=2 GOGC=50
 RUN --mount=type=cache,id=go-mod,target=/go/pkg/mod \
     --mount=type=cache,id=go-build,target=/root/.cache/go-build \
     VERSION="$(tr -d '[:space:]' < VERSION)" \
     && CGO_ENABLED=0 GOOS=linux go build -trimpath \
        -ldflags="-s -w -X github.com/zerkc/ProxyCore/apps/api/internal/version.Version=${VERSION}" \
-       -o /out/proxycore-api ./cmd/server \
-    && CGO_ENABLED=0 GOOS=linux go build -trimpath \
-       -ldflags="-s -w" -o /out/proxycore-admin ./cmd/admin \
-    && CGO_ENABLED=0 GOOS=linux go build -trimpath \
-       -ldflags="-s -w" -o /out/proxycore-convert ./cmd/convert
+       -o /out/ ./cmd/server ./cmd/admin ./cmd/convert \
+    && mv /out/server /out/proxycore-api \
+    && mv /out/admin /out/proxycore-admin \
+    && mv /out/convert /out/proxycore-convert
 
 # Runtime: single static binary + SPA assets.
 FROM alpine:3.22
