@@ -217,7 +217,7 @@ try {
         a.equal(dedup.actorUserId, undefined);
         a.deep(settings(), before);
         // Construction happened earlier: invocation, not factory time, owns Date.
-        await Bun.sleep(12);
+        await new Promise((resolve) => setTimeout(resolve, 12));
         const low = Date.now();
         const result = explicit ? await other.markApplied(value.id, undefined) : await other.markApplied(value.id);
         const high = Date.now();

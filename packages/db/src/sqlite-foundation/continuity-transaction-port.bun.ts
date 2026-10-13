@@ -1,3 +1,4 @@
+/// <reference types="bun-types/test" />
 import assert from "node:assert/strict";
 import { Database } from "bun:sqlite";
 import { mock } from "bun:test";
