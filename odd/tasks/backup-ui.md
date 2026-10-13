@@ -35,7 +35,7 @@ Test-first: RED then GREEN with vitest (runner available, offline).
 
 ## Tasks
 - [x] **BU-1 — API client**: `exportBackup(passphrase?)` returning `{blob, filename}`, `importBackup(file, {passphrase, dryRun})` returning `ImportReport`, typed `BackupApiError` with kind (`master_key_mismatch`, `passphrase_required`, `passphrase_mismatch`, `invalid_bundle`, `too_large`, `unavailable`, `forbidden`, `unknown`), base64url passphrase encoding. Tests in `api.test.ts` (or `backupApi.test.ts`).
-- [ ] **BU-2 — BackupView + wiring**: `apps/ui/src/dashboard/BackupView.tsx` (+ test), route in `App.tsx`, nav entry in `nav.ts`, icon in `DashboardShell.tsx`. Flow: pick file -> dry-run preview table -> confirm -> real import -> redirect to login.
+- [x] **BU-2 — BackupView + wiring**: `apps/ui/src/dashboard/BackupView.tsx` (+ test), route in `App.tsx`, nav entry in `nav.ts`, icon in `DashboardShell.tsx`. Flow: pick file -> dry-run preview table -> confirm -> real import -> redirect to login.
 - [ ] **BU-3 — Docs and stale text**: runbook UI section (`docs/runbooks/backup-restore.md`), fix stale "intentionally NOT wired" comment (`apps/api/cmd/server/sqlite_runtime.go:119-122`, `sqlite_runtime_test.go:140`), mark backend FB-* state in `full-backup-export-import.md`.
 
 ## Route declaration

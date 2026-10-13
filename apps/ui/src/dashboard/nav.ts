@@ -41,6 +41,13 @@ export const dashboardNav = [
     title: "streams",
     icon: "streams",
   },
+  {
+    href: "/dashboard/backup",
+    id: "backup",
+    label: "backup",
+    title: "backup",
+    icon: "backup",
+  },
 ] as const;
 
 export type DashboardNavId = (typeof dashboardNav)[number]["id"];
