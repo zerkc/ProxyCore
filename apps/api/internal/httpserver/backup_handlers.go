@@ -100,9 +100,12 @@ func (s *Server) handleBackupExport(w http.ResponseWriter, r *http.Request) {
 	if exportErr != nil {
 		if tracked.wroteHeader {
 			if s.log != nil {
-				s.log.Printf("WARN backup export failed after response started")
+				s.log.Printf("WARN backup export failed after response started: %v", exportErr)
 			}
 			return
+		}
+		if s.log != nil {
+			s.log.Printf("ERROR backup export failed: %v", exportErr)
 		}
 		w.Header().Del("Content-Type")
 		w.Header().Del("Content-Disposition")

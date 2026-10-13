@@ -105,6 +105,14 @@ export function BackupView() {
             Optionally protect secrets in the bundle with a passphrase. You will
             need the same passphrase to restore it.
           </p>
+          <p
+            className="mt-2 max-w-2xl text-sm leading-6 text-mute"
+            data-testid="backup-export-env-note"
+          >
+            The bundle includes the host .env only when the API can read it.
+            Keep your .env (ports, ACME and ingress settings, master key) backed
+            up separately.
+          </p>
         </div>
         <div className="max-w-md">
           <PasswordInput
@@ -331,6 +339,10 @@ function clearClientSession() {
   }
 }
 
+// Browsers start the download asynchronously after click(); revoking the blob
+// URL right away can leave an empty file, so the revoke is deferred.
+const BLOB_URL_REVOKE_DELAY_MS = 30_000;
+
 function downloadBlob(blob: Blob, filename: string) {
   const url = URL.createObjectURL(blob);
   try {
@@ -343,7 +355,9 @@ function downloadBlob(blob: Blob, filename: string) {
     } finally {
       anchor.remove();
     }
-  } finally {
+  } catch (error) {
     URL.revokeObjectURL(url);
+    throw error;
   }
+  setTimeout(() => URL.revokeObjectURL(url), BLOB_URL_REVOKE_DELAY_MS);
 }

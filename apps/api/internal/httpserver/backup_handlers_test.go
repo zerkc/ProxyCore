@@ -199,9 +199,10 @@ func TestBackupExportMissingService(t *testing.T) {
 }
 
 func TestBackupExportFailureBeforeHeaders(t *testing.T) {
+	var logs bytes.Buffer
 	fixture := newBackupHTTPFixture(t, backupExporterFunc(func(context.Context, http.ResponseWriter, []byte) (string, error) {
-		return "", errors.New("export failed")
-	}), nil, nil)
+		return "", errors.New("read env snapshot: permission denied")
+	}), nil, log.New(&logs, "", 0))
 	req := httptest.NewRequest(http.MethodPost, "/api/backup/export", nil)
 	req.AddCookie(fixture.ownerCookie)
 	rec := httptest.NewRecorder()
@@ -213,13 +214,20 @@ func TestBackupExportFailureBeforeHeaders(t *testing.T) {
 	if got := rec.Header().Get("Content-Disposition"); got != "" {
 		t.Fatalf("content disposition on failed response=%q", got)
 	}
+	if got := rec.Header().Get("Content-Type"); strings.Contains(got, "zip") {
+		t.Fatalf("content type on failed response=%q", got)
+	}
+	if !strings.Contains(logs.String(), "read env snapshot: permission denied") {
+		t.Fatalf("log misses the failure cause: %q", logs.String())
+	}
 }
 
 func TestBackupExportFailureAfterHeaders(t *testing.T) {
+	var logs bytes.Buffer
 	fixture := newBackupHTTPFixture(t, backupExporterFunc(func(_ context.Context, w http.ResponseWriter, _ []byte) (string, error) {
 		_, _ = w.Write([]byte("partial"))
-		return "", errors.New("export failed")
-	}), nil, nil)
+		return "", errors.New("export database: db down")
+	}), nil, log.New(&logs, "", 0))
 	req := httptest.NewRequest(http.MethodPost, "/api/backup/export", nil)
 	req.AddCookie(fixture.ownerCookie)
 	rec := httptest.NewRecorder()
@@ -229,6 +237,9 @@ func TestBackupExportFailureAfterHeaders(t *testing.T) {
 	}
 	if strings.Contains(rec.Body.String(), "backup export failed") {
 		t.Fatal("handler appended JSON error after streaming started")
+	}
+	if !strings.Contains(logs.String(), "WARN") || !strings.Contains(logs.String(), "export database: db down") {
+		t.Fatalf("log misses the failure cause: %q", logs.String())
 	}
 }
 

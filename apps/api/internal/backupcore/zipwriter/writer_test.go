@@ -171,3 +171,31 @@ func TestWriterCloseIsIdempotent(t *testing.T) {
 		t.Fatalf("Close results = (%v, %v), want nil, nil", first, second)
 	}
 }
+
+func TestAbortWritesNoFooterAndRejectsFurtherUse(t *testing.T) {
+	for name, passphrase := range map[string][]byte{"raw": nil, "encrypted": []byte("correct horse battery staple")} {
+		t.Run(name, func(t *testing.T) {
+			var output bytes.Buffer
+			writer, err := OpenEncrypted(&output, passphrase)
+			if err != nil {
+				t.Fatalf("OpenEncrypted: %v", err)
+			}
+			aborter, ok := writer.(interface{ Abort() error })
+			if !ok {
+				t.Fatal("writer has no Abort")
+			}
+			if err := aborter.Abort(); err != nil {
+				t.Fatalf("Abort: %v", err)
+			}
+			if output.Len() != 0 {
+				t.Fatalf("Abort wrote %d bytes", output.Len())
+			}
+			if err := writer.Close(); err == nil {
+				t.Fatal("Close after Abort reported success")
+			}
+			if output.Len() != 0 {
+				t.Fatalf("Close after Abort wrote %d bytes", output.Len())
+			}
+		})
+	}
+}
