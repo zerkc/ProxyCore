@@ -60,7 +60,7 @@ type DashboardContextValue = {
   update?: UpdatePayload;
   updateLoading: boolean;
   updateError: string;
-  refreshUpdate: () => Promise<void>;
+  refreshUpdate: (options?: { force?: boolean }) => Promise<void>;
   inSync: boolean;
   failedJob?: JobRecord;
   failureReason: string;
@@ -142,12 +142,14 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     );
   }
 
-  const refreshUpdate = useCallback(async () => {
+  const refreshUpdate = useCallback(async (options?: { force?: boolean }) => {
     setUpdateLoading(true);
     try {
-      const response = await fetch("/api/updates", {
-        cache: "no-store",
-      });
+      // force asks the API to query GitHub instead of its cached release state.
+      const response = await fetch(
+        options?.force ? "/api/updates?refresh=1" : "/api/updates",
+        { cache: "no-store" },
+      );
       if (!response.ok) {
         throw new Error(`Version check failed (${response.status})`);
       }

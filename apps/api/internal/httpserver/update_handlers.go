@@ -116,7 +116,11 @@ func (s *Server) handleUpdates(w http.ResponseWriter, r *http.Request) {
 			CurrentVersion: version.Version,
 		}
 	} else {
-		result = s.updates.Check(r.Context())
+		if wantsForcedRefresh(r) {
+			result = s.updates.Refresh(r.Context())
+		} else {
+			result = s.updates.Check(r.Context())
+		}
 	}
 
 	if client, ok := s.updaterClient.(UpdaterStatusClient); ok {
@@ -130,6 +134,17 @@ func (s *Server) handleUpdates(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, result)
+}
+
+// wantsForcedRefresh reports whether the request asks GET /api/updates to
+// bypass the release cache (?refresh=1 or ?refresh=true).
+func wantsForcedRefresh(r *http.Request) bool {
+	switch r.URL.Query().Get("refresh") {
+	case "1", "true":
+		return true
+	default:
+		return false
+	}
 }
 
 func normalizeUpdaterTarget(raw string) string {
