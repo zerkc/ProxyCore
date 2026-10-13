@@ -18,6 +18,8 @@ const (
 	DefaultBaseURL    = "https://api.github.com"
 	DefaultTTL        = 6 * time.Hour
 	DefaultTimeout    = 5 * time.Second
+
+	minForcedRefreshInterval = 10 * time.Second
 )
 
 const (
@@ -66,10 +68,11 @@ type Checker struct {
 	repository     string
 	now            func() time.Time
 
-	mu       sync.Mutex
-	cached   *Result
-	expires  time.Time
-	inFlight chan struct{}
+	mu         sync.Mutex
+	cached     *Result
+	expires    time.Time
+	inFlight   chan struct{}
+	lastForced time.Time
 }
 
 type githubRelease struct {
@@ -123,7 +126,20 @@ func NewChecker(options CheckerOptions) *Checker {
 	}
 }
 
+// Check returns the cached release state, querying GitHub only when the
+// cache has expired.
 func (c *Checker) Check(ctx context.Context) Result {
+	return c.lookup(ctx, false)
+}
+
+// Refresh queries GitHub even when the cache is fresh. Forced upstream calls
+// are spaced by minForcedRefreshInterval; a throttled call returns the current
+// cached state without contacting GitHub.
+func (c *Checker) Refresh(ctx context.Context) Result {
+	return c.lookup(ctx, true)
+}
+
+func (c *Checker) lookup(ctx context.Context, force bool) Result {
 	if !c.enabled {
 		return Result{
 			Status:         StatusDisabled,
@@ -136,7 +152,7 @@ func (c *Checker) Check(ctx context.Context) Result {
 
 	now := c.now().UTC()
 	c.mu.Lock()
-	if c.cached != nil && now.Before(c.expires) {
+	if !force && c.cached != nil && now.Before(c.expires) {
 		result := cloneResult(*c.cached)
 		c.mu.Unlock()
 		return result
@@ -148,14 +164,22 @@ func (c *Checker) Check(ctx context.Context) Result {
 
 		select {
 		case <-done:
-			return c.Check(ctx)
+			return c.lookup(ctx, false)
 		case <-ctx.Done():
 			return fallbackResult(c.currentVersion, cached)
 		}
 	}
+	if force && !c.lastForced.IsZero() && now.Before(c.lastForced.Add(minForcedRefreshInterval)) {
+		result := c.throttledResultLocked(now)
+		c.mu.Unlock()
+		return result
+	}
 
 	done := make(chan struct{})
 	c.inFlight = done
+	if force {
+		c.lastForced = now
+	}
 	cached := cloneResultPtr(c.cached)
 	c.mu.Unlock()
 
@@ -181,6 +205,16 @@ func (c *Checker) Check(ctx context.Context) Result {
 	c.mu.Unlock()
 
 	return result
+}
+
+// throttledResultLocked returns the cached state for a throttled forced
+// refresh. A fresh cache is served as-is; an expired one is reported as stale.
+// The caller must hold c.mu.
+func (c *Checker) throttledResultLocked(now time.Time) Result {
+	if c.cached != nil && now.Before(c.expires) {
+		return cloneResult(*c.cached)
+	}
+	return fallbackResult(c.currentVersion, cloneResultPtr(c.cached))
 }
 
 func (c *Checker) fetchLatestRelease(ctx context.Context) (Release, error) {

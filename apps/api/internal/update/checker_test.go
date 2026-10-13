@@ -315,6 +315,146 @@ func TestCheckerDeduplicatesConcurrentRequests(t *testing.T) {
 	}
 }
 
+func TestCheckerRefreshBypassesFreshCache(t *testing.T) {
+	currentTime := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+	var requestCount atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		tag := "v0.2.0"
+		if requestCount.Add(1) > 1 {
+			tag = "v0.3.0"
+		}
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"tag_name": tag,
+			"html_url": "https://github.com/zerkc/ProxyCore/releases/tag/" + tag,
+		})
+	}))
+	t.Cleanup(server.Close)
+
+	checker := NewChecker(CheckerOptions{
+		CurrentVersion: "0.1.0",
+		Enabled:        true,
+		TTL:            time.Hour,
+		BaseURL:        server.URL,
+		Client:         server.Client(),
+		Now:            func() time.Time { return currentTime },
+	})
+
+	first := checker.Check(context.Background())
+	if first.Latest == nil || first.Latest.Version != "0.2.0" {
+		t.Fatalf("first result=%+v", first)
+	}
+	currentTime = currentTime.Add(time.Minute)
+	cached := checker.Check(context.Background())
+	if got := requestCount.Load(); got != 1 {
+		t.Fatalf("plain check request count=%d, want 1", got)
+	}
+	if cached.Latest == nil || cached.Latest.Version != "0.2.0" {
+		t.Fatalf("cached result=%+v", cached)
+	}
+
+	refreshed := checker.Refresh(context.Background())
+	if got := requestCount.Load(); got != 2 {
+		t.Fatalf("refresh request count=%d, want 2", got)
+	}
+	if refreshed.Status != StatusUpdateAvailable || refreshed.Latest == nil || refreshed.Latest.Version != "0.3.0" {
+		t.Fatalf("refreshed result=%+v", refreshed)
+	}
+	if refreshed.CheckedAt == nil || !refreshed.CheckedAt.Equal(currentTime) {
+		t.Fatalf("refreshed checkedAt=%v, want %v", refreshed.CheckedAt, currentTime)
+	}
+
+	afterRefresh := checker.Check(context.Background())
+	if afterRefresh.Latest == nil || afterRefresh.Latest.Version != "0.3.0" {
+		t.Fatalf("check after refresh=%+v", afterRefresh)
+	}
+	if got := requestCount.Load(); got != 2 {
+		t.Fatalf("request count after check=%d, want 2", got)
+	}
+}
+
+func TestCheckerRefreshIsThrottled(t *testing.T) {
+	currentTime := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+	var requestCount atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requestCount.Add(1)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"tag_name": "v0.2.0",
+			"html_url": "https://github.com/zerkc/ProxyCore/releases/tag/v0.2.0",
+		})
+	}))
+	t.Cleanup(server.Close)
+
+	checker := NewChecker(CheckerOptions{
+		CurrentVersion: "0.1.0",
+		Enabled:        true,
+		BaseURL:        server.URL,
+		Client:         server.Client(),
+		Now:            func() time.Time { return currentTime },
+	})
+
+	first := checker.Refresh(context.Background())
+	if got := requestCount.Load(); got != 1 {
+		t.Fatalf("first refresh request count=%d, want 1", got)
+	}
+
+	currentTime = currentTime.Add(5 * time.Second)
+	throttled := checker.Refresh(context.Background())
+	if got := requestCount.Load(); got != 1 {
+		t.Fatalf("throttled refresh request count=%d, want 1", got)
+	}
+	if throttled.Status != StatusUpdateAvailable || throttled.Latest == nil || throttled.Latest.Version != "0.2.0" {
+		t.Fatalf("throttled result=%+v", throttled)
+	}
+	if throttled.CheckedAt == nil || !throttled.CheckedAt.Equal(*first.CheckedAt) {
+		t.Fatalf("throttled checkedAt=%v, want %v", throttled.CheckedAt, first.CheckedAt)
+	}
+
+	currentTime = currentTime.Add(10 * time.Second)
+	checker.Refresh(context.Background())
+	if got := requestCount.Load(); got != 2 {
+		t.Fatalf("refresh after interval request count=%d, want 2", got)
+	}
+}
+
+func TestCheckerRefreshDeduplicatesConcurrentRequests(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var requestCount atomic.Int32
+	var once sync.Once
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requestCount.Add(1)
+		once.Do(func() { close(started) })
+		<-release
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"tag_name": "v0.2.0",
+			"html_url": "https://github.com/zerkc/ProxyCore/releases/tag/v0.2.0",
+		})
+	}))
+	t.Cleanup(server.Close)
+
+	checker := NewChecker(CheckerOptions{
+		CurrentVersion: "0.1.0",
+		Enabled:        true,
+		BaseURL:        server.URL,
+		Client:         server.Client(),
+	})
+	results := make(chan Result, 2)
+	go func() { results <- checker.Refresh(context.Background()) }()
+	<-started
+	go func() { results <- checker.Refresh(context.Background()) }()
+	close(release)
+
+	for range 2 {
+		result := <-results
+		if result.Status != StatusUpdateAvailable {
+			t.Fatalf("status=%q", result.Status)
+		}
+	}
+	if got := requestCount.Load(); got != 1 {
+		t.Fatalf("request count=%d, want 1", got)
+	}
+}
+
 func TestCheckerDisabledDoesNotCallGitHub(t *testing.T) {
 	var requestCount atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

@@ -8,7 +8,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/zerkc/ProxyCore/apps/api/internal/auth"
 	"github.com/zerkc/ProxyCore/apps/api/internal/config"
@@ -117,6 +119,59 @@ func newUpdatesTestChecker(t *testing.T) *update.Checker {
 		BaseURL:        github.URL,
 		Client:         github.Client(),
 	})
+}
+
+func TestUpdatesEndpointRefreshQueryForcesUpstream(t *testing.T) {
+	var requestCount atomic.Int32
+	github := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requestCount.Add(1)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"tag_name": "v0.2.0",
+			"html_url": "https://github.com/zerkc/ProxyCore/releases/tag/v0.2.0",
+		})
+	}))
+	t.Cleanup(github.Close)
+
+	currentTime := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+	checker := update.NewChecker(update.CheckerOptions{
+		CurrentVersion: "0.1.0",
+		Enabled:        true,
+		BaseURL:        github.URL,
+		Client:         github.Client(),
+		Now:            func() time.Time { return currentTime },
+	})
+	server := httpserver.New(
+		config.Config{UIDist: t.TempDir()},
+		nil,
+		httpserver.WithUpdateChecker(checker),
+	)
+	get := func(path string) {
+		t.Helper()
+		response := httptest.NewRecorder()
+		server.Handler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
+		if response.Code != http.StatusOK {
+			t.Fatalf("%s status=%d body=%s", path, response.Code, response.Body.String())
+		}
+	}
+	expectRequests := func(want int32) {
+		t.Helper()
+		if got := requestCount.Load(); got != want {
+			t.Fatalf("github request count=%d, want %d", got, want)
+		}
+	}
+
+	get("/api/updates")
+	expectRequests(1)
+	currentTime = currentTime.Add(time.Minute)
+	get("/api/updates")
+	expectRequests(1)
+	get("/api/updates?refresh=0")
+	expectRequests(1)
+	get("/api/updates?refresh=1")
+	expectRequests(2)
+	currentTime = currentTime.Add(time.Minute)
+	get("/api/updates?refresh=true")
+	expectRequests(3)
 }
 
 func TestUpdatesEndpointReturnsCheckerResult(t *testing.T) {
