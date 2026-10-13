@@ -149,9 +149,13 @@ services:
     profiles: [tools]
 
   worker:
+    # Owns the build of the shared bun runtime image (worker + control sources).
+    # The control service reuses this image and only overrides the command.
     build:
       context: .
-      dockerfile: infra/compose/Dockerfile.worker
+      dockerfile: infra/compose/Dockerfile.runtime
+    image: proxycore-runtime:local
+    command: ["bun", "run", "worker"]
     environment:
       NODE_ENV: production
       # Same file as the api. The worker retries until the api has migrated the
@@ -187,9 +191,9 @@ services:
     networks: [control]
 
   control:
-    build:
-      context: .
-      dockerfile: infra/compose/Dockerfile.control
+    # No build section: reuses the image built by the worker service.
+    image: proxycore-runtime:local
+    command: ["bun", "run", "control"]
     environment:
       NODE_ENV: production
       WORKER_SOCKET_PATH: /run/proxycore/control.sock

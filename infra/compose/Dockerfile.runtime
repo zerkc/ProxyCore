@@ -18,4 +18,5 @@ RUN --mount=type=cache,id=bun-runtime,target=/root/.bun/install/cache \
 COPY apps/worker ./apps/worker
 COPY apps/control ./apps/control
 
+# Default process; compose overrides it per service (worker / control).
 CMD ["bun", "run", "worker"]
