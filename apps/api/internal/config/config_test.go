@@ -113,3 +113,23 @@ func TestLoadUpdateCheckConfig(t *testing.T) {
 		t.Fatalf("UpdateCheckTimeout=%s, want 750ms", cfg.UpdateCheckTimeout)
 	}
 }
+
+func TestLoadSQLitePath(t *testing.T) {
+	unsetEnv(t, "PROXYCORE_SQLITE_PATH")
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.SQLitePath != "" {
+		t.Fatalf("SQLitePath=%q, want empty default (SQLite is opt-in)", cfg.SQLitePath)
+	}
+
+	t.Setenv("PROXYCORE_SQLITE_PATH", "  /data/proxycore.sqlite  ")
+	cfg, err = config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.SQLitePath != "/data/proxycore.sqlite" {
+		t.Fatalf("SQLitePath=%q, want trimmed configured path", cfg.SQLitePath)
+	}
+}

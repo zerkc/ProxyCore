@@ -17,7 +17,7 @@ Manage zones and records in a Cloudflare-style UI, toggle proxy on A/AAAA/CNAME,
 | Cloudflare-style proxy | Proxied records resolve to this host’s ingress address; Nginx terminates TLS and forwards to an explicit origin IP:port. |
 | Certificates | Self-signed, Let’s Encrypt HTTP-01, or Let’s Encrypt DNS-01 via Cloudflare (`_acme-challenge` only). |
 | Streams | Separate TCP/UDP listeners → upstream IP:port (Nginx stream). |
-| Safe apply | Desired state in PostgreSQL → worker renders → validates → reloads → rolls back on failure. |
+| Safe apply | Desired state in SQLite → worker renders → validates → reloads → rolls back on failure. |
 | Local operators | One-time Owner bootstrap; Owner/Operator roles; no OIDC/MFA in the MVP. |
 
 Control plane edge is **Go API + Vite SPA**. Next.js is removed from the dependency tree, and the Go API now serves every configuration route (auth, settings, zones, records, streams, certificates, and the ACME HTTP-01 challenge) directly — the transitional Node `node-api` has been retired. The worker never gets a raw Docker socket; a small helper applies fixed Nginx/CoreDNS operations over a private Unix socket.
@@ -57,7 +57,7 @@ feature only informs you and never updates the installation automatically.
 Docker Compose on one Linux host:
 
 - **api** — Go control plane (SPA + auth + all configuration routes + ACME challenge)  
-- **postgres** — desired state, users, jobs, audit  
+- **sqlite-data** volume — one SQLite file (desired state, users, jobs, audit) shared by api and worker  
 - **worker** — render, validate, apply, health checks (Node)  
 - **control** — fixed service-control helper (Docker socket only here)  
 - **coredns** — authoritative zones + forwarders  

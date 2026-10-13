@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/x509"
 	"errors"
-	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -15,10 +14,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/zerkc/ProxyCore/apps/api/internal/auth"
-	"github.com/zerkc/ProxyCore/apps/api/internal/backupcore/dbimport"
-	"github.com/zerkc/ProxyCore/apps/api/internal/backupcore/httpexport"
 	"github.com/zerkc/ProxyCore/apps/api/internal/cluster"
 	"github.com/zerkc/ProxyCore/apps/api/internal/config"
 	"github.com/zerkc/ProxyCore/apps/api/internal/configuration"
@@ -99,15 +94,17 @@ func runServerWithNodeConverter(ctx context.Context, cfg config.Config, logger *
 		logger = log.Default()
 	}
 
-	var pool *pgxpool.Pool
-	var phase2Store *configuration.PgPhase2Store
-	var configStore *configuration.Store
+	var phase2Store phase2Backend
 	var identitySvc *identity.Service
 	var identityResult identity.Identity
 	var nodeConverter *enrollment.NodeConverter
 	var tokenAuthority httpserver.EnrollmentTokenAuthority
 	var snapshotClient *syncpublication.SnapshotClient
 	var localKEKLoader *cluster.LocalKEKLoader
+	// Backend-neutral seams filled by whichever persistence branch runs.
+	var tlsStore enrollmentTLSConfigurationStore
+	var renewalStore configuration.RenewalStore
+	var clusterKeys cluster.KeyLoader
 	options := []httpserver.Option{
 		httpserver.WithUpdateChecker(update.NewChecker(update.CheckerOptions{
 			CurrentVersion: version.Version,
@@ -119,91 +116,31 @@ func runServerWithNodeConverter(ctx context.Context, cfg config.Config, logger *
 	if opt := updaterClientFromConfig(cfg); opt != nil {
 		options = append(options, opt)
 	}
-	if cfg.DatabaseURL != "" {
-		connectCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		var err error
-		pool, err = pgxpool.New(connectCtx, cfg.DatabaseURL)
-		cancel()
-		if err != nil {
-			return fmt.Errorf("database: %w", err)
-		}
-		defer pool.Close()
-
-		if err := pool.Ping(context.Background()); err != nil {
-			return fmt.Errorf("database ping: %w", err)
-		}
-		// Drizzle migrate remains the primary path; EnsureSchema is idempotent and
-		// covers additive tables (e.g. internal_ca) if migrate was not re-run yet.
-		if err := configuration.EnsureSchema(context.Background(), pool); err != nil {
-			return fmt.Errorf("configuration schema: %w", err)
-		}
-		store := auth.NewPostgresStore(pool)
-		options = append(options, httpserver.WithAuthService(auth.NewService(store, auth.ServiceOptions{
-			SessionTTL: cfg.SessionTTL,
-		})))
-
-		defaultIngress := domain.Ingress{IPv4: cfg.ProxyIngressIPv4, IPv6: cfg.ProxyIngressIPv6}
-		configStore = configuration.New(pool, cfg.MasterKeyBase64, defaultIngress)
-		options = append(options,
-			httpserver.WithConfigurationStore(configStore),
-			httpserver.WithDefaultIngress(defaultIngress),
-		)
-
-		// Load the durable PRIMARY/NODE identity, bootstrapping only when the
-		// singleton row is absent. Persisted valid roles must survive restart;
-		// the HTTP server enforces their writable/read-only boundary.
-		identityStore := identity.NewPgStore(pool)
-		identityCtx, identityCancel := context.WithTimeout(context.Background(), 10*time.Second)
-		identitySvc, identityResult, _, err = bootstrapIdentity(identityCtx, identityStore)
-		identityCancel()
-		if err != nil {
-			return fmt.Errorf("identity bootstrap: %w", err)
-		}
-		options = append(options, httpserver.WithIdentityService(identitySvc))
-		logger.Printf(
-			"identity ready installation=%s node=%s role=%s generation=%d",
-			identityResult.InstallationID,
-			identityResult.NodeID,
-			identityResult.Role,
-			identityResult.LeadershipGeneration,
-		)
-		phase2Store = configuration.NewPhase2StoreWithMasterKey(pool, cfg.MasterKeyBase64)
-		snapshotClient = syncpublication.NewSnapshotClient(syncpublication.SnapshotClientOptions{
-			CanonicalizeURL: enrollment.CanonicalizePrimaryURL,
-		})
-		localKEKLoader = cluster.NewLocalKEKLoader(cluster.LocalKEKLoaderOptions{
-			Pool: pool, Store: cluster.NewStore(cfg.MasterKeyBase64), Identity: identitySvc,
-		})
-		tokenAuthority = httpserver.NewEnrollmentTokenAuthority(phase2Store, identitySvc, httpserver.EnrollmentTokenAuthorityOptions{
-			List: func(ctx context.Context, ownerID string) ([]httpserver.EnrollmentTokenRecord, error) {
-				return listEnrollmentTokens(ctx, pool, ownerID)
-			},
-		})
-		options = append(options, httpserver.WithEnrollmentTokenAuthority(tokenAuthority))
-		nodeConverter = buildNodeConverter(enableNodeConverter, configStore, identitySvc, logger)
-		if nodeConverter != nil {
-			logger.Printf("node converter ready for role=%s", identityResult.Role)
-		}
+	if strings.TrimSpace(cfg.SQLitePath) == "" {
+		return errSQLitePathRequired
 	}
-
-	if pool != nil && cfg.MasterKeyBase64 != "" {
-		exporter := &httpexport.BackupExporter{
-			Pool:     pool,
-			Identity: httpexport.NewIdentitySource(identitySvc),
-			Version:  version.Version,
-			Now:      time.Now,
-		}
-		importer := &httpexport.BackupImporter{
-			Pool:            pool,
-			MasterKeyBase64: cfg.MasterKeyBase64,
-			EnvMode:         "0600",
-			Apply:           httpexport.NewApplyTrigger(configStore),
-			Audit:           &dbimport.PostgresAuditEmitter{Pool: pool},
-			Now:             time.Now,
-			BodyLimit:       4 << 30,
-		}
-		options = append(options, httpserver.WithBackup(exporter, importer))
+	stack, err := openSQLiteStack(ctx, cfg, logger)
+	if err != nil {
+		return err
 	}
+	defer stack.Close()
+	options = append(options, stack.options(cfg)...)
+	phase2Store = stack.phase2
+	identitySvc = stack.identity
+	identityResult = stack.identityResult
+	tokenAuthority = stack.tokenAuthority
+	localKEKLoader = stack.localKEKLoader
+	clusterKeys = stack.keys
+	tlsStore = stack.config
+	renewalStore = stack.config
+	snapshotClient = syncpublication.NewSnapshotClient(syncpublication.SnapshotClientOptions{
+		CanonicalizeURL: enrollment.CanonicalizePrimaryURL,
+	})
+	nodeConverter = buildNodeConverter(enableNodeConverter, stack.phase2, identitySvc, logger)
+	if nodeConverter != nil {
+		logger.Printf("node converter ready for role=%s", identityResult.Role)
+	}
+	options = append(options, stack.backupOptions(cfg)...)
 
 	server := &http.Server{
 		Addr:              cfg.Addr,
@@ -213,7 +150,7 @@ func runServerWithNodeConverter(ctx context.Context, cfg config.Config, logger *
 
 	draftCache := enrollment.NewDraftCache(enrollment.DraftCacheOptions{})
 	var supervisor *enrollment.EnrollmentTLSSupervisor
-	if configStore != nil && identitySvc != nil {
+	if tlsStore != nil && identitySvc != nil {
 		workflow := httpserver.EnrollmentWorkflowHandlerOptions{
 			Cache:     draftCache,
 			Converter: nodeConverter,
@@ -226,7 +163,7 @@ func runServerWithNodeConverter(ctx context.Context, cfg config.Config, logger *
 			workflow.VerifyToken = tokenAuthority.Verify
 		}
 		wireEnrollmentWorkflowDependencies(&workflow, snapshotClient, localKEKLoader)
-		snapshotByTokenKeyLoader := &snapshotByTokenClusterKeyLoader{pool: pool, store: cluster.NewStore(cfg.MasterKeyBase64), identity: identitySvc}
+		snapshotByTokenKeyLoader := &snapshotByTokenClusterKeyLoader{keys: clusterKeys, identity: snapshotByTokenIdentitySource{service: identitySvc}}
 		snapshotByTokenOptions := httpserver.EnrollmentSnapshotByTokenHandlerOptions{
 			Store:            productionSnapshotByTokenStore(phase2Store),
 			Identity:         snapshotByTokenIdentitySource{service: identitySvc},
@@ -242,7 +179,7 @@ func runServerWithNodeConverter(ctx context.Context, cfg config.Config, logger *
 		acknowledgementOptions := httpserver.EnrollmentSnapshotAcknowledgementHandlerOptions{
 			Store: phase2Store, Identity: identitySvc,
 		}
-		supervisor, err = newEnrollmentWorkflowTLSSupervisorWithHandlersAndAcknowledgement(cfg, identitySvc, configStore, workflow, logger, &publicationOptions, &snapshotByTokenOptions, &acknowledgementOptions)
+		supervisor, err = newEnrollmentWorkflowTLSSupervisorWithHandlersAndAcknowledgement(cfg, identitySvc, tlsStore, workflow, logger, &publicationOptions, &snapshotByTokenOptions, &acknowledgementOptions)
 		if err != nil {
 			logEnrollmentTLSFailure(logger, "supervisor unavailable")
 			supervisor = nil
@@ -250,12 +187,12 @@ func runServerWithNodeConverter(ctx context.Context, cfg config.Config, logger *
 	}
 
 	workers := make([]func(context.Context), 0, 3)
-	if configStore != nil {
+	if renewalStore != nil {
 		workers = append(workers, func(workerCtx context.Context) {
 			// Ordinary renewal is gated by the live identity on every cycle and
 			// work item. Enrollment TLS material remains supervisor-owned and is
 			// refreshed atomically by the supervisor above.
-			configuration.RunRenewalLoop(workerCtx, configStore, configuration.RenewalOptions{
+			configuration.RunRenewalLoop(workerCtx, renewalStore, configuration.RenewalOptions{
 				StagingDirectoryURL:    cfg.ACMEDirectoryURL,
 				ProductionDirectoryURL: cfg.ACMEProductionDirectoryURL,
 				Email:                  cfg.AcmeEmail,
@@ -527,7 +464,11 @@ func nodeConverterEnabled(args []string) bool {
 	return false
 }
 
-func buildNodeConverter(enabled bool, configStore *configuration.Store, identitySvc *identity.Service, logger *log.Logger) *enrollment.NodeConverter {
+func buildNodeConverter(enabled bool, configStore nodeConverterStore, identitySvc *identity.Service, logger *log.Logger) *enrollment.NodeConverter {
+	// A typed-nil *configuration.SQLitePhase2Store must keep meaning "no store".
+	if concrete, ok := configStore.(*configuration.SQLitePhase2Store); ok && concrete == nil {
+		configStore = nil
+	}
 	if !enabled || configStore == nil || identitySvc == nil || !nodeConverterRoleEligible(identitySvc) {
 		return nil
 	}
@@ -630,44 +571,38 @@ func (s snapshotByTokenStoreAdapter) ReadSnapshotPublicationByToken(ctx context.
 	}
 }
 
-func productionSnapshotByTokenStore(store *configuration.PgPhase2Store) httpserver.SnapshotByTokenStore {
-	if store == nil {
+func productionSnapshotByTokenStore(store snapshotByTokenStoreReader) httpserver.SnapshotByTokenStore {
+	if concrete, ok := store.(*configuration.SQLitePhase2Store); store == nil || (ok && concrete == nil) {
 		return nil
 	}
 	return snapshotByTokenStoreAdapter{store: store}
 }
 
+type snapshotByTokenIdentityCurrent interface {
+	Current() (identity.Identity, bool)
+}
+
 type snapshotByTokenClusterKeyLoader struct {
-	pool     *pgxpool.Pool
-	store    *cluster.Store
-	identity *identity.Service
+	keys     cluster.KeyLoader
+	identity snapshotByTokenIdentityCurrent
 }
 
 func (l *snapshotByTokenClusterKeyLoader) Load(ctx context.Context) (httpserver.SnapshotByTokenKeyMaterial, error) {
-	if l == nil || ctx == nil || l.pool == nil || l.store == nil || l.identity == nil {
+	if l == nil || ctx == nil || l.keys == nil || l.identity == nil {
 		return nil, httpserver.ErrSnapshotByTokenUnavailable
 	}
-	current, loaded := (snapshotByTokenIdentitySource{service: l.identity}).Current()
+	current, loaded := l.identity.Current()
 	if !loaded || current.ClusterKeyID == nil ||
 		(current.Role != domain.TopologyRolePrimary && current.Role != domain.TopologyRolePrimaryWithNodes) {
 		return nil, httpserver.ErrSnapshotByTokenUnavailable
 	}
-	tx, err := l.pool.Begin(ctx)
-	if err != nil {
-		return nil, httpserver.ErrSnapshotByTokenUnavailable
-	}
-	defer tx.Rollback(ctx)
-	material, err := l.store.LoadOrCreate(ctx, tx, current.ClusterKeyID)
+	material, err := l.keys.LoadActive(ctx, *current.ClusterKeyID)
 	keyBytes := material.CopyBytes()
 	keyUsable := len(keyBytes) > 0
 	for index := range keyBytes {
 		keyBytes[index] = 0
 	}
 	if err != nil || material.ID != *current.ClusterKeyID || !keyUsable {
-		material.Destroy()
-		return nil, httpserver.ErrSnapshotByTokenUnavailable
-	}
-	if err := tx.Commit(ctx); err != nil {
 		material.Destroy()
 		return nil, httpserver.ErrSnapshotByTokenUnavailable
 	}
@@ -765,7 +700,7 @@ func (f *enrollmentWorkflowTLSListenerFactory) Listen(ctx context.Context, addre
 	return server, nil
 }
 
-func newEnrollmentWorkflowTLSSupervisor(cfg config.Config, identityService *identity.Service, configStore *configuration.Store, workflow httpserver.EnrollmentWorkflowHandlerOptions, logger *log.Logger, publication ...httpserver.EnrollmentSnapshotPublicationHandlerOptions) (*enrollment.EnrollmentTLSSupervisor, error) {
+func newEnrollmentWorkflowTLSSupervisor(cfg config.Config, identityService *identity.Service, configStore enrollmentTLSConfigurationStore, workflow httpserver.EnrollmentWorkflowHandlerOptions, logger *log.Logger, publication ...httpserver.EnrollmentSnapshotPublicationHandlerOptions) (*enrollment.EnrollmentTLSSupervisor, error) {
 	var publicationOptions *httpserver.EnrollmentSnapshotPublicationHandlerOptions
 	if len(publication) > 0 {
 		copy := publication[0]
@@ -774,11 +709,11 @@ func newEnrollmentWorkflowTLSSupervisor(cfg config.Config, identityService *iden
 	return newEnrollmentWorkflowTLSSupervisorWithHandlers(cfg, identityService, configStore, workflow, logger, publicationOptions, nil)
 }
 
-func newEnrollmentWorkflowTLSSupervisorWithHandlers(cfg config.Config, identityService *identity.Service, configStore *configuration.Store, workflow httpserver.EnrollmentWorkflowHandlerOptions, logger *log.Logger, publication *httpserver.EnrollmentSnapshotPublicationHandlerOptions, snapshotByToken *httpserver.EnrollmentSnapshotByTokenHandlerOptions) (*enrollment.EnrollmentTLSSupervisor, error) {
+func newEnrollmentWorkflowTLSSupervisorWithHandlers(cfg config.Config, identityService *identity.Service, configStore enrollmentTLSConfigurationStore, workflow httpserver.EnrollmentWorkflowHandlerOptions, logger *log.Logger, publication *httpserver.EnrollmentSnapshotPublicationHandlerOptions, snapshotByToken *httpserver.EnrollmentSnapshotByTokenHandlerOptions) (*enrollment.EnrollmentTLSSupervisor, error) {
 	return newEnrollmentWorkflowTLSSupervisorWithHandlersAndAcknowledgement(cfg, identityService, configStore, workflow, logger, publication, snapshotByToken, nil)
 }
 
-func newEnrollmentWorkflowTLSSupervisorWithHandlersAndAcknowledgement(cfg config.Config, identityService *identity.Service, configStore *configuration.Store, workflow httpserver.EnrollmentWorkflowHandlerOptions, logger *log.Logger, publication *httpserver.EnrollmentSnapshotPublicationHandlerOptions, snapshotByToken *httpserver.EnrollmentSnapshotByTokenHandlerOptions, acknowledgement *httpserver.EnrollmentSnapshotAcknowledgementHandlerOptions) (*enrollment.EnrollmentTLSSupervisor, error) {
+func newEnrollmentWorkflowTLSSupervisorWithHandlersAndAcknowledgement(cfg config.Config, identityService *identity.Service, configStore enrollmentTLSConfigurationStore, workflow httpserver.EnrollmentWorkflowHandlerOptions, logger *log.Logger, publication *httpserver.EnrollmentSnapshotPublicationHandlerOptions, snapshotByToken *httpserver.EnrollmentSnapshotByTokenHandlerOptions, acknowledgement *httpserver.EnrollmentSnapshotAcknowledgementHandlerOptions) (*enrollment.EnrollmentTLSSupervisor, error) {
 	identityCurrent := &enrollmentTLSIdentityAdapter{service: identityService, logger: logger}
 	configurationStore := &enrollmentTLSConfigurationAdapter{store: configStore, logger: logger}
 	factory := newEnrollmentWorkflowTLSListenerFactory(identityCurrent, workflow, logger)
@@ -791,37 +726,4 @@ func newEnrollmentWorkflowTLSSupervisorWithHandlersAndAcknowledgement(cfg config
 		ListenerFactory: factory,
 		Address:         cfg.EnrollmentTLSAddr,
 	})
-}
-
-func listEnrollmentTokens(ctx context.Context, pool *pgxpool.Pool, ownerID string) ([]httpserver.EnrollmentTokenRecord, error) {
-	if pool == nil || ctx == nil || strings.TrimSpace(ownerID) == "" {
-		return nil, errors.New("enrollment token list unavailable")
-	}
-	rows, err := pool.Query(ctx, `
-		select t.id::text, t.token_selector, t.created_at, t.expires_at,
-			t.consumed_at, t.revoked_at, count(g.attempt_id), max(g.created_at)
-		from enrollment_tokens t
-		left join enrollment_grants g on g.token_id = t.id
-		where t.created_by_user_id = $1
-		group by t.id, t.token_selector, t.created_at, t.expires_at, t.consumed_at, t.revoked_at
-		order by t.created_at desc, t.id desc
-	`, ownerID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	result := make([]httpserver.EnrollmentTokenRecord, 0)
-	for rows.Next() {
-		var record httpserver.EnrollmentTokenRecord
-		var attempts int64
-		if err := rows.Scan(&record.ID, &record.Selector, &record.CreatedAt, &record.ExpiresAt, &record.ConsumedAt, &record.RevokedAt, &attempts, &record.LastAttemptAt); err != nil {
-			return nil, err
-		}
-		if attempts > int64(^uint(0)>>1) {
-			return nil, errors.New("enrollment token attempt count overflow")
-		}
-		record.AttemptCount = int(attempts)
-		result = append(result, record)
-	}
-	return result, rows.Err()
 }

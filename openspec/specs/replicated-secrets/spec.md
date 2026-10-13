@@ -19,7 +19,7 @@ Replicated private keys, provider credentials, and other replicated secrets MUST
 
 ### Requirement: Durable local KEK protection
 
-Each installation MUST persist its cluster KEK encrypted under that installation's local master key in PostgreSQL. The locally protected KEK MUST survive restart, MUST NOT be copied as node-local ciphertext between installations, and MUST be accessible only to authorized local secret-processing boundaries.
+Each installation MUST persist its cluster KEK encrypted under that installation's local master key in the local SQLite database. The locally protected KEK MUST survive restart, MUST NOT be copied as node-local ciphertext between installations, and MUST be accessible only to authorized local secret-processing boundaries.
 
 #### Scenario: Restart retains secret access
 

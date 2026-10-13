@@ -11,7 +11,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/zerkc/ProxyCore/apps/api/internal/auth"
 	"github.com/zerkc/ProxyCore/apps/api/internal/config"
 	"github.com/zerkc/ProxyCore/apps/api/internal/configuration"
@@ -26,7 +25,7 @@ type Server struct {
 	mux              *http.ServeMux
 	log              *log.Logger
 	auth             *auth.Service
-	config           *configuration.Store
+	config           ConfigurationBackend
 	updates          *update.Checker
 	defaultIngress   domain.Ingress
 	updaterClient    UpdaterClient
@@ -44,8 +43,13 @@ func WithAuthService(service *auth.Service) Option {
 	}
 }
 
-func WithConfigurationStore(store *configuration.Store) Option {
+func WithConfigurationStore(store ConfigurationBackend) Option {
 	return func(s *Server) {
+		// A typed-nil *configuration.SQLiteConfigurationBackend must keep meaning "not configured".
+		if concrete, ok := store.(*configuration.SQLiteConfigurationBackend); ok && concrete == nil {
+			s.config = nil
+			return
+		}
 		s.config = store
 	}
 }
@@ -87,14 +91,6 @@ func WithBackup(exporter BackupExporter, importer BackupImporter) Option {
 	return func(s *Server) {
 		s.backupExporter = exporter
 		s.backupImporter = importer
-	}
-}
-
-func WithDBPool(pool *pgxpool.Pool) Option {
-	return func(s *Server) {
-		if pool != nil {
-			s.auth = auth.NewService(auth.NewPostgresStore(pool), auth.ServiceOptions{SessionTTL: s.sessionTTL()})
-		}
 	}
 }
 

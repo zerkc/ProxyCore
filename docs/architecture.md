@@ -1,13 +1,13 @@
 # ProxyCore Architecture
 
-ProxyCore is a small control plane over an explicit data plane. The web app stores and validates intent; a worker renders and applies service configuration; CoreDNS and Nginx handle traffic.
+ProxyCore is a small control plane over an explicit data plane. The Go API stores and validates intent; a worker renders and applies service configuration; CoreDNS and Nginx handle traffic.
 
 ## Architectural outcome
 
 Docker Compose on one Linux host:
 
-- Next.js + Tailwind — admin UI and control-plane API
-- PostgreSQL + Drizzle — desired state, users, jobs, audit
+- Go API — control-plane HTTP API and the admin UI (Vite + React SPA in `apps/ui`, served by Go)
+- SQLite — one WAL database file owned by the Go API: desired state, users, jobs, audit
 - Worker — render, validate, apply, health-check
 - Service-control helper — private Unix-socket adapter for fixed Nginx/CoreDNS operations
 - CoreDNS — authoritative managed zones + forward unmanaged queries
@@ -19,8 +19,8 @@ HTTP/HTTPS proxy is Cloudflare-style: toggled on A/AAAA/CNAME records; Nginx con
 
 ```mermaid
 flowchart TB
-  Browser[Admin Browser] --> Web[Next.js Control Plane]
-  Web --> Database[(PostgreSQL)]
+  Browser[Admin Browser] --> Web[Go API and admin UI]
+  Web --> Database[(SQLite file)]
   Web --> Jobs[Configuration Job Store]
   Jobs --> Worker[Config Worker]
   Worker --> Control[Service-control helper]
@@ -30,21 +30,29 @@ flowchart TB
   Nginx --> Upstreams[Explicit Upstreams]
 ```
 
+## Persistence
+
+- **One SQLite file.** The path comes from `PROXYCORE_SQLITE_PATH` (required, no default). Compose sets it to `/var/lib/proxycore-db/proxycore.db` on the `sqlite-data` volume, which `api` and `worker` both mount.
+- **WAL and pragmas.** Connections open the file with `journal_mode(WAL)`, `busy_timeout(5000)`, and `foreign_keys(1)` (`apps/api/internal/sqlitedb/open.go`).
+- **One writer at a time.** Go write transactions start with `BEGIN IMMEDIATE` (`apps/api/internal/sqlitedb/write.go`); the busy timeout absorbs contention between api and worker.
+- **Migrations belong to the API.** `apps/api/internal/sqlitedb/migrations` (schema v6) is applied by the Go API on startup. The worker never migrates.
+- **Worker gate and wakeup.** The worker waits up to 60 s for schema v6 (`EXPECTED_SQLITE_SCHEMA_VERSION`), refuses a newer schema, and detects queued jobs by polling a job cursor. There is no LISTEN/NOTIFY. The reconciliation sweep runs every 5 minutes by default.
+
 ## Control plane
 
-### Next.js
+### Go API
 
 Owns: local auth/sessions, Owner/Operator roles, resource CRUD/validation, desired revisions, job submission, certificate requests, audit, status UI.
 
 MUST NOT: hold Docker socket, run arbitrary shell, write active Nginx/CoreDNS config, expose private keys, mark jobs applied without worker evidence.
 
-### PostgreSQL
+### SQLite
 
-Durable source of truth on the internal Compose network only.
+Durable source of truth: the single SQLite file described under Persistence. It is never exposed on the network.
 
 ### Secrets
 
-Master key outside PostgreSQL. Certificate private keys, Basic Auth password hashes, and provider credentials encrypted at rest. Plaintext never in API responses, ordinary logs, or non-secret rendered config. Basic Auth hashes are materialized by the worker into versioned htpasswd files beside the Nginx candidate on the shared candidates volume; Nginx config references those candidate paths and never embeds credentials.
+Master key outside the SQLite file. Certificate private keys, Basic Auth password hashes, and provider credentials encrypted at rest. Plaintext never in API responses, ordinary logs, or non-secret rendered config. Basic Auth hashes are materialized by the worker into versioned htpasswd files beside the Nginx candidate on the shared candidates volume; Nginx config references those candidate paths and never embeds credentials.
 
 ### Worker
 
@@ -58,7 +66,7 @@ Separate process that:
 6. promotes and reloads through fixed helper operations;
 7. health-checks and records applied state or rolls back.
 
-The web process and worker have no raw Docker socket. Dual per-service control sidecars are deferred. The helper is the only component that may use the host/container control mechanism, and it exposes only fixed staging, validation, promotion, reload, health, and rollback operations for the named CoreDNS and Nginx services. User input cannot become shell commands; optional custom Nginx input is limited to validated server-level directive lines and cannot create configuration blocks.
+The API process and worker have no raw Docker socket. Dual per-service control sidecars are deferred. The helper is the only component that may use the host/container control mechanism, and it exposes only fixed staging, validation, promotion, reload, health, and rollback operations for the named CoreDNS and Nginx services. User input cannot become shell commands; optional custom Nginx input is limited to validated server-level directive lines and cannot create configuration blocks.
 
 ## Data plane
 
@@ -105,8 +113,8 @@ and must never be the internal Docker service address.
 ```mermaid
 sequenceDiagram
   participant Operator
-  participant Web as NextControlPlane
-  participant Db as PostgreSQL
+  participant Web as GoAPI
+  participant Db as SQLite
   participant Worker
   participant Control as ServiceControl
   participant Service as NginxOrCoreDNS
@@ -130,10 +138,10 @@ Structured logs + in-app health/job/certificate status. Operational logs, audit 
 
 | Service | Exposure | Privilege |
 | --- | --- | --- |
-| `web` | Internal (optionally via Nginx) | No reload / no Docker socket |
+| `api` | Internal (optionally via Nginx) | No reload / no Docker socket |
 | `worker` | Internal | Candidate rendering/validation; private helper socket only |
 | `control` | Internal | Fixed service-control operations; private Unix socket |
-| `postgres` | Internal | DB credentials |
+| `sqlite-data` volume | Internal | SQLite file; mounted by `api` and `worker` |
 | `nginx` | Host HTTP/HTTPS/stream ports; TCP/UDP 443 when HTTP/3 is enabled | Data plane only |
 | `coredns` | LAN DNS port as configured | Data plane only |
 
@@ -147,9 +155,9 @@ Structured logs + in-app health/job/certificate status. Operational logs, audit 
 
 | Failure | Behavior |
 | --- | --- |
-| Web down | Data plane keeps serving |
+| API down | Data plane keeps serving |
 | Worker down | Desired changes unapplied; data plane unchanged |
-| Postgres down | Data plane keeps last config; new changes fail visibly |
+| SQLite file unavailable | Data plane keeps last config; new changes fail visibly |
 | Validation failure | Prior revision stays active |
 | Reload/health failure | Rollback or explicit recovery |
 | Forwarder down | Managed zones still work; unmanaged queries error visibly |

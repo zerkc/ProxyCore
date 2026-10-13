@@ -12,9 +12,12 @@
 #   ENROLLMENT_PORT    Published direct TLS enrollment port (default: 3443;
 #                      not Nginx proxy ingress)
 #   DNS_PORT           Published CoreDNS port (default: 53)
-#   SKIP_BUILD=1       Skip image rebuild (update config/migrate only)
+#   SKIP_BUILD=1       Skip image rebuild (update config only)
 #
-# The script is idempotent: first run installs, later runs pull + migrate + recreate.
+# The script is idempotent: first run installs, later runs pull + recreate. The
+# api applies SQLite schema migrations on start. Installs that still hold a
+# legacy PostgreSQL volume are never converted automatically: the script stops
+# and points at scripts/convert-postgres.sh.
 
 set -eu
 
@@ -23,15 +26,13 @@ PROXYCORE_BRANCH="${PROXYCORE_BRANCH:-main}"
 WEB_PORT_EXTERNAL_SET="${WEB_PORT+x}"
 ENROLLMENT_PORT_EXTERNAL_SET="${ENROLLMENT_PORT+x}"
 DNS_PORT_EXTERNAL_SET="${DNS_PORT+x}"
-POSTGRES_USER_EXTERNAL_SET="${POSTGRES_USER+x}"
-POSTGRES_DB_EXTERNAL_SET="${POSTGRES_DB+x}"
 WEB_PORT="${WEB_PORT-3000}"
 ENROLLMENT_PORT="${ENROLLMENT_PORT-3443}"
 DNS_PORT="${DNS_PORT-53}"
-POSTGRES_USER="${POSTGRES_USER-proxycore}"
-POSTGRES_DB="${POSTGRES_DB-proxycore}"
 # Precedence is explicit process environment, then safe .env data, then defaults.
 SKIP_BUILD="${SKIP_BUILD:-0}"
+# SQLite database path inside the api image (compose sqlite-data volume).
+SQLITE_DB_PATH=/var/lib/proxycore-db/proxycore.db
 
 log() {
   printf '==> %s\n' "$*"
@@ -61,20 +62,10 @@ validate_host_port() {
   fi
 }
 
-validate_database_setting() {
-  name="$1"
-  value="$2"
-  case "$value" in
-  ''|*[!A-Za-z0-9_.-]*) die "${name} contains unsupported characters" ;;
-  esac
-}
-
 validate_runtime_values() {
   validate_host_port WEB_PORT "$WEB_PORT"
   validate_host_port ENROLLMENT_PORT "$ENROLLMENT_PORT"
   validate_host_port DNS_PORT "$DNS_PORT"
-  validate_database_setting POSTGRES_USER "$POSTGRES_USER"
-  validate_database_setting POSTGRES_DB "$POSTGRES_DB"
 }
 
 trim_horizontal() {
@@ -177,12 +168,6 @@ parse_port_value() {
   validate_host_port "$port_key" "$PARSED_VALUE"
 }
 
-parse_database_value() {
-  database_key="$1"
-  parse_quoted_or_plain "$database_key" "$2"
-  validate_database_setting "$database_key" "$PARSED_VALUE"
-}
-
 load_env_values() {
   env_file="$1"
   env_line_number=0
@@ -191,13 +176,9 @@ load_env_values() {
   ENV_WEB_PORT_FOUND=0
   ENV_ENROLLMENT_PORT_FOUND=0
   ENV_DNS_PORT_FOUND=0
-  ENV_POSTGRES_USER_FOUND=0
-  ENV_POSTGRES_DB_FOUND=0
   ENV_WEB_PORT_VALUE=''
   ENV_ENROLLMENT_PORT_VALUE=''
   ENV_DNS_PORT_VALUE=''
-  ENV_POSTGRES_USER_VALUE=''
-  ENV_POSTGRES_DB_VALUE=''
 
   if [ "$env_file" = "-" ]; then
     env_file=/dev/stdin
@@ -230,7 +211,7 @@ load_env_values() {
     trim_horizontal "$env_key"
     env_key=$TRIMMED_VALUE
     case "$env_key" in
-      WEB_PORT|ENROLLMENT_PORT|DNS_PORT|POSTGRES_USER|POSTGRES_DB) ;;
+      WEB_PORT|ENROLLMENT_PORT|DNS_PORT) ;;
       *) env_previous_key='' ; continue ;;
     esac
     case "$env_key" in
@@ -251,18 +232,6 @@ load_env_values() {
         parse_port_value "$env_key" "$env_value"
         ENV_DNS_PORT_FOUND=1
         ENV_DNS_PORT_VALUE=$PARSED_VALUE
-        ;;
-      POSTGRES_USER)
-        [ "$ENV_POSTGRES_USER_FOUND" -eq 0 ] || die "duplicate POSTGRES_USER in .env"
-        parse_database_value "$env_key" "$env_value"
-        ENV_POSTGRES_USER_FOUND=1
-        ENV_POSTGRES_USER_VALUE=$PARSED_VALUE
-        ;;
-      POSTGRES_DB)
-        [ "$ENV_POSTGRES_DB_FOUND" -eq 0 ] || die "duplicate POSTGRES_DB in .env"
-        parse_database_value "$env_key" "$env_value"
-        ENV_POSTGRES_DB_FOUND=1
-        ENV_POSTGRES_DB_VALUE=$PARSED_VALUE
         ;;
     esac
     env_previous_key=$env_key
@@ -299,12 +268,6 @@ apply_env_file_values() {
   fi
   if [ "$DNS_PORT_EXTERNAL_SET" != x ] && [ "$ENV_DNS_PORT_FOUND" -eq 1 ]; then
     DNS_PORT=$ENV_DNS_PORT_VALUE
-  fi
-  if [ "$POSTGRES_USER_EXTERNAL_SET" != x ] && [ "$ENV_POSTGRES_USER_FOUND" -eq 1 ]; then
-    POSTGRES_USER=$ENV_POSTGRES_USER_VALUE
-  fi
-  if [ "$POSTGRES_DB_EXTERNAL_SET" != x ] && [ "$ENV_POSTGRES_DB_FOUND" -eq 1 ]; then
-    POSTGRES_DB=$ENV_POSTGRES_DB_VALUE
   fi
 }
 
@@ -346,24 +309,40 @@ preflight_runtime_values() {
 }
 
 random_b64() {
-  # 32 raw bytes → base64 (master key / passwords)
+  # 32 raw bytes → base64 (master key)
   openssl rand -base64 32 | tr -d '\n'
 }
 
-random_password() {
-  openssl rand -base64 24 | tr -d '/+=\n' | cut -c1-32
+# A legacy PostgreSQL install is detected by its named volume. It is only a
+# problem while no SQLite database exists yet: the converter never runs here
+# automatically and the volume is never touched.
+# The compose project decides the legacy volume name. It comes from the
+# environment, then from the install .env (read as data, never sourced or
+# printed; a missing .env is fine), then the default project.
+compose_project_name() {
+  project_name="${COMPOSE_PROJECT_NAME:-}"
+  if [ -z "$project_name" ] && [ -n "${PROXYCORE_HOME:-}" ] && [ -f "${PROXYCORE_HOME}/.env" ]; then
+    project_name=$(tr -d '\r' < "${PROXYCORE_HOME}/.env" \
+      | sed -n 's/^[[:space:]]*COMPOSE_PROJECT_NAME[[:space:]]*=[[:space:]]*//p' \
+      | sed -n '1p' \
+      | sed -e 's/^"\(.*\)"$/\1/' -e "s/^'\(.*\)'\$/\1/")
+  fi
+  printf '%s\n' "${project_name:-proxycore}"
 }
 
-wait_postgres() {
-  attempts=60
-  while [ "$attempts" -gt 0 ]; do
-    if docker compose exec -T postgres pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB" >/dev/null 2>&1; then
-      return 0
-    fi
-    attempts=$((attempts - 1))
-    sleep 1
-  done
-  die "postgres did not become ready"
+legacy_postgres_unconverted() {
+  legacy_volume="$(compose_project_name)_postgres-data"
+  docker volume inspect "$legacy_volume" >/dev/null 2>&1 || return 1
+  if docker compose run --rm --no-deps -T --entrypoint test api -f "$SQLITE_DB_PATH" >/dev/null 2>&1; then
+    return 1
+  fi
+  return 0
+}
+
+refuse_unconverted_legacy_postgres() {
+  if legacy_postgres_unconverted; then
+    die "legacy PostgreSQL data found (volume $(compose_project_name)_postgres-data) and no SQLite database exists yet. Nothing was changed. Convert it offline first: cd ${PROXYCORE_HOME} && sh scripts/convert-postgres.sh (see docs/runbooks/upgrade-from-postgres.md), then run this installer again"
+  fi
 }
 
 # Append KEY=VALUE to .env when the key is missing (preserves existing values).
@@ -391,9 +370,8 @@ ensure_env() {
 
   need_cmd openssl
   master_key="$(random_b64)"
-  postgres_password="$(random_password)"
   create_env_file .env
-  log "Created .env (generated PROXYCORE_MASTER_KEY_BASE64 and POSTGRES_PASSWORD)"
+  log "Created .env (generated PROXYCORE_MASTER_KEY_BASE64)"
 }
 
 sync_repo() {
@@ -485,24 +463,19 @@ main() {
   # not inside the sidecar container.
   export PROXYCORE_HOST_HOME="$(pwd)"
 
-  # Export compose project name for stable container names across updates.
-  export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-proxycore}"
+  # Export compose project name for stable container names across updates. The
+  # same resolution (environment, .env, default) drives the legacy volume check.
+  COMPOSE_PROJECT_NAME="$(compose_project_name)"
+  export COMPOSE_PROJECT_NAME
 
   # Compose reads .env itself. Export only the validated values this script
   # needs so explicit process environment values retain precedence.
-  export WEB_PORT ENROLLMENT_PORT DNS_PORT POSTGRES_USER POSTGRES_DB
+  export WEB_PORT ENROLLMENT_PORT DNS_PORT
 
   check_host_ports
 
-  log "Starting PostgreSQL"
-  docker compose up -d postgres
-  wait_postgres
-
-  log "Applying database migrations"
-  # Always rebuild migrate so new SQL under packages/db/migrations is in the image.
-  # Without --build, compose reuses a stale migrate image and skips additive migrations.
-  docker compose --profile tools build migrate
-  docker compose --profile tools run --rm migrate
+  log "Checking for unconverted legacy PostgreSQL data"
+  refuse_unconverted_legacy_postgres
 
   if [ "$SKIP_BUILD" = "1" ]; then
     log "Recreating services (no rebuild)"

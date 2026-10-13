@@ -31,8 +31,6 @@
     }
   },
   "include": [
-    "apps/web/**/*.ts",
-    "apps/web/**/*.tsx",
     "apps/worker/**/*.ts",
     "apps/control/**/*.ts",
     "packages/**/*.ts",

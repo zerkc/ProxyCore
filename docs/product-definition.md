@@ -1,6 +1,6 @@
 # ProxyCore Product Definition
 
-ProxyCore is a single-installation homelab control plane for local DNS and secure ingress. It combines a Next.js admin UI with PostgreSQL, CoreDNS, Nginx, and a configuration worker so operators can manage zones, records, certificates, and users without hand-editing service config.
+ProxyCore is a single-installation homelab control plane for local DNS and secure ingress. It combines a Go-served admin UI with SQLite, CoreDNS, Nginx, and a configuration worker so operators can manage zones, records, certificates, and users without hand-editing service config.
 
 The DNS experience is **Cloudflare-style**: manage a zone, add records, and toggle proxy on A/AAAA/CNAME. ProxyCore is also the **sole DNS server** on the homelab network: managed zones are authoritative, and every other query is forwarded to configured upstream resolvers.
 
@@ -99,7 +99,7 @@ Stream listeners are a separate journey from the DNS proxy toggle (HTTP/HTTPS on
 - Explicit HTTP/HTTPS origins and TCP/UDP stream upstreams
 - Proxy knobs on the record: HTTPS default (disableable), HTTP/2, HTTP/3, headers, path redirect/routing, Basic Auth over TLS
 - Certificates: self-signed, LE HTTP-01, LE DNS-01 (Cloudflare challenge only)
-- PostgreSQL + Drizzle; worker apply with validate/reload/rollback
+- SQLite (Go API owns migrations); worker apply with validate/reload/rollback
 - Structured logs and in-app job/health/certificate status
 
 ## Deferred

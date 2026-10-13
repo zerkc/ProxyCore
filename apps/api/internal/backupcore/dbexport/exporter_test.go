@@ -2,44 +2,38 @@ package dbexport
 
 import (
 	"bytes"
-	"context"
 	"encoding/base64"
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/zerkc/ProxyCore/apps/api/internal/secrets"
 )
 
-func TestExporterPrependsMasterKeyMarker(t *testing.T) {
-	pool := openExporterTestPool(t)
+func TestMasterKeyMarkerRoundTripsThroughSecretCipher(t *testing.T) {
 	masterKey := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x42}, 32))
-	writer := newMemWriter()
-
-	_, err := New(pool, ExporterOptions{
-		Tables:          []string{"secrets"},
-		MasterKeyBase64: masterKey,
-	}).Export(context.Background(), writer)
+	fixed := func() time.Time { return time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC) }
+	row, err := masterKeyMarker(fixed, masterKey)
 	if err != nil {
-		t.Fatalf("Export: %v", err)
+		t.Fatalf("masterKeyMarker: %v", err)
 	}
-
-	var rows []map[string]any
-	if err := json.Unmarshal(writer.files["db/secrets.json"], &rows); err != nil {
-		t.Fatalf("decode secrets export: %v", err)
+	raw, err := json.Marshal(row)
+	if err != nil {
+		t.Fatalf("marshal marker: %v", err)
 	}
-	if len(rows) == 0 {
-		t.Fatal("secrets export is empty")
+	var decoded map[string]any
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatalf("decode marker: %v", err)
 	}
-	marker := rows[0]
-	if marker["id"] != "00000000-0000-0000-0000-000000000000" {
-		t.Fatalf("marker id = %v", marker["id"])
+	if decoded["id"] != "00000000-0000-0000-0000-000000000000" {
+		t.Fatalf("marker id = %v", decoded["id"])
 	}
-	if marker["purpose"] != "__backup_master_key_marker__" {
-		t.Fatalf("marker purpose = %v", marker["purpose"])
+	if decoded["purpose"] != "__backup_master_key_marker__" {
+		t.Fatalf("marker purpose = %v", decoded["purpose"])
 	}
-	ciphertext, ok := marker["ciphertext"].(string)
+	ciphertext, ok := decoded["ciphertext"].(string)
 	if !ok || ciphertext == "" {
-		t.Fatalf("marker ciphertext = %v", marker["ciphertext"])
+		t.Fatalf("marker ciphertext = %v", decoded["ciphertext"])
 	}
 	plaintext, err := secrets.DecryptSecret(ciphertext, masterKey)
 	if err != nil {

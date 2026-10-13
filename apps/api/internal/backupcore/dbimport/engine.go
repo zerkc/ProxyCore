@@ -9,8 +9,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/zerkc/ProxyCore/apps/api/internal/backupcore/zipextract"
 )
@@ -23,8 +21,16 @@ type AuditEmitter interface {
 	EmitBackupImport(ctx context.Context, actorID string, bundleSHA256 string, dryRun bool, success bool) error
 }
 
+// TableImporter atomically replaces the configuration tables with the decoded
+// bundle payloads. It owns the transaction and the single-flight guard, so the
+// engine stays independent of the database. A failure must leave the database
+// unchanged; an in-flight second import must return ErrImportAlreadyInProgress.
+type TableImporter interface {
+	ReplaceTables(ctx context.Context, payloads []tablePayload) ([]TablePreview, error)
+}
+
 type Options struct {
-	Pool                    *pgxpool.Pool
+	Tables                  TableImporter
 	MasterKeyBase64         string
 	EnvRestorePath          string
 	CandidateRoot           string
@@ -38,7 +44,7 @@ type Options struct {
 }
 
 type Engine struct {
-	pool                    *pgxpool.Pool
+	tables                  TableImporter
 	masterKeyBase64         string
 	envRestorePath          string
 	candidateRoot           string
@@ -84,7 +90,7 @@ func New(opts Options) (*Engine, error) {
 		now = time.Now
 	}
 	return &Engine{
-		pool:                    opts.Pool,
+		tables:                  opts.Tables,
 		masterKeyBase64:         opts.MasterKeyBase64,
 		envRestorePath:          opts.EnvRestorePath,
 		candidateRoot:           opts.CandidateRoot,
@@ -174,31 +180,13 @@ func (e *Engine) Import(ctx context.Context, archive zipextract.Archive, passphr
 		success = true
 		return report, nil
 	}
-	if e.pool == nil {
+	if e.tables == nil {
 		return report, errors.New("backup import: nil database pool")
 	}
-
-	tx, err := e.pool.BeginTx(ctx, pgx.TxOptions{})
-	if err != nil {
-		return report, fmt.Errorf("begin backup import transaction: %w", err)
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			_ = tx.Rollback(ctx)
-		}
-	}()
-	if err := acquireImportLock(ctx, tx); err != nil {
-		return report, err
-	}
-	previews, err = importConfigTables(ctx, tx, payloads)
+	previews, err = e.tables.ReplaceTables(ctx, payloads)
 	if err != nil {
 		return report, err
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return report, fmt.Errorf("commit backup import: %w", err)
-	}
-	committed = true
 	report.Tables = previews
 
 	if err := restoreFiles(ctx, indexed, manifest, e.envRestorePath, e.candidateRoot, e.revisionID, e.envMode); err != nil {

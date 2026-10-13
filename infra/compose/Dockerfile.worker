@@ -8,7 +8,6 @@ WORKDIR /app
 COPY package.json bun.lock bunfig.toml tsconfig.json ./
 COPY apps/ui/package.json ./apps/ui/package.json
 COPY packages ./packages
-COPY drizzle.config.ts ./
 
 # Install with cache mount — repeat builds skip redownloading deps entirely.
 # Source is NOT copied yet, so source changes won't bust this layer.

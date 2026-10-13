@@ -1,22 +1,6 @@
 name: proxycore
 
 services:
-  postgres:
-    image: postgres:17-alpine
-    environment:
-      POSTGRES_DB: ${POSTGRES_DB:-proxycore}
-      POSTGRES_USER: ${POSTGRES_USER:-proxycore}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
-    volumes:
-      - postgres-data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
-      interval: 5s
-      timeout: 5s
-      retries: 12
-    restart: unless-stopped
-    networks: [control]
-
   # Go control plane: SPA + auth + all configuration routes + ACME challenge.
   # The UI (static SPA) is bundled into the api image.
   api:
@@ -28,7 +12,9 @@ services:
       # Enrollment TLS is direct from the API container, not Nginx proxy ingress.
       PROXYCORE_ENROLLMENT_TLS_ADDR: ":3443"
       PROXYCORE_UI_DIST: /app/ui
-      DATABASE_URL: postgres://${POSTGRES_USER:-proxycore}:${POSTGRES_PASSWORD:-change-me}@postgres:5432/${POSTGRES_DB:-proxycore}
+      # SQLite database shared with the worker through the sqlite-data volume.
+      # The api owns schema migrations and creates the file on first start.
+      PROXYCORE_SQLITE_PATH: /var/lib/proxycore-db/proxycore.db
       PROXYCORE_MASTER_KEY_BASE64: ${PROXYCORE_MASTER_KEY_BASE64:?set a 32-byte base64 master key}
       PROXY_INGRESS_IPV4: ${PROXY_INGRESS_IPV4:-}
       PROXY_INGRESS_IPV6: ${PROXY_INGRESS_IPV6:-}
@@ -40,9 +26,9 @@ services:
       PROXYCORE_UPDATE_CHECK_INTERVAL: ${PROXYCORE_UPDATE_CHECK_INTERVAL:-6h}
       PROXYCORE_UPDATE_CHECK_TIMEOUT: ${PROXYCORE_UPDATE_CHECK_TIMEOUT:-5s}
       PROXYCORE_UPDATER_URL: ${PROXYCORE_UPDATER_URL:-http://updater:8080}
-    depends_on:
-      postgres:
-        condition: service_healthy
+    volumes:
+      # Mount the directory (not the file): WAL mode creates -wal/-shm siblings.
+      - sqlite-data:/var/lib/proxycore-db
     ports:
       - "${WEB_PORT:-3000}:3000"
       - "${ENROLLMENT_PORT:-3443}:3443"
@@ -61,7 +47,8 @@ services:
     networks: [control, data]
 
   # Self-update orchestrator. Reaches the docker socket + the compose project
-  # so it can build (local mode) or pull (registry mode), migrate, and restart
+  # so it can build (local mode) or pull (registry mode), run the legacy-data
+  # preflight, and restart
   # the application and Nginx recovery owners. When the update succeeds
   # it writes a bootstrap request to the shared volume; the updater-bootstrap
   # sidecar (below) watches that file and replaces this container's image.
@@ -82,7 +69,6 @@ services:
       PROXYCORE_ENV_FILE: ${PROXYCORE_HOST_HOME:-${PWD}}/.env
       PROXYCORE_COMPOSE_PROJECT: ${COMPOSE_PROJECT_NAME:-proxycore}
       PROXYCORE_UPDATER_SERVICES: "api worker control nginx"
-      PROXYCORE_MIGRATE_SERVICE: migrate
       PROXYCORE_HEALTH_URL: http://api:3000/api/health
       PROXYCORE_HEALTH_TIMEOUT: ${PROXYCORE_HEALTH_TIMEOUT:-90s}
       PROXYCORE_BOOTSTRAP_REQUEST_FILE: /bootstrap/request.json
@@ -131,16 +117,34 @@ services:
     restart: unless-stopped
     networks: [control]
 
-  # Drizzle migrator (Node one-shot). Not started with `up`; used by install.sh.
+  # One-shot legacy PostgreSQL -> SQLite conversion (profile "tools"). The
+  # dashboard updater of the previous release runs `docker compose run --rm
+  # migrate` after it builds and before it restarts the stack. It is a no-op
+  # when there is no legacy <project>_postgres-data volume, and when
+  # proxycore.db and its marker already exist. When the legacy volume exists
+  # and no SQLite database does, it stops the api and worker containers (the
+  # only writers, through the Docker socket), converts the data while the old
+  # postgres keeps running, and leaves api and worker stopped for the updater
+  # to restart. It fails closed before stopping anything when the master key or
+  # the legacy postgres is unavailable. The legacy volume is never mounted here
+  # or by any runtime service. See scripts/migrate-legacy-postgres.sh.
   migrate:
     build:
       context: .
       dockerfile: infra/compose/Dockerfile.migrate
+    image: proxycore-migrate:local
     environment:
-      DATABASE_URL: postgres://${POSTGRES_USER:-proxycore}:${POSTGRES_PASSWORD:-change-me}@postgres:5432/${POSTGRES_DB:-proxycore}
-    depends_on:
-      postgres:
-        condition: service_healthy
+      # Empty default: a missing key is refused by the script, not by compose,
+      # so every other compose command keeps working on a broken .env.
+      PROXYCORE_MASTER_KEY_BASE64: ${PROXYCORE_MASTER_KEY_BASE64:-}
+      PROXYCORE_COMPOSE_PROJECT: ${COMPOSE_PROJECT_NAME:-proxycore}
+      # Same defaults as the old postgres service, so an untouched .env works.
+      POSTGRES_USER: ${POSTGRES_USER:-proxycore}
+      POSTGRES_DB: ${POSTGRES_DB:-proxycore}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - sqlite-data:/var/lib/proxycore-db
     networks: [control]
     profiles: [tools]
 
@@ -150,7 +154,9 @@ services:
       dockerfile: infra/compose/Dockerfile.worker
     environment:
       NODE_ENV: production
-      DATABASE_URL: postgres://${POSTGRES_USER:-proxycore}:${POSTGRES_PASSWORD:-change-me}@postgres:5432/${POSTGRES_DB:-proxycore}
+      # Same file as the api. The worker retries until the api has migrated the
+      # schema to the version it expects, so start order does not matter.
+      PROXYCORE_SQLITE_PATH: /var/lib/proxycore-db/proxycore.db
       PROXYCORE_MASTER_KEY_BASE64: ${PROXYCORE_MASTER_KEY_BASE64:?set a 32-byte base64 master key}
       WORKER_SOCKET_PATH: /run/proxycore/control.sock
       WORKER_CANDIDATE_ROOT: /var/lib/proxycore/candidates
@@ -162,8 +168,9 @@ services:
     volumes:
       - candidates:/var/lib/proxycore
       - control-socket:/run/proxycore
+      - sqlite-data:/var/lib/proxycore-db
     depends_on:
-      postgres:
+      api:
         condition: service_healthy
       control:
         condition: service_started
@@ -256,8 +263,11 @@ services:
       data:
         ipv4_address: 172.30.0.10
 
+# The legacy `<project>_postgres-data` volume is intentionally NOT declared:
+# it is left untouched on disk (so `compose down -v` cannot delete it) and is
+# only read by the converter run by the `migrate` service during upgrade.
 volumes:
-  postgres-data:
+  sqlite-data:
   candidates:
   control-socket:
   certificates:

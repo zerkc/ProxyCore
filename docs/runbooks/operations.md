@@ -23,9 +23,9 @@ The worker renders a revision, stages it, validates it, promotes it, reloads
 the target service, and checks health. A failed health check must result in a
 rollback or an explicit recovery-required job.
 
-The worker listens for PostgreSQL job notifications and wakes immediately when
-an apply is committed. It also reconciles the durable queue every 5 minutes by
-default (`WORKER_RECONCILIATION_INTERVAL_MS`). Jobs are claimed with a lease
+The worker polls the SQLite job cursor and picks up an apply shortly after it is
+committed; there is no LISTEN/NOTIFY. It also reconciles the durable queue every
+5 minutes by default (`WORKER_RECONCILIATION_INTERVAL_MS`). Jobs are claimed with a lease
 and are re-queued after the lease expires, so a missed notification or a
 restart does not discard desired state or an outstanding apply.
 
@@ -52,7 +52,8 @@ the worker a socket.
 
 ## Master-key rotation
 
-1. Stop mutations and take a verified backup of the PostgreSQL volume.
+1. Stop mutations and take a verified backup of the SQLite file (see
+   [backup-restore.md](backup-restore.md#backing-up-the-sqlite-file)).
 2. Keep the old key available only in a protected operator environment.
 3. Read each encrypted secret through the old key and write a new ciphertext
    with the new 32-byte key in one controlled migration.
@@ -85,3 +86,55 @@ DNS-01 adapter.
 
 Retention removes old or oversized operational artifacts only. It must keep
 desired state, the active applied revision, and active certificate keys.
+
+## PostgreSQL to SQLite conversion
+
+Existing PostgreSQL installations move to SQLite once, with `apps/api/cmd/convert`
+(`proxycore-convert`). It is the only code that still reads PostgreSQL; the
+source is read inside one `REPEATABLE READ READ ONLY` transaction and is never
+written.
+
+1. The dashboard update converts automatically. The `migrate` service
+   (`scripts/migrate-legacy-postgres.sh`, image `infra/compose/Dockerfile.migrate`)
+   runs during the update. It stops api and worker (the only SQLite writers,
+   through the Docker socket), converts while the legacy `postgres` keeps
+   running, and restarts api and worker itself if the conversion fails. It
+   refuses before stopping anything when the master key or the legacy postgres
+   is unavailable. Steps, downtime, failure handling and the orphaned postgres
+   container are in [upgrade-from-postgres.md](upgrade-from-postgres.md).
+2. Manual fallback: `scripts/convert-postgres.sh`. Its steps, prerequisites,
+   backup and rollback are in the same runbook: it refuses while api or worker
+   run, starts a temporary PostgreSQL on the legacy volume, and runs
+   `proxycore-convert` from the api image (which reads
+   `PROXYCORE_CONVERT_PG_URL` and `PROXYCORE_MASTER_KEY_BASE64`; the output
+   path is `/var/lib/proxycore-db/proxycore.db`). It needs the converter in the
+   api image: build the new release's image first (`docker compose build api`).
+   The installer (`scripts/install.sh`) runs `up -d --remove-orphans`, which
+   removes the legacy `postgres` container; the volume is kept. Because the
+   automatic conversion needs that container running, convert with this script
+   before the installer. The installer refuses to start until the data is
+   converted.
+3. The converter validates independently of the copy: per-table row counts
+   and canonical hashes on both sides, `foreign_key_check`,
+   `integrity_check`, schema version, every encrypted secret decrypts with the
+   master key and is byte-identical to PostgreSQL, `config_revisions.checksum`
+   and `applied_snapshots.content_hash` are recomputed, and snapshot BLOBs are
+   compared. `--out` must not exist (there is no `--force`). Only then is the
+   file published atomically and `<out>.converted.json` written. That marker
+   (tool version, UTC time, per-table counts and hashes, warnings, source
+   schema fingerprint, no secrets) is the proof that the file was converted and
+   validated; a database without it must not be used.
+4. Read the warnings. Dangling references in `enrollment_tokens`,
+   `enrollment_grants` and `enrolled_nodes` (their foreign keys were dropped
+   in PostgreSQL) and older-schema gaps are copied or defaulted and listed, not
+   fatal.
+5. Start the new release (`scripts/install.sh`, or the dashboard update); api and worker share the
+   `sqlite-data` volume at `/var/lib/proxycore-db`.
+
+Exit codes: `0` converted and validated, `1` validation or fidelity failure
+(nothing is published, temporary files are removed), `2` usage error or output
+already present, `3` PostgreSQL unreachable or a schema or data shape the
+converter does not know.
+
+Rollback: redeploy the previous release against the untouched PostgreSQL
+database. Changes made after cutover on SQLite are not copied back.

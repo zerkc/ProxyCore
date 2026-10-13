@@ -1,0 +1,13 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "incremental": false,
+    "noEmit": true,
+    "types": ["bun"]
+  },
+  "files": [
+    "src/sqlite-foundation/revision-record.ts",
+    "src/sqlite-foundation/revision-record.bun.ts"
+  ],
+  "include": []
+}

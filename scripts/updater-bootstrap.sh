@@ -170,7 +170,7 @@ while true; do
 
                 echo "$UPSTREAM_LOG_PREFIX recreate attempt $_attempt/$RETRIES..."
                 # Recreate the updater container from the newly-built/pulled image.
-                # --no-deps   skips postgres / api / etc.
+                # --no-deps   skips api / worker / etc.
                 # --force-recreate ensures the container is replaced even if the
                 #                  image tag is unchanged (defensive).
                 # --no-build  skips an implicit second build.

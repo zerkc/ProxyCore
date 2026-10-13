@@ -5,7 +5,7 @@
 // a process cannot reliably replace its own running image. The updater owns
 // the lifecycle of the services that carry application and data-plane recovery
 // behavior. After a successful
-// build/pull→migrate→restart→verify sequence it atomically writes a bootstrap
+// build/pull→preflight→restart→verify sequence it atomically writes a bootstrap
 // request to a shared volume so the sidecar can build/pull the new image and
 // recreate the updater container without a circular dependency.
 package updater
@@ -23,6 +23,15 @@ import (
 	"strings"
 	"sync"
 	"time"
+)
+
+const (
+	// legacyPostgresVolume is the compose volume name (without project prefix)
+	// that held the PostgreSQL data of releases older than the SQLite runtime.
+	legacyPostgresVolume = "postgres-data"
+	// sqliteDatabasePath is where the api container stores the SQLite database
+	// (see PROXYCORE_SQLITE_PATH in compose.yaml).
+	sqliteDatabasePath = "/var/lib/proxycore-db/proxycore.db"
 )
 
 const (
@@ -53,9 +62,6 @@ type Options struct {
 	// update. The updater itself MUST NOT be in this list. Defaults include
 	// api, worker, control, and nginx because control/Nginx own recovery.
 	Services []string
-	// MigrateService is the name of the one-shot migration service defined
-	// in compose.yaml under profiles: [tools].
-	MigrateService string
 	// HealthURL is polled after restart to confirm the new api is live.
 	HealthURL string
 	// HealthTimeout bounds how long Apply waits for HealthURL to return 2xx.
@@ -110,7 +116,7 @@ type StepResult struct {
 	StartedAt  time.Time     `json:"startedAt"`
 }
 
-// Updater orchestrates build/pull → migrate → restart → verify → bootstrap.
+// Updater orchestrates build/pull → preflight → restart → verify → bootstrap.
 type Updater struct {
 	opts Options
 
@@ -130,9 +136,6 @@ func New(opts Options) *Updater {
 	}
 	if len(opts.Services) == 0 {
 		opts.Services = []string{"api", "worker", "control", "nginx"}
-	}
-	if opts.MigrateService == "" {
-		opts.MigrateService = "migrate"
 	}
 	if opts.HealthURL == "" {
 		opts.HealthURL = "http://api:3000/api/health"
@@ -286,14 +289,9 @@ func (u *Updater) Apply(ctx context.Context, targetVersion string) (*Status, err
 	updateArgs := []string{"pull"}
 	if u.opts.UpdateMode == UpdateModeBuild {
 		updateStep = UpdateModeBuild
-		// The migration image is built too; otherwise local source changes can
-		// leave migrations stale even when api/worker were rebuilt.
-		updateArgs = []string{"--profile", "tools", "build"}
+		updateArgs = []string{"build"}
 	}
 	updateArgs = append(updateArgs, u.opts.Services...)
-	if u.opts.UpdateMode == UpdateModeBuild {
-		updateArgs = append(updateArgs, u.opts.MigrateService)
-	}
 	runStep(updateStep, func() (string, error) {
 		args := append([]string{"compose"}, u.composeArgs()...)
 		args = append(args, updateArgs...)
@@ -303,10 +301,12 @@ func (u *Updater) Apply(ctx context.Context, targetVersion string) (*Status, err
 		return u.fail(status, steps), ErrStepFailed
 	}
 
-	runStep("migrate", func() (string, error) {
-		args := append([]string{"compose"}, u.composeArgs()...)
-		args = append(args, "run", "--rm", u.opts.MigrateService)
-		return u.opts.Exec(ctx, "docker", args...)
+	// The Go api owns schema migrations on startup, so there is no migrate
+	// step. Instead refuse to replace a legacy PostgreSQL installation that
+	// has not been converted: starting the SQLite runtime against an empty
+	// volume would look like data loss.
+	runStep("preflight", func() (string, error) {
+		return u.preflightLegacyPostgres(ctx)
 	})
 	if lastStepFailed(steps) {
 		return u.fail(status, steps), ErrStepFailed
@@ -364,6 +364,30 @@ func (u *Updater) Apply(ctx context.Context, targetVersion string) (*Status, err
 	status.Status = "ok"
 	u.mu.Unlock()
 	return status, nil
+}
+
+// preflightLegacyPostgres refuses the update when a legacy PostgreSQL data
+// volume exists and no SQLite database has been created yet.
+//
+// Tradeoff: the legacy volume is detected with `docker volume inspect` on the
+// conventional <project>_postgres-data name (cheap, needs no image), and the
+// SQLite database is probed with a one-shot `compose run --no-deps` of the
+// freshly built/pulled api image, which mounts the same sqlite-data volume the
+// runtime uses (no hard-coded volume name). Any probe failure counts as "no
+// database", so the check fails closed toward refusing the update.
+func (u *Updater) preflightLegacyPostgres(ctx context.Context) (string, error) {
+	legacyVolume := u.opts.ProjectName + "_" + legacyPostgresVolume
+	if _, err := u.opts.Exec(ctx, "docker", "volume", "inspect", legacyVolume); err != nil {
+		return "no legacy PostgreSQL volume; nothing to convert", nil
+	}
+	args := append([]string{"compose"}, u.composeArgs()...)
+	args = append(args, "run", "--rm", "--no-deps", "--entrypoint", "test", "api", "-f", sqliteDatabasePath)
+	if _, err := u.opts.Exec(ctx, "docker", args...); err != nil {
+		return "", fmt.Errorf("%w: legacy PostgreSQL volume %s exists but no SQLite database was found at %s. "+
+			"Convert it offline first with scripts/convert-postgres.sh, which runs proxycore-convert "+
+			"(see docs/runbooks/upgrade-from-postgres.md), then retry the update", ErrLegacyPostgresNotConverted, legacyVolume, sqliteDatabasePath)
+	}
+	return "SQLite database present", nil
 }
 
 func (u *Updater) fail(status *Status, steps []StepResult) *Status {
@@ -547,3 +571,7 @@ func atomicWriteFile(dir, prefix string, data []byte) (string, error) {
 	}
 	return path, nil
 }
+
+// ErrLegacyPostgresNotConverted is returned by the preflight step when a legacy
+// PostgreSQL volume exists and the SQLite database has not been created yet.
+var ErrLegacyPostgresNotConverted = errors.New("updater: legacy PostgreSQL data has not been converted to SQLite")

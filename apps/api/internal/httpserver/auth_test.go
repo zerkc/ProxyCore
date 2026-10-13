@@ -1,31 +1,18 @@
 package httpserver_test
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
-	"io"
-	"log"
 	"net/http"
-	"net/http/httptest"
-	"os"
-	"regexp"
-	"strconv"
 	"strings"
 	"testing"
-	"time"
-
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/zerkc/ProxyCore/apps/api/internal/auth"
-	"github.com/zerkc/ProxyCore/apps/api/internal/config"
-	"github.com/zerkc/ProxyCore/apps/api/internal/httpserver"
 )
 
 func TestAuthHandlersBootstrapLoginLogout(t *testing.T) {
-	srv := newAuthTestServer(t)
+	env := newSQLiteHTTPTestServer(t)
+	handler := env.Handler
 
-	bootstrap := postJSON(t, srv.Handler(), "/api/auth/bootstrap", map[string]string{
+	bootstrap := doJSON(t, handler, http.MethodPost, "/api/auth/bootstrap", map[string]string{
 		"username": " Owner ",
 		"password": "correct horse battery staple",
 	}, nil)
@@ -45,7 +32,7 @@ func TestAuthHandlersBootstrapLoginLogout(t *testing.T) {
 		t.Fatalf("bootstrap user=%+v", bootstrapBody.User)
 	}
 
-	secondBootstrap := postJSON(t, srv.Handler(), "/api/auth/bootstrap", map[string]string{
+	secondBootstrap := doJSON(t, handler, http.MethodPost, "/api/auth/bootstrap", map[string]string{
 		"username": "other",
 		"password": "correct horse battery staple",
 	}, nil)
@@ -53,7 +40,7 @@ func TestAuthHandlersBootstrapLoginLogout(t *testing.T) {
 		t.Fatalf("second bootstrap status=%d body=%s", secondBootstrap.Code, secondBootstrap.Body.String())
 	}
 
-	login := postJSON(t, srv.Handler(), "/api/auth/login", map[string]string{
+	login := doJSON(t, handler, http.MethodPost, "/api/auth/login", map[string]string{
 		"username": "OWNER",
 		"password": "correct horse battery staple",
 	}, nil)
@@ -75,7 +62,12 @@ func TestAuthHandlersBootstrapLoginLogout(t *testing.T) {
 		t.Fatalf("unexpected cookie token=%q", sessionCookie.Value)
 	}
 
-	logout := postJSON(t, srv.Handler(), "/api/auth/logout", nil, sessionCookie)
+	// The session works before logout.
+	if before := doJSON(t, handler, http.MethodGet, "/api/users", nil, sessionCookie); before.Code != http.StatusOK {
+		t.Fatalf("pre-logout users status=%d body=%s", before.Code, before.Body.String())
+	}
+
+	logout := doJSON(t, handler, http.MethodPost, "/api/auth/logout", nil, sessionCookie)
 	if logout.Code != http.StatusNoContent {
 		t.Fatalf("logout status=%d body=%s", logout.Code, logout.Body.String())
 	}
@@ -83,112 +75,41 @@ func TestAuthHandlersBootstrapLoginLogout(t *testing.T) {
 	if len(clearCookies) != 1 || clearCookies[0].Name != "proxycore_session" || clearCookies[0].MaxAge != -1 {
 		t.Fatalf("logout clear cookies=%v", clearCookies)
 	}
+
+	// Logout invalidates the server-side session, not just the browser cookie.
+	if after := doJSON(t, handler, http.MethodGet, "/api/users", nil, sessionCookie); after.Code != http.StatusUnauthorized {
+		t.Fatalf("post-logout users status=%d body=%s", after.Code, after.Body.String())
+	}
 }
 
 func TestPasswordResetRestrictedSessionAndChange(t *testing.T) {
-	srv, svc := newAuthTestFixture(t)
-	bootstrap := postJSON(t, srv.Handler(), "/api/auth/bootstrap", map[string]string{"username": "owner", "password": "initial-password"}, nil)
-	if bootstrap.Code != http.StatusCreated { t.Fatalf("bootstrap status=%d body=%s", bootstrap.Code, bootstrap.Body.String()) }
-	temporary, err := svc.ResetPassword(context.Background(), " OWNER ")
-	if err != nil { t.Fatalf("reset password: %v", err) }
-	login := postJSON(t, srv.Handler(), "/api/auth/login", map[string]string{"username": "owner", "password": temporary}, nil)
-	if login.Code != http.StatusOK { t.Fatalf("login status=%d body=%s", login.Code, login.Body.String()) }
+	env := newSQLiteHTTPTestServer(t)
+	handler := env.Handler
+	bootstrap := doJSON(t, handler, http.MethodPost, "/api/auth/bootstrap", map[string]string{"username": "owner", "password": "initial-password"}, nil)
+	if bootstrap.Code != http.StatusCreated {
+		t.Fatalf("bootstrap status=%d body=%s", bootstrap.Code, bootstrap.Body.String())
+	}
+	temporary, err := env.Auth.ResetPassword(context.Background(), " OWNER ")
+	if err != nil {
+		t.Fatalf("reset password: %v", err)
+	}
+	login := doJSON(t, handler, http.MethodPost, "/api/auth/login", map[string]string{"username": "owner", "password": temporary}, nil)
+	if login.Code != http.StatusOK {
+		t.Fatalf("login status=%d body=%s", login.Code, login.Body.String())
+	}
 	cookie := login.Result().Cookies()[0]
 
-	req := httptest.NewRequest(http.MethodGet, "/api/users", nil)
-	req.AddCookie(cookie)
-	restricted := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(restricted, req)
-	if restricted.Code != http.StatusForbidden || !strings.Contains(restricted.Body.String(), "PASSWORD_CHANGE_REQUIRED") { t.Fatalf("restricted status=%d body=%s", restricted.Code, restricted.Body.String()) }
-
-	changed := postJSON(t, srv.Handler(), "/api/auth/change-password", map[string]string{"password": "new-secure-password"}, cookie)
-	if changed.Code != http.StatusOK { t.Fatalf("change status=%d body=%s", changed.Code, changed.Body.String()) }
-	req = httptest.NewRequest(http.MethodGet, "/api/users", nil)
-	req.AddCookie(cookie)
-	allowed := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(allowed, req)
-	if allowed.Code != http.StatusOK { t.Fatalf("allowed status=%d body=%s", allowed.Code, allowed.Body.String()) }
-}
-
-func newAuthTestServer(t *testing.T) *httpserver.Server {
-	t.Helper()
-	srv, _ := newAuthTestFixture(t)
-	return srv
-}
-
-func newAuthTestFixture(t *testing.T) (*httpserver.Server, *auth.Service) {
-	t.Helper()
-	if testing.Short() {
-		t.Skip("skipping database-backed auth handler tests in short mode")
-	}
-	dsn := os.Getenv("DATABASE_URL")
-	if strings.TrimSpace(dsn) == "" {
-		t.Skip("DATABASE_URL is not set")
+	restricted := doJSON(t, handler, http.MethodGet, "/api/users", nil, cookie)
+	if restricted.Code != http.StatusForbidden || !strings.Contains(restricted.Body.String(), "PASSWORD_CHANGE_REQUIRED") {
+		t.Fatalf("restricted status=%d body=%s", restricted.Code, restricted.Body.String())
 	}
 
-	ctx := context.Background()
-	adminPool, err := pgxpool.New(ctx, dsn)
-	if err != nil {
-		t.Fatalf("connect admin db: %v", err)
+	changed := doJSON(t, handler, http.MethodPost, "/api/auth/change-password", map[string]string{"password": "new-secure-password"}, cookie)
+	if changed.Code != http.StatusOK {
+		t.Fatalf("change status=%d body=%s", changed.Code, changed.Body.String())
 	}
-	t.Cleanup(adminPool.Close)
-
-	schema := "proxycore_go_auth_test_" +
-		regexp.MustCompile(`[^a-z0-9]+`).ReplaceAllString(strings.ToLower(t.Name()), "_") +
-		"_" + strconv.FormatInt(time.Now().UnixNano(), 36)
-	if _, err := adminPool.Exec(ctx, "create schema "+(pgx.Identifier{schema}).Sanitize()); err != nil {
-		t.Fatalf("create schema: %v", err)
+	allowed := doJSON(t, handler, http.MethodGet, "/api/users", nil, cookie)
+	if allowed.Code != http.StatusOK {
+		t.Fatalf("allowed status=%d body=%s", allowed.Code, allowed.Body.String())
 	}
-	t.Cleanup(func() {
-		_, _ = adminPool.Exec(context.Background(), "drop schema if exists "+(pgx.Identifier{schema}).Sanitize()+" cascade")
-	})
-
-	poolCfg, err := pgxpool.ParseConfig(dsn)
-	if err != nil {
-		t.Fatalf("parse db config: %v", err)
-	}
-	if poolCfg.ConnConfig.RuntimeParams == nil {
-		poolCfg.ConnConfig.RuntimeParams = map[string]string{}
-	}
-	poolCfg.ConnConfig.RuntimeParams["search_path"] = schema
-	pool, err := pgxpool.NewWithConfig(ctx, poolCfg)
-	if err != nil {
-		t.Fatalf("connect schema db: %v", err)
-	}
-	t.Cleanup(pool.Close)
-
-	store := auth.NewPostgresStore(pool)
-	if err := store.EnsureSchema(ctx); err != nil {
-		t.Fatalf("ensure auth schema: %v", err)
-	}
-
-	svc := auth.NewService(store, auth.ServiceOptions{SessionTTL: time.Hour})
-	srv := httpserver.New(config.Config{
-		UIDist:            t.TempDir(),
-		SessionCookieName: "proxycore_session",
-		SessionTTL:        time.Hour,
-	}, log.New(io.Discard, "", 0), httpserver.WithAuthService(svc))
-	return srv, svc
-}
-
-func postJSON(t *testing.T, handler http.Handler, target string, body any, cookie *http.Cookie) *httptest.ResponseRecorder {
-	t.Helper()
-	var payload []byte
-	if body != nil {
-		var err error
-		payload, err = json.Marshal(body)
-		if err != nil {
-			t.Fatalf("marshal body: %v", err)
-		}
-	}
-	req := httptest.NewRequest(http.MethodPost, target, bytes.NewReader(payload))
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	if cookie != nil {
-		req.AddCookie(cookie)
-	}
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
-	return rec
 }

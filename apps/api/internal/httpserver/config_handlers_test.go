@@ -1,34 +1,20 @@
 package httpserver_test
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
-	"io"
-	"log"
 	"net/http"
-	"net/http/httptest"
-	"os"
-	"regexp"
-	"strconv"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/zerkc/ProxyCore/apps/api/internal/auth"
-	"github.com/zerkc/ProxyCore/apps/api/internal/config"
 	"github.com/zerkc/ProxyCore/apps/api/internal/configuration"
 	"github.com/zerkc/ProxyCore/apps/api/internal/domain"
-	"github.com/zerkc/ProxyCore/apps/api/internal/httpserver"
-	"github.com/zerkc/ProxyCore/apps/api/internal/identity"
 )
 
 func TestConfigurationRoutesFlow(t *testing.T) {
-	srv := newConfigTestServer(t)
-	handler := srv.Handler()
+	env := newSQLiteHTTPTestServer(t)
+	handler := env.Handler
 
 	// Unauthenticated status is rejected with the Node {error} shape.
 	unauth := doJSON(t, handler, http.MethodGet, "/api/status", nil, nil)
@@ -41,22 +27,7 @@ func TestConfigurationRoutesFlow(t *testing.T) {
 		t.Fatalf("unauth body=%v", unauthBody)
 	}
 
-	// Bootstrap owner and log in.
-	bootstrap := doJSON(t, handler, http.MethodPost, "/api/auth/bootstrap", map[string]any{
-		"username": "owner",
-		"password": "correct horse battery staple",
-	}, nil)
-	if bootstrap.Code != http.StatusCreated {
-		t.Fatalf("bootstrap status=%d body=%s", bootstrap.Code, bootstrap.Body.String())
-	}
-	login := doJSON(t, handler, http.MethodPost, "/api/auth/login", map[string]any{
-		"username": "owner",
-		"password": "correct horse battery staple",
-	}, nil)
-	if login.Code != http.StatusOK {
-		t.Fatalf("login status=%d body=%s", login.Code, login.Body.String())
-	}
-	cookie := login.Result().Cookies()[0]
+	cookie := sqliteOwnerCookie(t, handler)
 
 	// Settings round-trip with a default resolver pool.
 	putSettings := doJSON(t, handler, http.MethodPut, "/api/settings", map[string]any{
@@ -181,11 +152,110 @@ func TestConfigurationRoutesFlow(t *testing.T) {
 	}
 }
 
-func TestStandaloneConfigurationMutationRemainsWritable(t *testing.T) {
-	srv := newConfigTestServer(t)
-	cookie := loginOwner(t, srv)
+func TestPatchRecordAcceptsEveryRecordIDSpelling(t *testing.T) {
+	env := newSQLiteHTTPTestServer(t)
+	handler := env.Handler
+	cookie := sqliteOwnerCookie(t, handler)
+	put := doJSON(t, handler, http.MethodPut, "/api/settings", map[string]any{
+		"defaultPool": map[string]any{"id": "default", "endpoints": []map[string]any{{"host": "1.1.1.1", "port": 53}}},
+	}, cookie)
+	if put.Code != http.StatusOK {
+		t.Fatalf("settings status=%d body=%s", put.Code, put.Body.String())
+	}
+	zoneRes := doJSON(t, handler, http.MethodPost, "/api/zones", map[string]any{"name": "example.test"}, cookie)
+	var zoneBody struct {
+		Zone domain.ZoneState `json:"zone"`
+	}
+	if err := json.Unmarshal(zoneRes.Body.Bytes(), &zoneBody); err != nil || zoneRes.Code != http.StatusCreated {
+		t.Fatalf("create zone status=%d err=%v body=%s", zoneRes.Code, err, zoneRes.Body.String())
+	}
+	zoneID := zoneBody.Zone.ID
+	recRes := doJSON(t, handler, http.MethodPost, "/api/zones/"+zoneID+"/records", map[string]any{"name": "www", "type": "A", "value": "10.0.0.5"}, cookie)
+	var recBody struct {
+		Record domain.DNSRecord `json:"record"`
+	}
+	if err := json.Unmarshal(recRes.Body.Bytes(), &recBody); err != nil || recRes.Code != http.StatusCreated {
+		t.Fatalf("add record status=%d err=%v body=%s", recRes.Code, err, recRes.Body.String())
+	}
+	recordID := recBody.Record.ID
 
-	response := doJSON(t, srv.Handler(), http.MethodPut, "/api/settings", map[string]any{
+	patch := func(zone, record, value string) *httptestResponse {
+		res := doJSON(t, handler, http.MethodPatch, "/api/zones/"+zone+"/records/"+record,
+			map[string]any{"name": "www", "type": "A", "value": value}, cookie)
+		return &httptestResponse{code: res.Code, body: res.Body.String()}
+	}
+	currentRecords := func() []domain.DNSRecord {
+		res := doJSON(t, handler, http.MethodGet, "/api/zones/"+zoneID+"/records", nil, cookie)
+		var body struct {
+			Zone domain.ZoneState `json:"zone"`
+		}
+		if err := json.Unmarshal(res.Body.Bytes(), &body); err != nil {
+			t.Fatalf("decode zone: %v body=%s", err, res.Body.String())
+		}
+		return body.Zone.Records
+	}
+
+	spellings := []struct{ name, id string }{
+		{"canonical", recordID},
+		{"uppercase", strings.ToUpper(recordID)},
+		{"hyphen-less", strings.ReplaceAll(recordID, "-", "")},
+		{"braced", "%7B" + recordID + "%7D"},
+	}
+	for i, sp := range spellings {
+		value := "10.0.0." + string(rune('6'+i))
+		t.Run(sp.name, func(t *testing.T) {
+			res := patch(zoneID, sp.id, value)
+			if res.code != http.StatusOK {
+				t.Fatalf("status=%d body=%s", res.code, res.body)
+			}
+			var body struct {
+				Record domain.DNSRecord `json:"record"`
+			}
+			if err := json.Unmarshal([]byte(res.body), &body); err != nil || body.Record.ID != recordID || body.Record.Value != value {
+				t.Fatalf("record = %+v err=%v", body.Record, err)
+			}
+			if records := currentRecords(); len(records) != 1 || records[0].ID != recordID || records[0].Value != value {
+				t.Fatalf("records after patch = %+v", records)
+			}
+		})
+	}
+
+	t.Run("alias zone id and alias record id together", func(t *testing.T) {
+		res := patch(strings.ToUpper(zoneID), strings.ToUpper(recordID), "10.0.0.99")
+		if res.code != http.StatusOK {
+			t.Fatalf("status=%d body=%s", res.code, res.body)
+		}
+		if records := currentRecords(); len(records) != 1 || records[0].Value != "10.0.0.99" {
+			t.Fatalf("records = %+v", records)
+		}
+	})
+	t.Run("unknown record id", func(t *testing.T) {
+		res := patch(zoneID, "eeeeeeee-0000-4000-8000-0000000000ff", "10.0.0.50")
+		if res.code != http.StatusNotFound || !strings.Contains(res.body, "Record not found") {
+			t.Fatalf("status=%d body=%s", res.code, res.body)
+		}
+	})
+	t.Run("malformed record id keeps its 404", func(t *testing.T) {
+		res := patch(zoneID, "not-a-record", "10.0.0.50")
+		if res.code != http.StatusNotFound || !strings.Contains(res.body, "Record not found") {
+			t.Fatalf("status=%d body=%s", res.code, res.body)
+		}
+	})
+	if records := currentRecords(); len(records) != 1 || records[0].Value != "10.0.0.99" {
+		t.Fatalf("final records = %+v", records)
+	}
+}
+
+type httptestResponse struct {
+	code int
+	body string
+}
+
+func TestStandaloneConfigurationMutationRemainsWritable(t *testing.T) {
+	env := newSQLiteHTTPTestServer(t)
+	cookie := sqliteOwnerCookie(t, env.Handler)
+
+	response := doJSON(t, env.Handler, http.MethodPut, "/api/settings", map[string]any{
 		"ingress": map[string]any{"ipv4": "192.168.1.10"},
 	}, cookie)
 	if response.Code != http.StatusOK {
@@ -199,10 +269,11 @@ func TestConfigurationMutationsBlockedForNonWritableIdentity(t *testing.T) {
 		domain.TopologyRoleStalePrimary,
 	} {
 		t.Run(string(role), func(t *testing.T) {
-			srv := newConfigTestServerForRole(t, role)
-			cookie := loginOwner(t, srv)
+			env := newSQLiteHTTPTestServer(t)
+			cookie := sqliteOwnerCookie(t, env.Handler)
+			moveIdentityToRole(t, env, role)
 
-			response := doJSON(t, srv.Handler(), http.MethodPut, "/api/settings", map[string]any{
+			response := doJSON(t, env.Handler, http.MethodPut, "/api/settings", map[string]any{
 				"ingress": map[string]any{"ipv4": "192.168.1.11"},
 			}, cookie)
 			if response.Code != http.StatusForbidden {
@@ -216,7 +287,7 @@ func TestConfigurationMutationsBlockedForNonWritableIdentity(t *testing.T) {
 				t.Fatalf("%s rejection=%v", role, body)
 			}
 
-			enrollment := doJSON(t, srv.Handler(), http.MethodPut, "/api/settings/enrollment-hostnames", map[string]any{
+			enrollment := doJSON(t, env.Handler, http.MethodPut, "/api/settings/enrollment-hostnames", map[string]any{
 				"hostnames": []string{"enroll.example.com"},
 			}, cookie)
 			if enrollment.Code != http.StatusForbidden {
@@ -234,10 +305,11 @@ func TestConfigurationMutationsBlockedForNonWritableIdentity(t *testing.T) {
 }
 
 func TestEnrollmentHostnamesOwnerAPI(t *testing.T) {
-	srv := newConfigTestServer(t)
-	cookie := loginOwner(t, srv)
+	env := newSQLiteHTTPTestServer(t)
+	handler := env.Handler
+	cookie := sqliteOwnerCookie(t, handler)
 
-	get := doJSON(t, srv.Handler(), http.MethodGet, "/api/settings/enrollment-hostnames", nil, cookie)
+	get := doJSON(t, handler, http.MethodGet, "/api/settings/enrollment-hostnames", nil, cookie)
 	if get.Code != http.StatusOK {
 		t.Fatalf("initial enrollment hostnames status=%d body=%s", get.Code, get.Body.String())
 	}
@@ -252,14 +324,14 @@ func TestEnrollmentHostnamesOwnerAPI(t *testing.T) {
 		t.Fatalf("initial enrollment hostnames=%+v", initial)
 	}
 
-	invalid := doJSON(t, srv.Handler(), http.MethodPut, "/api/settings/enrollment-hostnames", map[string]any{
+	invalid := doJSON(t, handler, http.MethodPut, "/api/settings/enrollment-hostnames", map[string]any{
 		"hostnames": []string{"https://primary.example.com"},
 	}, cookie)
 	if invalid.Code != http.StatusBadRequest {
 		t.Fatalf("invalid enrollment hostnames status=%d body=%s", invalid.Code, invalid.Body.String())
 	}
 
-	put := doJSON(t, srv.Handler(), http.MethodPut, "/api/settings/enrollment-hostnames", map[string]any{
+	put := doJSON(t, handler, http.MethodPut, "/api/settings/enrollment-hostnames", map[string]any{
 		"hostnames": []string{
 			"Example.COM.",
 			"2001:0DB8:0:0:0:0:0:1",
@@ -282,7 +354,7 @@ func TestEnrollmentHostnamesOwnerAPI(t *testing.T) {
 		t.Fatalf("saved enrollment hostnames=%+v, want configured %v", saved, want)
 	}
 
-	clear := doJSON(t, srv.Handler(), http.MethodPut, "/api/settings/enrollment-hostnames", map[string]any{
+	clear := doJSON(t, handler, http.MethodPut, "/api/settings/enrollment-hostnames", map[string]any{
 		"hostnames": []string{},
 	}, cookie)
 	if clear.Code != http.StatusOK {
@@ -301,9 +373,9 @@ func TestEnrollmentHostnamesOwnerAPI(t *testing.T) {
 }
 
 func TestEnrollmentHostnamesOwnerOnly(t *testing.T) {
-	srv := newConfigTestServer(t)
-	ownerCookie := loginOwner(t, srv)
-	createOperator := doJSON(t, srv.Handler(), http.MethodPost, "/api/users", map[string]any{
+	env := newSQLiteHTTPTestServer(t)
+	ownerCookie := sqliteOwnerCookie(t, env.Handler)
+	createOperator := doJSON(t, env.Handler, http.MethodPost, "/api/users", map[string]any{
 		"username": "operator",
 		"password": "correct horse battery staple",
 		"role":     "operator",
@@ -311,14 +383,14 @@ func TestEnrollmentHostnamesOwnerOnly(t *testing.T) {
 	if createOperator.Code != http.StatusCreated {
 		t.Fatalf("create operator status=%d body=%s", createOperator.Code, createOperator.Body.String())
 	}
-	operatorCookie := loginUser(t, srv, "operator", "correct horse battery staple")
+	operatorCookie := sqliteLoginCookie(t, env.Handler, "operator", "correct horse battery staple")
 
 	for _, method := range []string{http.MethodGet, http.MethodPut} {
 		body := any(nil)
 		if method == http.MethodPut {
 			body = map[string]any{"hostnames": []string{"enroll.example.com"}}
 		}
-		response := doJSON(t, srv.Handler(), method, "/api/settings/enrollment-hostnames", body, operatorCookie)
+		response := doJSON(t, env.Handler, method, "/api/settings/enrollment-hostnames", body, operatorCookie)
 		if response.Code != http.StatusForbidden {
 			t.Fatalf("operator %s status=%d body=%s", method, response.Code, response.Body.String())
 		}
@@ -336,9 +408,15 @@ func TestEnrollmentHostnamesReadsRemainAvailableForReadOnlyRoles(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(string(tc.role), func(t *testing.T) {
-			srv := newConfigTestServerForRoleWithEnrollment(t, tc.role, tc.hostnames)
-			cookie := loginOwner(t, srv)
-			response := doJSON(t, srv.Handler(), http.MethodGet, "/api/settings/enrollment-hostnames", nil, cookie)
+			env := newSQLiteHTTPTestServer(t)
+			if tc.hostnames != nil {
+				if _, err := env.Config.UpdateEnrollmentHostnames(context.Background(), tc.hostnames); err != nil {
+					t.Fatalf("seed enrollment hostnames: %v", err)
+				}
+			}
+			cookie := sqliteOwnerCookie(t, env.Handler)
+			moveIdentityToRole(t, env, tc.role)
+			response := doJSON(t, env.Handler, http.MethodGet, "/api/settings/enrollment-hostnames", nil, cookie)
 			if response.Code != http.StatusOK {
 				t.Fatalf("%s enrollment GET status=%d body=%s", tc.role, response.Code, response.Body.String())
 			}
@@ -360,34 +438,23 @@ func TestEnrollmentHostnamesReadsRemainAvailableForReadOnlyRoles(t *testing.T) {
 }
 
 func TestEnrollmentHostnamesRequireAuthentication(t *testing.T) {
-	srv := newConfigTestServer(t)
+	env := newSQLiteHTTPTestServer(t)
 	for _, method := range []string{http.MethodGet, http.MethodPut} {
 		body := any(nil)
 		if method == http.MethodPut {
 			body = map[string]any{"hostnames": []string{"enroll.example.com"}}
 		}
-		response := doJSON(t, srv.Handler(), method, "/api/settings/enrollment-hostnames", body, nil)
+		response := doJSON(t, env.Handler, method, "/api/settings/enrollment-hostnames", body, nil)
 		if response.Code != http.StatusUnauthorized {
 			t.Fatalf("unauthenticated %s status=%d body=%s", method, response.Code, response.Body.String())
 		}
 	}
 }
 
-func loginOwner(t *testing.T, srv *httpserver.Server) *http.Cookie {
+// sqliteLoginCookie logs an existing user in and returns the single session cookie.
+func sqliteLoginCookie(t *testing.T, handler http.Handler, username, password string) *http.Cookie {
 	t.Helper()
-	bootstrap := doJSON(t, srv.Handler(), http.MethodPost, "/api/auth/bootstrap", map[string]any{
-		"username": "owner",
-		"password": "correct horse battery staple",
-	}, nil)
-	if bootstrap.Code != http.StatusCreated {
-		t.Fatalf("bootstrap status=%d body=%s", bootstrap.Code, bootstrap.Body.String())
-	}
-	return loginUser(t, srv, "owner", "correct horse battery staple")
-}
-
-func loginUser(t *testing.T, srv *httpserver.Server, username, password string) *http.Cookie {
-	t.Helper()
-	login := doJSON(t, srv.Handler(), http.MethodPost, "/api/auth/login", map[string]any{
+	login := doJSON(t, handler, http.MethodPost, "/api/auth/login", map[string]any{
 		"username": username,
 		"password": password,
 	}, nil)
@@ -401,120 +468,23 @@ func loginUser(t *testing.T, srv *httpserver.Server, username, password string) 
 	return cookies[0]
 }
 
-func newConfigTestServer(t *testing.T) *httpserver.Server {
-	return newConfigTestServerForRole(t, domain.TopologyRoleStandalone)
-}
-
-func newConfigTestServerForRole(t *testing.T, role domain.TopologyRole) *httpserver.Server {
-	return newConfigTestServerForRoleWithEnrollment(t, role, nil)
-}
-
-func newConfigTestServerForRoleWithEnrollment(t *testing.T, role domain.TopologyRole, hostnames []string) *httpserver.Server {
+// moveIdentityToRole reproduces the topology the PostgreSQL helper set up:
+// a node, or a stale primary that imported a newer snapshot.
+func moveIdentityToRole(t *testing.T, env *sqliteHTTPEnv, role domain.TopologyRole) {
 	t.Helper()
-	if testing.Short() {
-		t.Skip("skipping database-backed configuration handler tests in short mode")
-	}
-	dsn := os.Getenv("DATABASE_URL")
-	if strings.TrimSpace(dsn) == "" {
-		t.Skip("DATABASE_URL is not set")
-	}
-
 	ctx := context.Background()
-	adminPool, err := pgxpool.New(ctx, dsn)
-	if err != nil {
-		t.Fatalf("connect admin db: %v", err)
-	}
-	t.Cleanup(adminPool.Close)
-
-	schema := "proxycore_go_config_test_" +
-		regexp.MustCompile(`[^a-z0-9]+`).ReplaceAllString(strings.ToLower(t.Name()), "_") +
-		"_" + strconv.FormatInt(time.Now().UnixNano(), 36)
-	if _, err := adminPool.Exec(ctx, "create schema "+(pgx.Identifier{schema}).Sanitize()); err != nil {
-		t.Fatalf("create schema: %v", err)
-	}
-	t.Cleanup(func() {
-		_, _ = adminPool.Exec(context.Background(), "drop schema if exists "+(pgx.Identifier{schema}).Sanitize()+" cascade")
-	})
-
-	poolCfg, err := pgxpool.ParseConfig(dsn)
-	if err != nil {
-		t.Fatalf("parse db config: %v", err)
-	}
-	if poolCfg.ConnConfig.RuntimeParams == nil {
-		poolCfg.ConnConfig.RuntimeParams = map[string]string{}
-	}
-	poolCfg.ConnConfig.RuntimeParams["search_path"] = schema
-	pool, err := pgxpool.NewWithConfig(ctx, poolCfg)
-	if err != nil {
-		t.Fatalf("connect schema db: %v", err)
-	}
-	t.Cleanup(pool.Close)
-
-	authStore := auth.NewPostgresStore(pool)
-	if err := authStore.EnsureSchema(ctx); err != nil {
-		t.Fatalf("ensure auth schema: %v", err)
-	}
-	if err := configuration.EnsureSchema(ctx, pool); err != nil {
-		t.Fatalf("ensure configuration schema: %v", err)
-	}
-	if _, err := pool.Exec(ctx, `insert into installation_settings (id) values ('default') on conflict do nothing`); err != nil {
-		t.Fatalf("seed installation settings: %v", err)
-	}
-
-	authSvc := auth.NewService(authStore, auth.ServiceOptions{SessionTTL: time.Hour})
-	configStore := configuration.New(pool, "", domain.Ingress{})
-	if hostnames != nil {
-		if _, err := configStore.UpdateEnrollmentHostnames(ctx, hostnames); err != nil {
-			t.Fatalf("seed enrollment hostnames: %v", err)
+	switch role {
+	case domain.TopologyRoleStandalone:
+		return
+	case domain.TopologyRoleNode:
+		if _, err := env.Identity.TransitionTo(ctx, role); err != nil {
+			t.Fatalf("transition identity to node: %v", err)
 		}
-	}
-	identitySvc := identity.NewService(identity.NewPgStore(pool))
-	if _, _, err := identitySvc.EnsureBootstrapped(ctx); err != nil {
-		t.Fatalf("bootstrap identity: %v", err)
-	}
-	if role != domain.TopologyRoleStandalone {
-		switch role {
-		case domain.TopologyRoleNode:
-			if _, err := identitySvc.TransitionTo(ctx, role); err != nil {
-				t.Fatalf("transition identity to node: %v", err)
-			}
-		case domain.TopologyRoleStalePrimary:
-			if _, err := identitySvc.RecordImportedSnapshot(ctx, uuid.New(), 2); err != nil {
-				t.Fatalf("mark identity stale: %v", err)
-			}
-		default:
-			t.Fatalf("unsupported test role %s", role)
+	case domain.TopologyRoleStalePrimary:
+		if _, err := env.Identity.RecordImportedSnapshot(ctx, uuid.New(), 2); err != nil {
+			t.Fatalf("mark identity stale: %v", err)
 		}
+	default:
+		t.Fatalf("unsupported test role %s", role)
 	}
-	return httpserver.New(config.Config{
-		UIDist:            t.TempDir(),
-		SessionCookieName: "proxycore_session",
-		SessionTTL:        time.Hour,
-	}, log.New(io.Discard, "", 0),
-		httpserver.WithAuthService(authSvc),
-		httpserver.WithConfigurationStore(configStore),
-		httpserver.WithIdentityService(identitySvc),
-	)
-}
-
-func doJSON(t *testing.T, handler http.Handler, method, target string, body any, cookie *http.Cookie) *httptest.ResponseRecorder {
-	t.Helper()
-	var reader io.Reader
-	if body != nil {
-		payload, err := json.Marshal(body)
-		if err != nil {
-			t.Fatalf("marshal body: %v", err)
-		}
-		reader = bytes.NewReader(payload)
-	}
-	req := httptest.NewRequest(method, target, reader)
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	if cookie != nil {
-		req.AddCookie(cookie)
-	}
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
-	return rec
 }

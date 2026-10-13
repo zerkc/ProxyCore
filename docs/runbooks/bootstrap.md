@@ -10,10 +10,9 @@ curl -fsSL https://raw.githubusercontent.com/zerkc/ProxyCore/main/scripts/instal
 
 The script clones or updates the checkout (default `/opt/proxycore` as root,
 otherwise `~/proxycore`), creates `.env` with generated secrets on first run,
-starts PostgreSQL, applies migrations, and brings the stack up with the **Go
+brings the stack up (the api creates and migrates the SQLite database on start) with the **Go
 API + Vite SPA** control plane (no Next.js) and **Nginx in `network_mode: host`**
-so HTTP/HTTPS and stream ports bind directly on the host. Configuration routes
-may still be served by the transitional `node-api` (tsx) behind the Go edge.
+so HTTP/HTTPS and stream ports bind directly on the host.
 
 Optional environment variables before `| sh`:
 
@@ -25,14 +24,16 @@ Optional environment variables before `| sh`:
 | `DNS_PORT`         | `53`                              | CoreDNS publish port                |
 | `SKIP_BUILD`       | `0`                               | Set `1` to recreate without rebuild |
 
-Re-run the same command to update: pull, migrate, rebuild/recreate. `.env` is
-preserved.
+Re-run the same command to update: pull, rebuild/recreate. `.env` is
+preserved. If the installer finds a legacy PostgreSQL volume and no SQLite
+database it stops without changing anything; follow
+[upgrade-from-postgres.md](upgrade-from-postgres.md).
 
 ### Dashboard self-updates
 
 The dashboard update action uses the default local build mode. Before building,
 the updater fetches and checks out the requested `v<version>` tag in the managed
-checkout, then rebuilds the API, worker, and migration images from that source.
+checkout, then rebuilds the API and worker images from that source.
 Keep the checkout clean and allow the host to reach GitHub; an update stops
 before restarting services when tracked files have local changes or the target
 tag cannot be fetched.
@@ -51,7 +52,7 @@ reports that the new version is live.
    openssl rand -base64 32
    ```
 
-4. Set `PROXYCORE_MASTER_KEY_BASE64` and change the PostgreSQL password.
+4. Set `PROXYCORE_MASTER_KEY_BASE64`.
 5. Confirm host ports 80 and 443 are free for Nginx host networking. HTTP/3
    additionally requires both TCP and UDP 443. CoreDNS publishes `DNS_PORT`
    (default 53).
@@ -60,8 +61,6 @@ reports that the new version is live.
 
 ```sh
 docker compose config
-docker compose up -d postgres
-docker compose --profile tools run --rm migrate
 docker compose up -d --build
 ```
 

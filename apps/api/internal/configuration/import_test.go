@@ -14,17 +14,14 @@ import (
 	"github.com/zerkc/ProxyCore/apps/api/internal/snapshot"
 )
 
-var _ snapshot.ApplyJobEnqueuer = (*Store)(nil)
-var _ snapshot.ApplyJobEnqueuer = (*PgPhase2Store)(nil)
-var _ snapshot.ArchiveStore = (*Store)(nil)
-var _ snapshot.ArchiveStore = (*PgPhase2Store)(nil)
+var _ snapshot.ApplyJobEnqueuer = (*SQLitePhase2Store)(nil)
+var _ snapshot.ArchiveStore = (*SQLitePhase2Store)(nil)
 
 type importTerminalReader interface {
 	GetApplyJobTerminal(context.Context, uuid.UUID) (ApplyJobTerminal, error)
 }
 
-var _ importTerminalReader = (*Store)(nil)
-var _ importTerminalReader = (*PgPhase2Store)(nil)
+var _ importTerminalReader = (*SQLiteApplyJobStore)(nil)
 
 func TestImportedSnapshotMetadataUsesEnvelopeFieldsAndRawChecksum(t *testing.T) {
 	env := importTestEnvelope(t)

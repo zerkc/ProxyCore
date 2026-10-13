@@ -105,7 +105,7 @@ func TestRenewalLoopStopsAndResumesAcrossLiveRoleTransitions(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
-		runRenewalLoop(ctx, &Store{}, RenewalOptions{
+		runRenewalLoop(ctx, &SQLiteCertificateIssueStore{}, RenewalOptions{
 			Identity: fixture.current,
 			Log:      log.New(&logs, "", 0),
 		}, time.Minute, renewalLoopRuntime{
@@ -170,7 +170,7 @@ func TestRenewalLoopSkipsUnloadedIdentity(t *testing.T) {
 	defer cancel()
 	done := make(chan struct{})
 	go func() {
-		runRenewalLoop(ctx, &Store{}, RenewalOptions{Identity: fixture.current}, time.Minute, renewalLoopRuntime{
+		runRenewalLoop(ctx, &SQLiteCertificateIssueStore{}, RenewalOptions{Identity: fixture.current}, time.Minute, renewalLoopRuntime{
 			InitialDelay: time.Second,
 			NewTimer: func(time.Duration) renewalLoopTimer {
 				timer := newRenewalLoopTestTimer()
@@ -203,7 +203,7 @@ func TestRenewalLoopDoesNotRenewAfterContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
-		runRenewalLoop(ctx, &Store{}, RenewalOptions{Identity: fixture.current}, time.Minute, renewalLoopRuntime{
+		runRenewalLoop(ctx, &SQLiteCertificateIssueStore{}, RenewalOptions{Identity: fixture.current}, time.Minute, renewalLoopRuntime{
 			InitialDelay: time.Second,
 			NewTimer: func(time.Duration) renewalLoopTimer {
 				timer := newRenewalLoopTestTimer()
@@ -225,4 +225,42 @@ func TestRenewalLoopDoesNotRenewAfterContextCancellation(t *testing.T) {
 		t.Fatal("renewal loop did not stop after context cancellation")
 	}
 	assertNoRenewalCall(t, calls)
+}
+
+type fakeRenewalStore struct{ calls chan RenewalOptions }
+
+func (f fakeRenewalStore) RenewDueCertificates(_ context.Context, opts RenewalOptions) (int, int, error) {
+	f.calls <- opts
+	return 0, 0, nil
+}
+
+func TestRenewalLoopRunsAgainstMinimalRenewalStore(t *testing.T) {
+	fixture := &renewalLoopPolicyFixture{role: domain.TopologyRolePrimary, loaded: true}
+	created := make(chan *renewalLoopTestTimer, 1)
+	store := fakeRenewalStore{calls: make(chan RenewalOptions, 1)}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		runRenewalLoop(ctx, store, RenewalOptions{Identity: fixture.current, Email: "ops@example.test", Log: log.New(&bytes.Buffer{}, "", 0)}, time.Minute, renewalLoopRuntime{
+			InitialDelay: time.Second,
+			NewTimer: func(time.Duration) renewalLoopTimer {
+				timer := newRenewalLoopTestTimer()
+				created <- timer
+				return timer
+			},
+		})
+		close(done)
+	}()
+	timer := awaitRenewalTimer(t, created)
+	timer.fire()
+	select {
+	case opts := <-store.calls:
+		if opts.Email != "ops@example.test" {
+			t.Fatalf("store received options email %q", opts.Email)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("RenewDueCertificates was not called on the fake store")
+	}
+	cancel()
+	<-done
 }

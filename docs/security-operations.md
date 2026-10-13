@@ -14,7 +14,7 @@ Safe enough for a carefully exposed homelab ingress path, without pretending the
 | Asset | Control |
 | --- | --- |
 | Local passwords/sessions | Strong hashing, Secure/HttpOnly cookies, revocation, audit |
-| Provider credentials / TLS keys | Encrypt at rest, master key outside Postgres, redaction |
+| Provider credentials / TLS keys | Encrypt at rest, master key outside the SQLite file, redaction |
 | DNS/Nginx desired state | Typed validation, revisioning, validate-before-reload, rollback |
 | Worker privileges | Separate from web; no raw Docker socket on web or worker; fixed helper operations only |
 | Forwarded DNS | Visible forwarder health; managed zones never silently replaced by forward answers |
@@ -22,7 +22,7 @@ Safe enough for a carefully exposed homelab ingress path, without pretending the
 ## Trust boundaries
 
 1. Browser → control plane (untrusted input)
-2. Control plane → PostgreSQL
+2. Control plane → SQLite file
 3. Control plane → worker (job contract only)
 4. Worker → service-control helper (private Unix socket; fixed operations)
 5. Service-control helper → Nginx/CoreDNS (constrained validate/reload)
@@ -40,7 +40,7 @@ Safe enough for a carefully exposed homelab ingress path, without pretending the
 
 ## Secrets
 
-- Master key outside PostgreSQL
+- Master key outside the SQLite file
 - Encrypt credentials, Basic Auth password hashes, and certificate private keys at rest
 - Never return plaintext secrets in API/log/audit/rendered non-secret config
 - Basic Auth stores an encrypted `{SHA}` hash referenced by `passwordSecretId`; the worker writes htpasswd files into the Nginx candidate directory
@@ -115,7 +115,7 @@ authenticated channel between a primary and its enrolled nodes.
    read snapshots and report acknowledgements.
 4. **Insider with read access to the database.** Mitigated by wrapping
    the cluster KEK with the installation master key (which lives
-   outside PostgreSQL) and by AES-256-GCM protection of every secret
+   outside the SQLite file) and by AES-256-GCM protection of every secret
    referenced by a snapshot. Plaintext secrets never appear in the
    database, in API responses, or in audit logs.
 5. **Snapshot replay from an older leadership generation.** Mitigated by

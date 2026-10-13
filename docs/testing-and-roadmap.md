@@ -6,7 +6,7 @@ Test ProxyCore as a control plane and as a config generator for real CoreDNS/Ngi
 
 | Environment | Purpose |
 | --- | --- |
-| Development | Fast feedback; disposable Postgres; fake Cloudflare DNS-01; no production secrets |
+| Development | Fast feedback; temporary SQLite files; fake Cloudflare DNS-01; no production secrets |
 | Homelab staging | Real CoreDNS/Nginx on the LAN; LE staging; restricted credentials |
 | Production-like | Pinned images; real domain/certs; approved migrations; documented recovery |
 
@@ -80,7 +80,7 @@ Approved product/FR/domain/architecture/security/test/decision docs for the redu
 
 ### Phase 1 — Control plane
 
-Next.js shell, bootstrap, local users/roles/sessions, Postgres/Drizzle, revisions/jobs, encrypted secrets, status UI.
+Admin shell, bootstrap, local users/roles/sessions, SQLite (Go-owned migrations), revisions/jobs, encrypted secrets, status UI.
 
 ### Phase 2 — Internal DNS + forwarding
 

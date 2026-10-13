@@ -1,12 +1,9 @@
 package dbexport
 
 import (
-	"context"
 	"fmt"
 	"sort"
 	"strings"
-
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // DefaultConfigTables is the explicit allowlist used when callers do not
@@ -55,61 +52,6 @@ func (e *ForeignKeyCycleError) Error() string {
 	return fmt.Sprintf("foreign-key cycle detected: %s", strings.Join(e.Path, " -> "))
 }
 
-// exportOrder retains the required package-level helper for the default table
-// set. Exporter uses the method below so custom test/administrative subsets are
-// ordered by the same information_schema-derived graph.
-func exportOrder(ctx context.Context, pool *pgxpool.Pool, configured ...[]string) ([]string, error) {
-	tables := DefaultConfigTables
-	if len(configured) > 0 {
-		tables = configured[0]
-	}
-	return exportOrderForTables(ctx, pool, tables)
-}
-
-func (e *Exporter) exportOrder(ctx context.Context) ([]string, error) {
-	if e == nil {
-		return nil, fmt.Errorf("export order: nil exporter")
-	}
-	return exportOrderForTables(ctx, e.pool, e.tables)
-}
-
-func exportOrderForTables(ctx context.Context, pool *pgxpool.Pool, configured []string) ([]string, error) {
-	if pool == nil {
-		return nil, fmt.Errorf("export order: nil pool")
-	}
-	if ctx == nil {
-		return nil, fmt.Errorf("export order: nil context")
-	}
-	tables, err := normalizeTables(configured)
-	if err != nil {
-		return nil, err
-	}
-	if len(tables) == 0 {
-		return []string{}, nil
-	}
-
-	present, err := listPresentTables(ctx, pool, tables)
-	if err != nil {
-		return nil, err
-	}
-	missing := make([]string, 0)
-	for _, table := range tables {
-		if !present[table] {
-			missing = append(missing, table)
-		}
-	}
-	if len(missing) > 0 {
-		sort.Strings(missing)
-		return nil, &MissingTablesError{Tables: missing}
-	}
-
-	edges, err := listForeignKeyEdges(ctx, pool, tables)
-	if err != nil {
-		return nil, err
-	}
-	return topologicalOrder(tables, edges)
-}
-
 func normalizeTables(configured []string) ([]string, error) {
 	seen := make(map[string]struct{}, len(configured))
 	tables := make([]string, 0, len(configured))
@@ -143,83 +85,9 @@ func quoteIdentifier(identifier string) string {
 	return `"` + strings.ReplaceAll(identifier, `"`, `""`) + `"`
 }
 
-func listPresentTables(ctx context.Context, pool *pgxpool.Pool, tables []string) (map[string]bool, error) {
-	rows, err := pool.Query(ctx, `
-		select table_name
-		from information_schema.tables
-		where table_schema = current_schema()
-		  and table_type = 'BASE TABLE'
-		  and table_name = any($1::text[])
-	`, tables)
-	if err != nil {
-		return nil, fmt.Errorf("list configured tables: %w", err)
-	}
-	defer rows.Close()
-
-	present := make(map[string]bool, len(tables))
-	for rows.Next() {
-		var table string
-		if err := rows.Scan(&table); err != nil {
-			return nil, fmt.Errorf("scan configured table: %w", err)
-		}
-		present[table] = true
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("read configured tables: %w", err)
-	}
-	return present, nil
-}
-
 type tableEdge struct {
 	parent string
 	child  string
-}
-
-func listForeignKeyEdges(ctx context.Context, pool *pgxpool.Pool, tables []string) ([]tableEdge, error) {
-	rows, err := pool.Query(ctx, `
-		select distinct
-			tc.table_name as referencing_table,
-			ccu.table_name as referenced_table
-		from information_schema.table_constraints tc
-		join information_schema.key_column_usage kcu
-		  on kcu.constraint_schema = tc.constraint_schema
-		 and kcu.constraint_name = tc.constraint_name
-		 and kcu.table_name = tc.table_name
-		join information_schema.referential_constraints rc
-		  on rc.constraint_schema = tc.constraint_schema
-		 and rc.constraint_name = tc.constraint_name
-		join information_schema.constraint_column_usage ccu
-		  on ccu.constraint_schema = rc.unique_constraint_schema
-		 and ccu.constraint_name = rc.unique_constraint_name
-		where tc.constraint_type = 'FOREIGN KEY'
-		  and tc.table_schema = current_schema()
-		  and ccu.table_schema = current_schema()
-		  and tc.table_name = any($1::text[])
-		  and ccu.table_name = any($1::text[])
-	`, tables)
-	if err != nil {
-		return nil, fmt.Errorf("list configured foreign keys: %w", err)
-	}
-	defer rows.Close()
-
-	seen := make(map[string]struct{})
-	edges := make([]tableEdge, 0)
-	for rows.Next() {
-		var child, parent string
-		if err := rows.Scan(&child, &parent); err != nil {
-			return nil, fmt.Errorf("scan configured foreign key: %w", err)
-		}
-		key := parent + "\x00" + child
-		if _, exists := seen[key]; exists {
-			continue
-		}
-		seen[key] = struct{}{}
-		edges = append(edges, tableEdge{parent: parent, child: child})
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("read configured foreign keys: %w", err)
-	}
-	return edges, nil
 }
 
 func topologicalOrder(tables []string, edges []tableEdge) ([]string, error) {
@@ -316,4 +184,27 @@ func findCycle(tables []string, adjacency map[string][]string, indegree map[stri
 		}
 	}
 	return sorted
+}
+
+// SQLiteExportOrder is the fixed export order for the SQLite exporter. It is
+// the deterministic topological order (see topologicalOrder) of
+// DefaultConfigTables over the foreign keys of the migrated SQLite schema; a
+// test recomputes it from PRAGMA foreign_key_list so it cannot drift.
+var SQLiteExportOrder = []string{
+	"cluster_keys",
+	"installation_identity",
+	"installation_settings",
+	"internal_ca_enrollment_state",
+	"node_state",
+	"resolver_pools",
+	"secrets",
+	"stream_routes",
+	"users",
+	"zones",
+	"forwarding_rules",
+	"certificates",
+	"internal_ca",
+	"provider_connections",
+	"config_revisions",
+	"dns_records",
 }

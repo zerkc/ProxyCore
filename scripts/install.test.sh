@@ -36,12 +36,11 @@ fi
 run_loader() {
   input=$1
   printf '%s' "$input" | (
-    unset WEB_PORT ENROLLMENT_PORT DNS_PORT POSTGRES_USER POSTGRES_DB
+    unset WEB_PORT ENROLLMENT_PORT DNS_PORT
     PROXYCORE_INSTALL_NO_MAIN=1 . "$ROOT/scripts/install.sh"
     load_env_values -
     apply_env_file_values
-    printf '%s|%s|%s|%s|%s\n' \
-      "$WEB_PORT" "$ENROLLMENT_PORT" "$DNS_PORT" "$POSTGRES_USER" "$POSTGRES_DB"
+    printf '%s|%s|%s\n' "$WEB_PORT" "$ENROLLMENT_PORT" "$DNS_PORT"
   )
 }
 
@@ -50,7 +49,7 @@ assert_file_rejected() {
   input=$2
   output=''
   if output=$(printf '%s' "$input" | (
-    unset WEB_PORT ENROLLMENT_PORT DNS_PORT POSTGRES_USER POSTGRES_DB
+    unset WEB_PORT ENROLLMENT_PORT DNS_PORT
     PROXYCORE_INSTALL_NO_MAIN=1 . "$ROOT/scripts/install.sh"
     load_env_values -
     apply_env_file_values
@@ -73,12 +72,12 @@ assert_external_port_rejected() {
   output=''
   if output=$(
     (
-      case "$variable" in
-        WEB_PORT) WEB_PORT=$value ;;
-        ENROLLMENT_PORT) ENROLLMENT_PORT=$value ;;
-        DNS_PORT) DNS_PORT=$value ;;
-        *) exit 1 ;;
-      esac
+      # if-chain rather than case: bash 3.2 mis-parses case inside $( ( ... ) ).
+      if [ "$variable" = WEB_PORT ]; then WEB_PORT=$value
+      elif [ "$variable" = ENROLLMENT_PORT ]; then ENROLLMENT_PORT=$value
+      elif [ "$variable" = DNS_PORT ]; then DNS_PORT=$value
+      else exit 1
+      fi
       PROXYCORE_INSTALL_NO_MAIN=1 . "$ROOT/scripts/install.sh"
       validate_host_port "$variable" "$value"
     ) 2>&1
@@ -94,34 +93,31 @@ assert_external_port_rejected() {
   esac
 }
 
+# Legacy POSTGRES_* keys in an existing .env are opaque unknown data now.
 valid_env='WEB_PORT=3100
 ENROLLMENT_PORT=9443
 DNS_PORT=5353
-POSTGRES_USER=proxycore
+POSTGRES_USER=bad user!
 POSTGRES_DB=proxycore'
-[ "$(run_loader "$valid_env")" = '3100|9443|5353|proxycore|proxycore' ] || {
+[ "$(run_loader "$valid_env")" = '3100|9443|5353' ] || {
   printf 'valid existing .env values were not loaded as data\n' >&2
   exit 1
 }
 
 external_env='WEB_PORT=3100
 ENROLLMENT_PORT=9443
-DNS_PORT=5353
-POSTGRES_USER=file_user
-POSTGRES_DB=file_db'
+DNS_PORT=5353'
 run_external_loader() {
   input=$1
   printf '%s' "$input" | (
     WEB_PORT=4100 ENROLLMENT_PORT=9444 DNS_PORT=5354
-    POSTGRES_USER=external_user POSTGRES_DB=external_db
     PROXYCORE_INSTALL_NO_MAIN=1 . "$ROOT/scripts/install.sh"
     load_env_values -
     apply_env_file_values
-    printf '%s|%s|%s|%s|%s\n' \
-      "$WEB_PORT" "$ENROLLMENT_PORT" "$DNS_PORT" "$POSTGRES_USER" "$POSTGRES_DB"
+    printf '%s|%s|%s\n' "$WEB_PORT" "$ENROLLMENT_PORT" "$DNS_PORT"
   )
 }
-[ "$(run_external_loader "$external_env")" = '4100|9444|5354|external_user|external_db' ] || {
+[ "$(run_external_loader "$external_env")" = '4100|9444|5354' ] || {
   printf 'external environment did not override .env data\n' >&2
   exit 1
 }
@@ -156,12 +152,12 @@ assert_main_rejects_before_side_effect() {
   if output=$(
     (
       PROXYCORE_HOME=/path/that/does/not/exist
-      case "$variable" in
-        WEB_PORT) WEB_PORT=$value ;;
-        ENROLLMENT_PORT) ENROLLMENT_PORT=$value ;;
-        DNS_PORT) DNS_PORT=$value ;;
-        *) exit 1 ;;
-      esac
+      # if-chain rather than case: bash 3.2 mis-parses case inside $( ( ... ) ).
+      if [ "$variable" = WEB_PORT ]; then WEB_PORT=$value
+      elif [ "$variable" = ENROLLMENT_PORT ]; then ENROLLMENT_PORT=$value
+      elif [ "$variable" = DNS_PORT ]; then DNS_PORT=$value
+      else exit 1
+      fi
       PROXYCORE_INSTALL_NO_MAIN=1 . "$ROOT/scripts/install.sh"
       need_cmd() { printf 'INSTALLER_SIDE_EFFECT\\n' >&2; exit 99; }
       sync_repo() { printf 'INSTALLER_SIDE_EFFECT\\n' >&2; exit 99; }
@@ -188,7 +184,7 @@ assert_file_preflight_rejects_before_side_effect() {
   input=$1
   output=''
   if output=$(printf '%s' "$input" | (
-    unset WEB_PORT ENROLLMENT_PORT DNS_PORT POSTGRES_USER POSTGRES_DB
+    unset WEB_PORT ENROLLMENT_PORT DNS_PORT
     PROXYCORE_INSTALL_NO_MAIN=1 . "$ROOT/scripts/install.sh"
     preflight_runtime_values -
     printf 'PREFLIGHT_SIDE_EFFECT\\n' >&2
@@ -205,6 +201,111 @@ assert_file_preflight_rejects_before_side_effect() {
 }
 file_preflight_payload=$(printf 'ENROLLMENT_PORT=%s\n' '$(printf ENROLLMENT_SIDE_EFFECT >&2)')
 assert_file_preflight_rejects_before_side_effect "$file_preflight_payload"
+
+# PostgreSQL is gone from the installer: no credentials, readiness wait or
+# migrate step. The only PostgreSQL logic left is the legacy-volume refusal.
+for forbidden in POSTGRES_USER POSTGRES_DB POSTGRES_PASSWORD wait_postgres 'run --rm migrate' 'build migrate'; do
+  if grep -Fq -- "$forbidden" "$ROOT/scripts/install.sh" "$ROOT/scripts/install_env.sh"; then
+    printf 'installer still references %s\n' "$forbidden" >&2
+    exit 1
+  fi
+done
+
+# Legacy detection: stub docker as a shell function inside a subshell.
+run_legacy_check() {
+  volume_present=$1
+  db_present=$2
+  (
+    PROXYCORE_INSTALL_NO_MAIN=1 . "$ROOT/scripts/install.sh"
+    PROXYCORE_HOME=/opt/proxycore
+    docker() {
+      case "$1 $2" in
+        'volume inspect') [ "$volume_present" = 1 ] && [ "$3" = proxycore_postgres-data ] ;;
+        'compose run') [ "$db_present" = 1 ] ;;
+        *) return 1 ;;
+      esac
+    }
+    refuse_unconverted_legacy_postgres
+  ) 2>&1
+}
+output=$(run_legacy_check 1 0) && {
+  printf 'legacy volume without SQLite database was accepted\n' >&2
+  exit 1
+}
+case "$output" in
+  *scripts/convert-postgres.sh*docs/runbooks/upgrade-from-postgres.md*) ;;
+  *) printf 'legacy refusal does not point at the converter: %s\n' "$output" >&2; exit 1 ;;
+esac
+run_legacy_check 0 0 >/dev/null || { printf 'fresh install was refused\n' >&2; exit 1; }
+run_legacy_check 1 1 >/dev/null || { printf 'converted install was refused\n' >&2; exit 1; }
+
+# The legacy volume name follows the compose project: environment first, then
+# the install .env (read as data, never sourced or printed), then proxycore.
+# The docker stub reports only $project_volume as present.
+project_legacy_output=''
+project_legacy_refused() {
+  project_volume=$1
+  project_env=$2
+  project_env_content=$3
+  project_home=$(mktemp -d "${TMPDIR:-/tmp}/proxycore-install-test.XXXXXX")
+  if [ -n "$project_env_content" ]; then
+    printf '%s\n' "$project_env_content" > "$project_home/.env"
+  fi
+  if project_legacy_output=$( (
+    unset COMPOSE_PROJECT_NAME
+    if [ -n "$project_env" ]; then
+      COMPOSE_PROJECT_NAME=$project_env
+      export COMPOSE_PROJECT_NAME
+    fi
+    PROXYCORE_INSTALL_NO_MAIN=1 . "$ROOT/scripts/install.sh"
+    PROXYCORE_HOME=$project_home
+    docker() {
+      # if-chain rather than case: bash 3.2 mis-parses case inside $( ( ... ) ).
+      if [ "$1 $2" = 'volume inspect' ]; then
+        [ "$3" = "$project_volume" ]
+      else
+        return 1
+      fi
+    }
+    refuse_unconverted_legacy_postgres
+  ) 2>&1 ); then
+    rm -rf "$project_home"
+    return 1
+  fi
+  rm -rf "$project_home"
+  return 0
+}
+
+# .env selects a non-default project: the refusal must name its volume.
+project_env_t69='COMPOSE_PROJECT_NAME=proxycore-t69
+POSTGRES_PASSWORD=sup3rS3cret-t69'
+project_legacy_refused proxycore-t69_postgres-data '' "$project_env_t69" \
+  || { printf '.env project did not trigger the legacy refusal\n' >&2; exit 1; }
+case "$project_legacy_output" in
+  *proxycore-t69_postgres-data*) ;;
+  *) printf 'legacy refusal does not name the .env project volume: %s\n' "$project_legacy_output" >&2; exit 1 ;;
+esac
+case "$project_legacy_output" in
+  *sup3rS3cret-t69*) printf 'legacy refusal printed a .env value\n' >&2; exit 1 ;;
+esac
+
+# The default volume is not the .env project's volume: no refusal.
+project_legacy_refused proxycore_postgres-data '' "$project_env_t69" \
+  && { printf 'default volume refused although .env selects another project\n' >&2; exit 1; }
+
+# The environment wins over .env.
+project_legacy_refused proxycore-env_postgres-data proxycore-env "$project_env_t69" \
+  || { printf 'environment project did not win over .env\n' >&2; exit 1; }
+
+# Without COMPOSE_PROJECT_NAME anywhere, the default project still refuses.
+project_legacy_refused proxycore_postgres-data '' 'POSTGRES_PASSWORD=unused-secret' \
+  || { printf 'default project did not trigger the legacy refusal\n' >&2; exit 1; }
+project_legacy_refused proxycore_postgres-data '' '' \
+  || { printf 'default project without .env did not trigger the legacy refusal\n' >&2; exit 1; }
+
+# Fresh install: no .env yet and no legacy volume is accepted without error.
+project_legacy_refused none '' '' \
+  && { printf 'fresh install with no .env was refused\n' >&2; exit 1; }
 
 # Operator-facing docs distinguish the direct enrollment socket from Nginx.
 contains "$ROOT/README.md" 'ENROLLMENT_PORT'
