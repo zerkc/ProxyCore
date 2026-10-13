@@ -29,6 +29,23 @@ preserved. If the installer finds a legacy PostgreSQL volume and no SQLite
 database it stops without changing anything; follow
 [upgrade-from-postgres.md](upgrade-from-postgres.md).
 
+### Low-memory hosts (Raspberry Pi 3 B+ / 1 GB)
+
+The installer builds the images one at a time (`[n/N] building <service>` with the
+elapsed seconds after each one), then starts the stack. Peak memory stays at one
+image build, but the first build can still take a long time on a small host.
+
+- Add at least 1 GB of swap before installing. The installer only warns when RAM
+  is below about 1.5 GB and swap below 1 GB; it never creates swap or uses sudo.
+  Example: `sudo fallocate -l 1G /swapfile && sudo chmod 600 /swapfile && sudo mkswap /swapfile && sudo swapon /swapfile`
+  (add the file to `/etc/fstab` to keep it after a reboot).
+- Prefer a USB SSD over an SD card for the Docker data directory and the swap file.
+- Set `PROXYCORE_SKIP_MEMORY_CHECK=1` to silence the warning.
+- `SKIP_BUILD=1` recreates the services without building anything.
+- Prebuilt multi-arch images are not published yet, so every install builds locally.
+- A failed build stops the installer and names the service; retry it with
+  `docker compose build <service>` and run the installer again.
+
 ### Dashboard self-updates
 
 The dashboard update action uses the default local build mode. Before building,
