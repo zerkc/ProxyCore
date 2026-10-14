@@ -14,7 +14,7 @@ Let a NODE trust a self-signed / private-CA primary by loading the primary's CA 
 - [x] T1 (S3,S5,S6) Backend: CA PEM validation + per-origin trust store. Migration 007 `primary_trust_anchors` (STRICT), `configuration/sqlite_primary_trust.go`, tests RED->GREEN; schema mirrors (Bun ledger 7, 32 tables, pgconvert SQLite-only table) updated. Full `go test ./...` green. Commit: e28baf8
 - [x] T2 (S2,S4) Backend wiring: `sync/origin_trust.go` per-origin RoundTripper shared by snapshot (draft, sync, ack) and exchange clients; draft accepts optional `caPem` (validated, request-scoped, fingerprint returned as `primaryCaFingerprint`); confirm uses it for the exchange and persists it (replacing the previous CA for that origin) BEFORE the sync binding, failing closed (503). Commits: 5da2a3c (transport), 9e25c30.
 - [x] T3 (S6) Draft answers 409 "primary certificate not trusted; load the primary CA" for a rejected certificate (generic "primary snapshot unavailable" kept for other failures); invalid CA -> 400 "invalid CA certificate". Commit: 9e25c30.
-- [ ] T4 (S1,S5) UI: CA upload/paste + fingerprint in NodeContinuityView, API client, UI tests.
+- [x] T4 (S1,S5) UI: NodeContinuityView has an optional PRIMARY CA field (paste or load .pem/.crt/.cer, <=64 KiB) sent with the draft; preview shows `primary ca fingerprint`; two fixed draft errors (409 untrusted / 400 invalid CA) get specific messages via a closed allowlist (other bodies still discarded). vitest: only the pre-existing EnrollmentTrustPanel date failure remains (fails on clean main too); tsc clean. Commit: c927485.
 - [ ] T5 Docs: README/PRD topology + help text.
 
 ## Log

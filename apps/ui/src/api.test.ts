@@ -481,4 +481,27 @@ describe("backup API client", () => {
     expect((caught as BackupApiError).kind).toBe("unknown");
     expect((caught as BackupApiError).message).not.toContain("secret detail");
   });
+  it("sends the optional CA with a draft and reads only the two fixed trust errors", async () => {
+    const plaintext = "pcenr1_selector_secret-must-not-appear";
+    const ca = "-----BEGIN CERTIFICATE-----\nQ0E=\n-----END CERTIFICATE-----";
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ draftId: "d" })));
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    await draftEnrollment(plaintext, "https://primary.example", undefined, ca);
+    expect(fetchMock.mock.calls[0]![1]).toMatchObject({
+      body: JSON.stringify({ token: plaintext, primaryURL: "https://primary.example", caPem: ca }),
+    });
+
+    const failWith = (status: number, error: string) => {
+      globalThis.fetch = vi.fn().mockResolvedValue(
+        new Response(JSON.stringify({ error }), { status }),
+      ) as unknown as typeof fetch;
+      return draftEnrollment(plaintext, "https://primary.example").catch((caught) => caught);
+    };
+    expect(await failWith(409, "primary certificate not trusted; load the primary CA")).toMatchObject({ kind: "untrusted-certificate", status: 409 });
+    expect(await failWith(400, "invalid CA certificate")).toMatchObject({ kind: "invalid-ca", status: 400 });
+    // Anything else, including inherited object keys, stays a generic status error.
+    expect(await failWith(409, "constructor")).toMatchObject({ kind: "conflict" });
+    expect(await failWith(409, "primary snapshot denied")).toMatchObject({ kind: "conflict" });
+    expect(await failWith(400, "primary certificate not trusted; load the primary CA")).toMatchObject({ kind: "bad-request" });
+  });
 });

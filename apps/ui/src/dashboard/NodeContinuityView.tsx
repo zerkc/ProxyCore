@@ -13,6 +13,9 @@ export function NodeContinuityView() {
   const [state, setState] = useState<NodeState>({ kind: "recovering" });
   const [token, setToken] = useState("");
   const [primaryURL, setPrimaryURL] = useState("");
+  // The CA is public certificate material, so it survives a failed attempt and
+  // the owner does not have to load it again after fixing the token or URL.
+  const [caPem, setCaPem] = useState("");
   const activeRequest = useRef<AbortController | undefined>(undefined);
   const mounted = useRef(true);
 
@@ -49,7 +52,7 @@ export function NodeContinuityView() {
     const controller = replaceActiveRequest();
     setState({ kind: "recovering" });
     try {
-      const draft = await draftEnrollment(submittedToken, primaryURL.trim(), controller.signal);
+      const draft = await draftEnrollment(submittedToken, primaryURL.trim(), controller.signal, caPem.trim() || undefined);
       if (!mounted.current || controller.signal.aborted) return;
       setToken("");
       setState({ kind: "preview", draft: sanitizeDraft(draft) });
@@ -79,7 +82,7 @@ export function NodeContinuityView() {
   }
 
   if (state.kind === "recovering") return <section className="mt-8 space-y-5" aria-labelledby="node-continuity-title"><NodeHeader /><p className="border-y border-dashed border-line py-5 text-sm text-faint" role="status">Checking for a recoverable enrollment draft…</p></section>;
-  if (state.kind === "entry") return <EntrySurface error={state.error} recoveryPrompt={state.recoveryPrompt} token={token} primaryURL={primaryURL} onTokenChange={setToken} onPrimaryURLChange={setPrimaryURL} onSubmit={submitDraft} />;
+  if (state.kind === "entry") return <EntrySurface error={state.error} recoveryPrompt={state.recoveryPrompt} token={token} primaryURL={primaryURL} caPem={caPem} onTokenChange={setToken} onPrimaryURLChange={setPrimaryURL} onCaChange={setCaPem} onSubmit={submitDraft} />;
   if (state.kind === "preview") return <PreviewSurface draft={state.draft} error={state.error} onConfirm={() => void confirmDraft()} onCancel={cancelPreview} />;
   if (state.kind === "pending") return <PendingSurface />;
   return <CommittedSurface result={state.result} />;
@@ -99,11 +102,18 @@ function NodeHeader() {
   return <header className="border-b border-line/80 pb-5"><p className="pc-eyebrow pc-eyebrow-signal">node continuity</p><h2 id="node-continuity-title" className="pc-title mt-2 text-2xl text-mist">Connect this NODE</h2><p className="mt-3 max-w-2xl text-sm leading-6 text-mute">Review the authenticated PRIMARY snapshot before this installation becomes a NODE.</p></header>;
 }
 
-function EntrySurface({ error, recoveryPrompt, token, primaryURL, onTokenChange, onPrimaryURLChange, onSubmit }: {
-  error?: string; recoveryPrompt: boolean; token: string; primaryURL: string;
-  onTokenChange: (value: string) => void; onPrimaryURLChange: (value: string) => void;
+const MAX_CA_FILE_BYTES = 64 * 1024;
+
+function EntrySurface({ error, recoveryPrompt, token, primaryURL, caPem, onTokenChange, onPrimaryURLChange, onCaChange, onSubmit }: {
+  error?: string; recoveryPrompt: boolean; token: string; primaryURL: string; caPem: string;
+  onTokenChange: (value: string) => void; onPrimaryURLChange: (value: string) => void; onCaChange: (value: string) => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
 }) {
+  async function loadCaFile(event: { currentTarget: { files?: ArrayLike<File> | null } }) {
+    const file = event.currentTarget.files?.[0];
+    if (!file || file.size > MAX_CA_FILE_BYTES) return;
+    onCaChange(await file.text());
+  }
   return <section className="mt-8 space-y-5" aria-labelledby="node-continuity-title">
     <NodeHeader />
     <p className="border-l-2 border-signal/70 pl-3 text-sm leading-6 text-mute">{recoveryPrompt ? "Please re-enter your enrollment token. Tokens are not stored on a NODE." : "Paste your enrollment token and PRIMARY URL to start a new preview."}</p>
@@ -116,6 +126,11 @@ function EntrySurface({ error, recoveryPrompt, token, primaryURL, onTokenChange,
         <input id="node-primary-url" className="pc-input font-mono" data-testid="node-primary-url" value={primaryURL} onInput={(event) => onPrimaryURLChange(event.currentTarget.value)} onChange={(event) => onPrimaryURLChange(event.currentTarget.value)} placeholder="https://primary.example:3443/" aria-describedby="node-primary-url-help" autoComplete="off" spellCheck={false} />
         <span id="node-primary-url-help" className="mt-1 block text-xs text-faint" data-testid="node-primary-url-help">Use the form https://&lt;host&gt;:&lt;port&gt;/ with an explicit port and a trailing slash.</span>
       </label>
+      <label className="pc-label" htmlFor="node-primary-ca">PRIMARY CA certificate (optional)
+        <textarea id="node-primary-ca" className="pc-input min-h-24 resize-y font-mono" data-testid="node-primary-ca" value={caPem} onInput={(event) => onCaChange(event.currentTarget.value)} onChange={(event) => onCaChange(event.currentTarget.value)} placeholder="-----BEGIN CERTIFICATE-----" aria-describedby="node-primary-ca-help" autoComplete="off" spellCheck={false} />
+        <span id="node-primary-ca-help" className="mt-1 block text-xs text-faint" data-testid="node-primary-ca-help">Needed when the PRIMARY uses a self-signed or private CA. Download it from the PRIMARY's enrollment trust panel, then paste it or load the file. It is trusted for this PRIMARY only, and loading a new one replaces the previous CA for the same address.</span>
+      </label>
+      <input type="file" accept=".pem,.crt,.cer" className="pc-input" data-testid="node-primary-ca-file" aria-label="Load PRIMARY CA certificate file" onChange={(event) => void loadCaFile(event)} />
       <button type="submit" className="pc-btn" data-testid="node-draft-submit">Preview enrollment</button>
     </form>
   </section>;
@@ -123,7 +138,7 @@ function EntrySurface({ error, recoveryPrompt, token, primaryURL, onTokenChange,
 
 function PreviewSurface({ draft, error, onConfirm, onCancel }: { draft: DraftPreview; error?: string; onConfirm: () => void; onCancel: () => void }) {
   const preview = draft.envelopePreview;
-  const fields = [["ingress", formatIngress(preview.ingress)], ["role", preview.role], ["generation", String(preview.generation)], ["cluster key id", preview.clusterKeyId ?? "—"], ["content hash", preview.contentHash], ["draft expires", formatDate(draft.expiresAt)]];
+  const fields = [["ingress", formatIngress(preview.ingress)], ["role", preview.role], ["generation", String(preview.generation)], ["cluster key id", preview.clusterKeyId ?? "—"], ["content hash", preview.contentHash], ...(draft.primaryCaFingerprint ? [["primary ca fingerprint", draft.primaryCaFingerprint]] : []), ["draft expires", formatDate(draft.expiresAt)]];
   return <section className="mt-8 space-y-5" aria-labelledby="node-preview-title">
     <header className="border-b border-line/80 pb-5"><p className="pc-eyebrow pc-eyebrow-signal">node continuity / review</p><h2 id="node-preview-title" className="pc-title mt-2 text-2xl text-mist">Enrollment preview</h2><p className="mt-3 max-w-2xl text-sm leading-6 text-mute">The following redacted snapshot summary will be applied after confirmation.</p></header>
     {error ? <p className="pc-toast-err" role="alert">{error}</p> : null}
@@ -155,7 +170,7 @@ function PreviewField({ label, value }: { label: string; value: string }) {
 function sanitizeDraft(draft: DraftPreview): DraftPreview {
   const envelope = draft.envelopePreview;
   const overlay = draft.nodeLocalOverlay ? { nodeId: draft.nodeLocalOverlay.nodeId, role: draft.nodeLocalOverlay.role, ingress: { ipv4: draft.nodeLocalOverlay.ingress?.ipv4, ipv6: draft.nodeLocalOverlay.ingress?.ipv6 } } : undefined;
-  return { draftId: draft.draftId, envelopePreview: { ingress: { ipv4: envelope.ingress?.ipv4, ipv6: envelope.ingress?.ipv6 }, role: envelope.role, generation: envelope.generation, ...(envelope.clusterKeyId ? { clusterKeyId: envelope.clusterKeyId } : {}), contentHash: envelope.contentHash }, ...(overlay ? { nodeLocalOverlay: overlay } : {}), expiresAt: draft.expiresAt };
+  return { draftId: draft.draftId, envelopePreview: { ingress: { ipv4: envelope.ingress?.ipv4, ipv6: envelope.ingress?.ipv6 }, role: envelope.role, generation: envelope.generation, ...(envelope.clusterKeyId ? { clusterKeyId: envelope.clusterKeyId } : {}), contentHash: envelope.contentHash }, ...(overlay ? { nodeLocalOverlay: overlay } : {}), expiresAt: draft.expiresAt, ...(typeof draft.primaryCaFingerprint === "string" && /^[0-9a-f]{64}$/.test(draft.primaryCaFingerprint) ? { primaryCaFingerprint: draft.primaryCaFingerprint } : {}) };
 }
 
 function sanitizeConfirmResult(result: ConfirmResult): ConfirmResult {
@@ -165,6 +180,8 @@ function formatIngress(ingress: DraftPreview["envelopePreview"]["ingress"]) { re
 function formatDate(value: string) { const timestamp = Date.parse(value); return Number.isNaN(timestamp) ? "—" : new Date(timestamp).toISOString(); }
 const PRIMARY_URL_HINT = "The enrollment request was rejected. The PRIMARY URL must look like https://<host>:<port>/ with an explicit port and a trailing slash.";
 function draftError(caught: unknown) {
+  if (caught instanceof EnrollmentApiError && caught.kind === "untrusted-certificate") return "The PRIMARY certificate is not trusted by this NODE. Download the CA from the PRIMARY's enrollment trust panel and load it below, then try again.";
+  if (caught instanceof EnrollmentApiError && caught.kind === "invalid-ca") return "The CA certificate is not valid. Load the PEM file downloaded from the PRIMARY's enrollment trust panel.";
   if (caught instanceof ApiError && caught.status === 403) return "The enrollment token was rejected. Check the token and try again.";
   if (caught instanceof EnrollmentApiError && caught.status === 400) return PRIMARY_URL_HINT;
   if (caught instanceof EnrollmentApiError && caught.status === 410) return "The enrollment token has expired or been revoked. Enter a current token.";

@@ -231,4 +231,73 @@ describe("NodeContinuityView", () => {
     expect(downloaded).not.toContain(kek);
     expect(revokeObjectURL).toHaveBeenCalledWith("blob:audit");
   });
+  describe("primary CA trust", () => {
+    const caPem = "-----BEGIN CERTIFICATE-----\nQ0E=\n-----END CERTIFICATE-----\n";
+    const fingerprint = "ab".repeat(32);
+
+    async function submit(container: TestElement, withCA: boolean) {
+      setValue(element(container, "node-enrollment-token"), plaintext);
+      setValue(element(container, "node-primary-url"), "https://primary.example:3443/");
+      if (withCA) setValue(element(container, "node-primary-ca"), caPem);
+      await settle();
+      await act(async () => {
+        element(container, "node-enrollment-form").dispatchEvent(new TestEvent("submit", { bubbles: true, cancelable: true }));
+        await settle();
+      });
+    }
+
+    it("sends the loaded CA with the draft and shows its fingerprint in the preview", async () => {
+      const fetchMock = queueFetch(
+        jsonResponse({ error: "token-missing" }, 410),
+        jsonResponse({
+          draftId: "draft-id",
+          envelopePreview: { ingress: { ipv4: "192.0.2.20" }, role: "node", generation: 7, contentHash: "content-hash" },
+          expiresAt: "2030-01-02T00:00:00Z",
+          primaryCaFingerprint: fingerprint,
+        }),
+      );
+      const container = await mount(view());
+      await submit(container, true);
+      const draftCall = fetchMock.mock.calls[1]!;
+      expect(JSON.parse(String(draftCall[1].body))).toEqual({ token: plaintext, primaryURL: "https://primary.example:3443/", caPem: caPem.trim() });
+      expect(container.textContent).toContain("primary ca fingerprint");
+      expect(container.textContent).toContain(fingerprint);
+    });
+
+    it("does not send a CA when none is loaded", async () => {
+      const fetchMock = queueFetch(jsonResponse({ error: "token-missing" }, 410), previewResponse());
+      const container = await mount(view());
+      await submit(container, false);
+      expect(JSON.parse(String(fetchMock.mock.calls[1]![1].body))).toEqual({ token: plaintext, primaryURL: "https://primary.example:3443/" });
+      expect(container.textContent).not.toContain("primary ca fingerprint");
+    });
+
+    it("explains an untrusted PRIMARY certificate and keeps the CA field", async () => {
+      const fetchMock = queueFetch(
+        jsonResponse({ error: "token-missing" }, 410),
+        jsonResponse({ error: "primary certificate not trusted; load the primary CA" }, 409),
+      );
+      const container = await mount(view());
+      await submit(container, false);
+      expect(container.textContent).toContain("certificate is not trusted by this NODE");
+      expect(element(container, "node-primary-ca")).toBeDefined();
+    });
+
+    it("reports an invalid CA", async () => {
+      const fetchMock = queueFetch(jsonResponse({ error: "token-missing" }, 410), jsonResponse({ error: "invalid CA certificate" }, 400));
+      const container = await mount(view());
+      await submit(container, true);
+      expect(container.textContent).toContain("CA certificate is not valid");
+      expect(container.textContent).not.toContain("The enrollment request was rejected");
+    });
+
+    it("keeps unknown conflict bodies generic and never echoes them", async () => {
+      const fetchMock = queueFetch(jsonResponse({ error: "token-missing" }, 410), jsonResponse({ error: credential }, 409));
+      const container = await mount(view());
+      await submit(container, false);
+      expect(container.textContent).toContain("could not be loaded");
+      expect(container.textContent).not.toContain(credential);
+      expect(container.textContent).not.toContain("not trusted");
+    });
+  });
 });
