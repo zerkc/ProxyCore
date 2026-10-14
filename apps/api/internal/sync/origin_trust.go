@@ -29,6 +29,15 @@ func WithTrustOverride(ctx context.Context, origin, caPEM string) context.Contex
 	return context.WithValue(ctx, trustOverrideKey{}, trustOverride{origin: strings.ToLower(origin), caPEM: caPEM})
 }
 
+// TrustOverrideFor returns the request-scoped CA carried by ctx for origin.
+func TrustOverrideFor(ctx context.Context, origin string) (string, bool) {
+	override, ok := ctx.Value(trustOverrideKey{}).(trustOverride)
+	if !ok || override.origin != strings.ToLower(origin) {
+		return "", false
+	}
+	return override.caPEM, true
+}
+
 // IsUntrustedCertificate reports whether err is the peer's certificate being
 // rejected (unknown authority, bad hostname, invalid chain), as opposed to an
 // unreachable host or a protocol failure.

@@ -103,6 +103,7 @@ func runServerWithNodeConverter(ctx context.Context, cfg config.Config, logger *
 	var nodeConverter *enrollment.NodeConverter
 	var tokenAuthority httpserver.EnrollmentTokenAuthority
 	var snapshotClient *syncpublication.SnapshotClient
+	var primaryTrust *configuration.SQLitePrimaryTrustStore
 	var localKEKLoader *cluster.LocalKEKLoader
 	// Backend-neutral seams filled by whichever persistence branch runs.
 	var tlsStore enrollmentTLSConfigurationStore
@@ -136,8 +137,10 @@ func runServerWithNodeConverter(ctx context.Context, cfg config.Config, logger *
 	clusterKeys = stack.keys
 	tlsStore = stack.config
 	renewalStore = stack.config
+	primaryTrust = configuration.NewSQLitePrimaryTrustStore(stack.writer)
 	snapshotClient = syncpublication.NewSnapshotClient(syncpublication.SnapshotClientOptions{
 		CanonicalizeURL: enrollment.CanonicalizePrimaryURL,
+		HTTPClient:      primaryTrustHTTPClient(primaryTrust),
 	})
 	nodeConverter = buildNodeConverter(enableNodeConverter, stack.phase2, identitySvc, logger)
 	if nodeConverter != nil {
@@ -198,6 +201,12 @@ func runServerWithNodeConverter(ctx context.Context, cfg config.Config, logger *
 		}
 		wireEnrollmentWorkflowDependencies(&workflow, snapshotClient, localKEKLoader)
 		wireEnrollmentGrantExchange(&workflow, stack, cfg.MasterKeyBase64)
+		if primaryTrust != nil {
+			workflow.RecordPrimaryTrust = func(ctx context.Context, origin, caPEM string) error {
+				_, err := primaryTrust.Put(ctx, origin, caPEM)
+				return err
+			}
+		}
 		workflow.RecordSyncBinding = func(ctx context.Context, binding configuration.NodeSyncBinding, appliedHash string) error {
 			return nodeSyncStore.BindNodeSync(ctx, binding, appliedHash, time.Now().UTC())
 		}
@@ -495,6 +504,36 @@ func redactedEnrollmentTLSError(err error) string {
 	}
 }
 
+// primaryTrustReader is the read side of the per-origin primary CA store.
+type primaryTrustReader interface {
+	Get(context.Context, string) (configuration.PrimaryTrustAnchor, bool, error)
+}
+
+// primaryTrustResolver adapts the store to the transport's CA lookup. A store
+// failure is returned so the transport fails closed instead of silently
+// falling back to the system roots.
+func primaryTrustResolver(reader primaryTrustReader) syncpublication.OriginCAResolver {
+	return func(ctx context.Context, origin string) (string, bool, error) {
+		if reader == nil {
+			return "", false, nil
+		}
+		anchor, ok, err := reader.Get(ctx, origin)
+		if err != nil || !ok {
+			return "", false, err
+		}
+		return anchor.CAPEM, true, nil
+	}
+}
+
+// primaryTrustHTTPClient is the node->primary HTTP client: TLS 1.3 / h2 only,
+// verifying each primary against the CA loaded for its origin.
+func primaryTrustHTTPClient(reader primaryTrustReader) *http.Client {
+	return &http.Client{
+		Transport: syncpublication.NewOriginTrustTransport(primaryTrustResolver(reader)),
+		Timeout:   15 * time.Second,
+	}
+}
+
 func wireEnrollmentWorkflowDependencies(workflow *httpserver.EnrollmentWorkflowHandlerOptions, client *syncpublication.SnapshotClient, loader *cluster.LocalKEKLoader) {
 	if workflow == nil {
 		return
@@ -533,7 +572,9 @@ func wireEnrollmentGrantExchange(workflow *httpserver.EnrollmentWorkflowHandlerO
 	if workflow == nil || stack == nil || stack.db == nil || stack.writer == nil || stack.keys == nil || masterKeyBase64 == "" {
 		return
 	}
-	client := syncpublication.NewExchangeClient(syncpublication.ExchangeClientOptions{})
+	client := syncpublication.NewExchangeClient(syncpublication.ExchangeClientOptions{
+		HTTPClient: primaryTrustHTTPClient(configuration.NewSQLitePrimaryTrustStore(stack.writer)),
+	})
 	acceptor := enrollment.NewBootstrapAcceptor(enrollment.BootstrapAcceptorOptions{
 		DB: stack.db, Writer: stack.writer, Keys: stack.keys, MasterKeyBase64: masterKeyBase64,
 	})

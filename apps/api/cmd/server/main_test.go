@@ -611,3 +611,33 @@ func TestSnapshotByTokenClusterKeyLoaderWorksWithSQLiteKeyStore(t *testing.T) {
 		t.Fatalf("unknown id: err=%v", err)
 	}
 }
+
+type fakePrimaryTrustReader struct {
+	anchors map[string]configuration.PrimaryTrustAnchor
+	err     error
+}
+
+func (f fakePrimaryTrustReader) Get(_ context.Context, origin string) (configuration.PrimaryTrustAnchor, bool, error) {
+	anchor, ok := f.anchors[origin]
+	return anchor, ok, f.err
+}
+
+func TestPrimaryTrustResolverAdaptsTheStoreForTheTransport(t *testing.T) {
+	reader := fakePrimaryTrustReader{anchors: map[string]configuration.PrimaryTrustAnchor{
+		"https://primary.example:3443": {Origin: "https://primary.example:3443", CAPEM: "PEM"},
+	}}
+	resolve := primaryTrustResolver(reader)
+	if pem, ok, err := resolve(context.Background(), "https://primary.example:3443"); pem != "PEM" || !ok || err != nil {
+		t.Fatalf("known origin = %q %v %v", pem, ok, err)
+	}
+	if _, ok, err := resolve(context.Background(), "https://other.example:3443"); ok || err != nil {
+		t.Fatalf("unknown origin ok=%v err=%v, want not found without error", ok, err)
+	}
+	failing := primaryTrustResolver(fakePrimaryTrustReader{err: errors.New("db closed")})
+	if _, _, err := failing(context.Background(), "https://primary.example:3443"); err == nil {
+		t.Fatal("a store failure must reach the transport so it fails closed")
+	}
+	if _, ok, err := primaryTrustResolver(nil)(context.Background(), "https://primary.example:3443"); ok || err != nil {
+		t.Fatalf("nil reader ok=%v err=%v, want no trust", ok, err)
+	}
+}
