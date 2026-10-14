@@ -34,5 +34,5 @@ Let an owner convert an installation PRIMARY -> NODE and NODE -> PRIMARY from th
 
 ## Progress
 - Branch: feat/primary-node-role-conversion
-- T1 implemented and verified locally (go build/vet/test ./... green); commit pending (parent).
+- T1 done: commit ce6c78f (go build/vet/test green; RED observed for cluster and identity SQLite only).
 - Next: T2
