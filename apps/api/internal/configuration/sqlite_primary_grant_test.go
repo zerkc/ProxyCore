@@ -398,3 +398,112 @@ func TestSQLitePrimaryGrantTransitionRequiresExactGeneration(t *testing.T) {
 		t.Fatalf("err=%v role=%s", err, f.role())
 	}
 }
+
+// reenrollRequest builds a second enrollment for the same node, as happens in
+// the switchover cycle where a former node returns to the same primary.
+func (f *grantFixture) reenrollRequest(token string, attemptID string) enrollment.PrimaryGrantRequest {
+	request := f.request(token, newRecipient(f.t))
+	request.AttemptID = attemptID
+	return request
+}
+
+func (f *grantFixture) revokeNodes() {
+	f.t.Helper()
+	// Same statements the demote/promote path runs when it retires a cluster.
+	f.exec(`update node_credentials set revoked_at = ? where revoked_at is null`, grantStamp(f.t, f.now))
+	f.exec(`update enrolled_nodes set revoked_at = ? where revoked_at is null`, grantStamp(f.t, f.now))
+}
+
+func TestSQLitePrimaryGrantRotatesRevokedNodeInPlace(t *testing.T) {
+	f := newGrantFixture(t)
+	ctx := context.Background()
+	first, _ := f.insertToken("a1", 0x41, f.now.Add(time.Hour))
+	if _, err := f.service.IssueGrant(ctx, f.request(first, newRecipient(t))); err != nil {
+		t.Fatal(err)
+	}
+	var oldCredential string
+	if err := f.db.QueryRow(`select credential_id from enrolled_nodes`).Scan(&oldCredential); err != nil {
+		t.Fatal(err)
+	}
+	f.revokeNodes()
+	f.now = f.now.Add(time.Minute)
+
+	second, secondID := f.insertToken("b2", 0x42, f.now.Add(time.Hour))
+	request := f.reenrollRequest(second, "66667777-3333-4444-8999-aabbccddeeff")
+	response, err := f.service.IssueGrant(ctx, request)
+	if err != nil {
+		t.Fatalf("re-enrollment of a revoked node: %v", err)
+	}
+	if f.count(`select count(*) from enrolled_nodes where revoked_at is null`) != 1 ||
+		f.count(`select count(*) from enrolled_nodes`) != 1 ||
+		f.count(`select count(*) from node_credentials where revoked_at is null`) != 1 ||
+		f.count(`select count(*) from node_credentials`) != 1 {
+		t.Fatal("expected exactly one live enrolled row and one live credential row")
+	}
+	var newCredential, attempt string
+	if err := f.db.QueryRow(`select credential_id, created_by_attempt_id from enrolled_nodes`).Scan(&newCredential, &attempt); err != nil {
+		t.Fatal(err)
+	}
+	if newCredential == oldCredential || attempt != request.AttemptID {
+		t.Fatalf("row not rotated: credential=%s attempt=%s", newCredential, attempt)
+	}
+	if f.count(`select count(*) from node_credentials where id = ?`, oldCredential) != 0 {
+		t.Fatal("old credential still present")
+	}
+	if f.count(`select count(*) from enrollment_tokens where id=? and consumed_by_attempt_id=?`, secondID, request.AttemptID) != 1 {
+		t.Fatal("token not consumed by the rotating attempt")
+	}
+	// Exact retry returns the same payload and does not rotate again.
+	retry, err := f.service.IssueGrant(ctx, request)
+	if err != nil || !bytes.Equal(retry.SealedBootstrapPayload, response.SealedBootstrapPayload) {
+		t.Fatalf("retry err=%v", err)
+	}
+	var after string
+	if err := f.db.QueryRow(`select credential_id from enrolled_nodes`).Scan(&after); err != nil || after != newCredential {
+		t.Fatalf("retry rotated the credential: %v", err)
+	}
+	if f.issued.Load() != 2 {
+		t.Fatalf("issued = %d, want 2", f.issued.Load())
+	}
+}
+
+func TestSQLitePrimaryGrantRotationDeniedForLiveRowOrOtherInstallation(t *testing.T) {
+	f := newGrantFixture(t)
+	ctx := context.Background()
+	first, _ := f.insertToken("a1", 0x41, f.now.Add(time.Hour))
+	if _, err := f.service.IssueGrant(ctx, f.request(first, newRecipient(t))); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := func() string {
+		var out string
+		if err := f.db.QueryRow(`select n.node_id||n.installation_id||n.credential_id||n.created_by_attempt_id||ifnull(n.revoked_at,'live')||c.credential_hash||ifnull(c.revoked_at,'live')
+			from enrolled_nodes n join node_credentials c on c.id = n.credential_id`).Scan(&out); err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	before := snapshot()
+
+	// Live (unrevoked) row for the same node: denied, nothing changes.
+	live, _ := f.insertToken("b2", 0x42, f.now.Add(time.Hour))
+	if _, err := f.service.IssueGrant(ctx, f.reenrollRequest(live, "66667777-3333-4444-8999-aabbccddeeff")); !errors.Is(err, enrollment.ErrEnrollmentDenied) {
+		t.Fatalf("live row err = %v", err)
+	}
+	if snapshot() != before || f.count(`select count(*) from enrollment_grants`) != 1 {
+		t.Fatal("denied live-row exchange changed state")
+	}
+
+	// Revoked row but claimed by a different installation: denied.
+	f.revokeNodes()
+	revokedBefore := snapshot()
+	other, _ := f.insertToken("c3", 0x43, f.now.Add(time.Hour))
+	hijack := f.reenrollRequest(other, "77778888-3333-4444-8999-aabbccddeeff")
+	hijack.TargetInstallationID = "99998888-5555-4666-8999-aabbccddeeff"
+	if _, err := f.service.IssueGrant(ctx, hijack); !errors.Is(err, enrollment.ErrEnrollmentDenied) {
+		t.Fatalf("other installation err = %v", err)
+	}
+	if snapshot() != revokedBefore || f.count(`select count(*) from enrollment_grants`) != 1 ||
+		f.count(`select count(*) from enrollment_tokens where consumed_at is not null`) != 1 {
+		t.Fatal("denied hijack changed state")
+	}
+}

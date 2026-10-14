@@ -39,6 +39,10 @@ func (s *SQLitePhase2Store) WithPrimaryGrant(ctx context.Context, fn func(Primar
 type sqlitePrimaryGrantTransaction struct {
 	base *sqlitePhase2Transaction
 	v    sqlitedb.WriteValue
+	// rotatedNodeID is set when CreateNodeCredential re-keyed the credential
+	// row of a revoked node in place; CreateEnrolledNode then updates that
+	// node's enrolled row instead of inserting a second one.
+	rotatedNodeID string
 }
 
 func (t *sqlitePrimaryGrantTransaction) LockPrimaryIdentity(ctx context.Context) (PrimaryIdentityRecord, error) {
@@ -116,24 +120,76 @@ func (t *sqlitePrimaryGrantTransaction) GetEnrollmentGrant(ctx context.Context, 
 }
 
 // CreateNodeCredential persists only the credential hash and its version; the
-// plaintext secret never reaches the store.
+// plaintext secret never reaches the store. A node that was enrolled before
+// and then revoked (demote/promote retire every relationship but keep the
+// rows) is rotated in place: node_credentials_node_idx allows one row per
+// node, so the revoked row is re-keyed instead of inserting a second one. A
+// live row is never touched.
 func (t *sqlitePrimaryGrantTransaction) CreateNodeCredential(ctx context.Context, credential NodeCredentialRecord) error {
 	created, err := sqliteEnrollmentTokenTime(credential.CreatedAt)
 	if err != nil {
 		return ErrEnrollmentGrantStore
 	}
-	if _, err := t.v.Conn().ExecContext(ctx, `insert into node_credentials
-		(id, node_id, credential_hash, hash_version, created_at) values (?, ?, ?, ?, ?)`,
-		credential.ID, credential.NodeID, credential.CredentialHash, credential.HashVersion, created); err != nil {
+	var existingID string
+	var nodeRevoked *string
+	err = t.v.Conn().QueryRowContext(ctx, `select c.id, n.revoked_at
+		from node_credentials c
+		join enrolled_nodes n on n.node_id = c.node_id and n.credential_id = c.id
+		where c.node_id = ?`, credential.NodeID).Scan(&existingID, &nodeRevoked)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		if _, err := t.v.Conn().ExecContext(ctx, `insert into node_credentials
+			(id, node_id, credential_hash, hash_version, created_at) values (?, ?, ?, ?, ?)`,
+			credential.ID, credential.NodeID, credential.CredentialHash, credential.HashVersion, created); err != nil {
+			return ErrEnrollmentGrantStore
+		}
+		return nil
+	case err != nil || nodeRevoked == nil:
 		return ErrEnrollmentGrantStore
 	}
+	// enrolled_nodes.credential_id references node_credentials.id; defer the
+	// check to commit so both rows can move to the new id in one transaction.
+	if _, err := t.v.Conn().ExecContext(ctx, `pragma defer_foreign_keys = on`); err != nil {
+		return ErrEnrollmentGrantStore
+	}
+	result, err := t.v.Conn().ExecContext(ctx, `update node_credentials
+		set id = ?, credential_hash = ?, hash_version = ?, created_at = ?, revoked_at = null
+		where id = ? and node_id = ?`,
+		credential.ID, credential.CredentialHash, credential.HashVersion, created, existingID, credential.NodeID)
+	if err != nil {
+		return ErrEnrollmentGrantStore
+	}
+	if n, err := result.RowsAffected(); err != nil || n != 1 {
+		return ErrEnrollmentGrantStore
+	}
+	t.rotatedNodeID = credential.NodeID
 	return nil
 }
 
+// CreateEnrolledNode inserts the enrolled row, or completes an in-place
+// rotation started by CreateNodeCredential. Rotation requires the existing row
+// to be revoked and to belong to the same installation; anything else updates
+// zero rows and fails the whole transaction.
 func (t *sqlitePrimaryGrantTransaction) CreateEnrolledNode(ctx context.Context, node EnrolledNodeRecord) error {
 	enrolled, err := sqliteEnrollmentTokenTime(node.EnrolledAt)
 	if err != nil {
 		return ErrEnrollmentGrantStore
+	}
+	if t.rotatedNodeID != "" {
+		if t.rotatedNodeID != node.NodeID {
+			return ErrEnrollmentGrantStore
+		}
+		result, err := t.v.Conn().ExecContext(ctx, `update enrolled_nodes
+			set primary_id = ?, credential_id = ?, enrolled_at = ?, created_by_attempt_id = ?, revoked_at = null
+			where node_id = ? and installation_id = ? and revoked_at is not null`,
+			node.PrimaryID, node.CredentialID, enrolled, node.CreatedByAttemptID, node.NodeID, node.InstallationID)
+		if err != nil {
+			return ErrEnrollmentGrantStore
+		}
+		if n, err := result.RowsAffected(); err != nil || n != 1 {
+			return ErrEnrollmentGrantStore
+		}
+		return nil
 	}
 	if _, err := t.v.Conn().ExecContext(ctx, `insert into enrolled_nodes
 		(node_id, installation_id, primary_id, credential_id, enrolled_at, created_by_attempt_id)
