@@ -107,4 +107,14 @@ describe("dashboard topology surface routing", () => {
       );
     }
   });
+
+  it("lists the nodes nav entry only for primary roles on the ordinary surface", () => {
+    const has = (surface: "ordinary" | "node-only", role?: "primary" | "primary-with-nodes" | "standalone-primary" | "node") =>
+      getDashboardNavigation(surface, role).some((item) => item.id === "nodes");
+    expect(has("ordinary", "primary")).toBe(true);
+    expect(has("ordinary", "primary-with-nodes")).toBe(true);
+    expect(has("ordinary", "standalone-primary")).toBe(false);
+    expect(has("ordinary")).toBe(false);
+    expect(has("node-only", "node")).toBe(false);
+  });
 });

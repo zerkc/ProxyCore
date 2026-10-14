@@ -43,6 +43,8 @@ export async function getTopologySync(signal?: AbortSignal): Promise<TopologySyn
     outdated: body.outdated === true,
     consecutiveFailures: typeof body.consecutiveFailures === "number" ? body.consecutiveFailures : 0,
     acknowledged: body.acknowledged === true,
+    unlinked: body.unlinked === true,
+    ...(body.unlinkedAt ? { unlinkedAt: body.unlinkedAt } : {}),
     ...(body.appliedHash ? { appliedHash: body.appliedHash } : {}),
     ...(body.primaryHash ? { primaryHash: body.primaryHash } : {}),
     ...(body.lastSyncAt ? { lastSyncAt: body.lastSyncAt } : {}),

@@ -2,6 +2,7 @@ import type {
   EnrollmentHostnameConfig,
   EnrollmentTrust,
   EnrollmentTrustDownload,
+  TopologyNodeList,
 } from "./dashboard/types";
 import type {
   ConfirmResult,
@@ -501,6 +502,8 @@ export type TopologyApiErrorKind =
   | "bad-request"
   | "generation-mismatch"
   | "invalid-transition"
+  | "not-found"
+  | "not-primary"
   | "unavailable"
   | "network"
   | "unknown";
@@ -571,6 +574,59 @@ async function topologyRequest(
     throw new TopologyApiError(status, kind, `Topology request failed (${status})`);
   }
   return (await response.json().catch(() => ({ ok: true }))) as TopologyConversionResult;
+}
+
+async function topologyNodesRequest<T>(
+  path: string,
+  method: "GET" | "POST",
+  signal?: AbortSignal,
+): Promise<T> {
+  let response: Response;
+  try {
+    response = await fetch(path, {
+      method,
+      credentials: "include",
+      cache: "no-store",
+      ...(method === "POST" ? { headers: { "content-type": "application/json" }, body: "{}" } : {}),
+      ...(signal ? { signal } : {}),
+    });
+  } catch {
+    throw new TopologyApiError(0, "network", "Topology service could not be reached.");
+  }
+  if (!response.ok) {
+    const body = (await response.json().catch(() => ({}))) as { code?: unknown };
+    const status = response.status;
+    const kind: TopologyApiErrorKind =
+      status === 401
+        ? "unauthorized"
+        : status === 403
+          ? "forbidden"
+          : status === 404
+            ? "not-found"
+            : status === 409 && body.code === "TOPOLOGY_NOT_PRIMARY"
+              ? "not-primary"
+              : status === 409
+                ? "invalid-transition"
+                : status >= 500
+                  ? "unavailable"
+                  : "unknown";
+    throw new TopologyApiError(status, kind, `Topology nodes request failed (${status})`);
+  }
+  return (await response.json().catch(() => undefined)) as T;
+}
+
+/** Lists the nodes enrolled with this primary. Only primary roles may call it. */
+export async function listTopologyNodes(signal?: AbortSignal): Promise<TopologyNodeList> {
+  const body = await topologyNodesRequest<Partial<TopologyNodeList> | undefined>("/api/topology/nodes", "GET", signal);
+  if (!body || typeof body.serverTime !== "string" || !Array.isArray(body.nodes)) {
+    throw new TopologyApiError(200, "unknown", "Topology nodes response was malformed.");
+  }
+  return { serverTime: body.serverTime, nodes: body.nodes };
+}
+
+/** Unlinks one enrolled node: its credential is revoked and it is told so on its next pull. */
+export function unlinkTopologyNode(nodeId: string, signal?: AbortSignal): Promise<{ nodeId: string; unlinkedAt: string }> {
+  return topologyNodesRequest(`/api/topology/nodes/${encodeURIComponent(nodeId)}/unlink`, "POST", signal);
 }
 
 export type BackupApiErrorKind =

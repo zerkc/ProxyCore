@@ -134,6 +134,7 @@ export function TopologyConversionPanel({
         <button
           type="button"
           className="pc-btn"
+          id={promote ? "topology-promote-open" : undefined}
           data-testid={promote ? "topology-promote-open" : "topology-demote-open"}
           onClick={() => { setError(""); setConfirming(true); }}
         >

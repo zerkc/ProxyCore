@@ -8,6 +8,7 @@ import { VersionStatus } from "./VersionStatus";
 import { deriveBarState } from "./patch-bar-state";
 import { EnrollmentTokenPanel } from "./EnrollmentTokenPanel";
 import { NodeContinuityView } from "./NodeContinuityView";
+import { NodesView, canListNodes } from "./NodesView";
 import { NodeSyncStatus } from "./NodeSyncStatus";
 import { TopologyConversionPanel } from "./TopologyConversionPanel";
 import type { TopologyIdentity } from "./types";
@@ -50,12 +51,13 @@ export function getIdentityTuple(identity?: IdentityTupleInput) {
     .join("|");
 }
 
-export function getDashboardNavigation(surface: DashboardSurface) {
+export function getDashboardNavigation(surface: DashboardSurface, role?: TopologyIdentity["role"]) {
   if (surface === "error") return [];
   if (surface === "node-only") {
     return dashboardNav.filter((item) => item.id === "continuity");
   }
-  return dashboardNav;
+  // The nodes list is served only by a primary, never by a standalone one.
+  return dashboardNav.filter((item) => item.id !== "nodes" || canListNodes(role));
 }
 
 export function getTopologyInspectorRows(identity?: TopologyIdentity) {
@@ -145,6 +147,15 @@ function NavIcon({ icon }: { icon: DashboardNavIcon }) {
           <circle cx="18" cy="12" r="2" />
           <circle cx="6" cy="18" r="2" />
           <path d="m8 7 8 4m-8 6 8-4" />
+        </>
+      );
+      break;
+    case "nodes":
+      glyph = (
+        <>
+          <rect x="4" y="4" width="16" height="6" rx="1" />
+          <rect x="4" y="14" width="16" height="6" rx="1" />
+          <path d="M8 7h.01M8 17h.01" />
         </>
       );
       break;
@@ -246,7 +257,7 @@ export default function DashboardShell({ children }: { children: ReactNode }) {
   const nodeOnly = surface === "node-only";
   const ordinaryControls = surface === "ordinary";
   const identityTuple = getIdentityTuple(identity);
-  const visibleNav = getDashboardNavigation(surface);
+  const visibleNav = getDashboardNavigation(surface, identity?.role);
   const activeNavigationId = nodeOnly ? "continuity" : current.id;
 
   return (
@@ -339,6 +350,9 @@ export default function DashboardShell({ children }: { children: ReactNode }) {
                     {children}
                     {current.id === "continuity" && identity ? (
                       <EnrollmentTokenPanel identity={identity} />
+                    ) : null}
+                    {current.id === "continuity" && identity ? (
+                      <NodesView role={identity.role} />
                     ) : null}
                     {current.id === "continuity" && identity ? (
                       <NodeSyncStatus role={identity.role} />

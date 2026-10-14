@@ -114,6 +114,28 @@ export type TopologySyncStatus = {
   nextAttemptAt?: string;
   consecutiveFailures: number;
   acknowledged: boolean;
+  /** True only when the PRIMARY explicitly told this NODE it was unlinked. */
+  unlinked: boolean;
+  unlinkedAt?: string;
+};
+
+export type TopologyNodeStatus = "linked" | "unlinked" | "revoked";
+
+export type TopologyNode = {
+  nodeId: string;
+  displayName: string;
+  status: TopologyNodeStatus;
+  ingressIPv4: string;
+  ingressIPv6: string;
+  lastSeenAt: string | null;
+  enrolledAt: string;
+  unlinkedAt: string | null;
+};
+
+export type TopologyNodeList = {
+  /** Server clock used to age lastSeenAt; never compare against the browser clock. */
+  serverTime: string;
+  nodes: TopologyNode[];
 };
 
 export type TopologySyncWarningCode = "NODE_OUTDATED" | "NODE_NEVER_SYNCED" | "NODE_SYNC_UNVERIFIED";

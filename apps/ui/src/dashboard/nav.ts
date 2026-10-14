@@ -28,6 +28,14 @@ export const dashboardNav = [
     icon: "continuity",
   },
   {
+    // Rendered inside the continuity page (anchor), primaries only.
+    href: "/dashboard/continuity#nodes",
+    id: "nodes",
+    label: "nodes",
+    title: "linked nodes",
+    icon: "nodes",
+  },
+  {
     href: "/dashboard/ingress",
     id: "ingress",
     label: "ingress",

@@ -88,4 +88,24 @@ describe("NodeSyncStatus", () => {
     expect(byTestId(container, "node-sync-status")).toBeUndefined();
     expect(fetchMock).not.toHaveBeenCalled();
   });
+
+  it("shows the unlinked banner only when the loaded status says unlinked", async () => {
+    queueFetch(jsonResponse({ ...status, unlinked: true, unlinkedAt: "2026-10-14T10:05:00Z", lastError: "unlinked by primary" }));
+    const container = await mount(createElement(NodeSyncStatus, { role: "node" }));
+    expect(byTestId(container, "node-unlinked-banner")).toBeDefined();
+    expect(container.textContent).toContain("Re-link to a primary");
+  });
+
+  it("does not show the banner for a linked node", async () => {
+    queueFetch(jsonResponse({ ...status, unlinked: false }));
+    const container = await mount(createElement(NodeSyncStatus, { role: "node" }));
+    expect(byTestId(container, "node-unlinked-banner")).toBeUndefined();
+  });
+
+  it("never shows the banner when the status load fails", async () => {
+    queueFetch(jsonResponse({ error: "boom" }, 503));
+    const container = await mount(createElement(NodeSyncStatus, { role: "node" }));
+    expect(byTestId(container, "node-unlinked-banner")).toBeUndefined();
+    expect(container.textContent).toContain("Sync status is unavailable");
+  });
 });
