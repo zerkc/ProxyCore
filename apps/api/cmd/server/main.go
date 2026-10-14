@@ -14,6 +14,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/zerkc/ProxyCore/apps/api/internal/cluster"
 	"github.com/zerkc/ProxyCore/apps/api/internal/config"
 	"github.com/zerkc/ProxyCore/apps/api/internal/configuration"
@@ -148,9 +150,8 @@ func runServerWithNodeConverter(ctx context.Context, cfg config.Config, logger *
 	workflowReady := tlsStore != nil && identitySvc != nil
 	if workflowReady {
 		workflow = httpserver.EnrollmentWorkflowHandlerOptions{
-			Cache:     draftCache,
-			Converter: nodeConverter,
-			Identity:  localEnrollmentIdentityProvider(identitySvc),
+			Cache:    draftCache,
+			Identity: localEnrollmentIdentityProvider(identitySvc),
 			LocalIngress: func(context.Context) (domain.Ingress, error) {
 				return domain.Ingress{IPv4: cfg.ProxyIngressIPv4, IPv6: cfg.ProxyIngressIPv6}, nil
 			},
@@ -158,7 +159,11 @@ func runServerWithNodeConverter(ctx context.Context, cfg config.Config, logger *
 		if tokenAuthority != nil {
 			workflow.VerifyToken = tokenAuthority.Verify
 		}
+		if nodeConverter != nil { // never store a typed-nil converter in the interface
+			workflow.Converter = nodeConverter
+		}
 		wireEnrollmentWorkflowDependencies(&workflow, snapshotClient, localKEKLoader)
+		wireEnrollmentGrantExchange(&workflow, stack, cfg.MasterKeyBase64)
 		options = append(options, httpserver.WithEnrollmentWorkflow(workflow))
 	}
 
@@ -468,6 +473,38 @@ func wireEnrollmentWorkflowDependencies(workflow *httpserver.EnrollmentWorkflowH
 	}
 	if loader != nil {
 		workflow.Validator = httpserver.NewLocalKEKSnapshotValidator(loader)
+	}
+}
+
+// wireEnrollmentGrantExchange supplies confirm's grant exchange seams: the
+// node-side exchange client (same TLS 1.3 / h2-only transport constraints as
+// the snapshot client), the atomic KEK + credential acceptor and the KEK
+// read-back used for strict validation. Without a master key or key store the
+// seams stay nil and confirm answers 503.
+func wireEnrollmentGrantExchange(workflow *httpserver.EnrollmentWorkflowHandlerOptions, stack *sqliteStack, masterKeyBase64 string) {
+	if workflow == nil || stack == nil || stack.db == nil || stack.writer == nil || stack.keys == nil || masterKeyBase64 == "" {
+		return
+	}
+	client := syncpublication.NewExchangeClient(syncpublication.ExchangeClientOptions{})
+	acceptor := enrollment.NewBootstrapAcceptor(enrollment.BootstrapAcceptorOptions{
+		DB: stack.db, Writer: stack.writer, Keys: stack.keys, MasterKeyBase64: masterKeyBase64,
+	})
+	keys := stack.keys
+	workflow.ExchangeGrant = client.Exchange
+	workflow.AcceptGrant = acceptor.Accept
+	workflow.LoadClusterKEK = func(ctx context.Context, id uuid.UUID) (*cluster.KEK, error) {
+		material, err := keys.LoadActive(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		defer material.Destroy()
+		key := material.CopyBytes()
+		defer func() {
+			for i := range key {
+				key[i] = 0
+			}
+		}()
+		return cluster.NewKEK(key)
 	}
 }
 

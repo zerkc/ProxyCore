@@ -35,13 +35,18 @@ type EnrollmentLocalIdentity struct {
 }
 
 type EnrollmentWorkflowHandlerOptions struct {
-	Cache            *enrollment.DraftCache
-	VerifyToken      func(context.Context, string) error
-	FetchSnapshot    EnrollmentSnapshotFetcher
-	Validator        EnrollmentSnapshotValidator
-	Identity         func(context.Context) (EnrollmentLocalIdentity, error)
-	LocalIngress     func(context.Context) (domain.Ingress, error)
-	Converter        *enrollment.NodeConverter
+	Cache         *enrollment.DraftCache
+	VerifyToken   func(context.Context, string) error
+	FetchSnapshot EnrollmentSnapshotFetcher
+	Validator     EnrollmentSnapshotValidator
+	Identity      func(context.Context) (EnrollmentLocalIdentity, error)
+	LocalIngress  func(context.Context) (domain.Ingress, error)
+	Converter     EnrollmentNodeConverter
+	// ExchangeGrant, AcceptGrant and LoadClusterKEK are the confirm-time grant
+	// seams; confirm answers 503 when any is missing.
+	ExchangeGrant    EnrollmentGrantExchanger
+	AcceptGrant      EnrollmentGrantAcceptor
+	LoadClusterKEK   EnrollmentClusterKEKLoader
 	ArchiveTTL       time.Duration
 	ApplyWaitTimeout time.Duration
 }
