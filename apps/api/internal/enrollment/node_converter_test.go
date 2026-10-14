@@ -210,8 +210,9 @@ func TestNodeConverterReturnsWaitTimeoutWithoutTransition(t *testing.T) {
 func TestNodeConverterWrapsIdentityTransitionRefusal(t *testing.T) {
 	archive := &converterArchiveFake{}
 	enqueuer := &converterEnqueuerFake{}
-	// PRIMARY -> NODE is now a permitted transition, so the refusal is
-	// exercised with a role the state machine does not recognize.
+	// PRIMARY -> NODE is a permitted transition, so the refusal is exercised
+	// with a role the state machine does not recognize. The eligibility gate
+	// refuses it before anything is archived or applied.
 	unknownRole := domain.TopologyRole("unrecognized")
 	service := newConverterIdentityService(t, unknownRole)
 	converter := newTestNodeConverter(archive, enqueuer, service, &converterWaiterFake{
@@ -221,14 +222,14 @@ func TestNodeConverterWrapsIdentityTransitionRefusal(t *testing.T) {
 	if err == nil || !errors.Is(err, ErrNodeConversionDenied) {
 		t.Fatalf("error=%v, want ErrNodeConversionDenied", err)
 	}
-	if service.Current().Role != unknownRole || len(archive.archives) != 1 || len(enqueuer.jobs) != 1 {
+	if service.Current().Role != unknownRole || len(archive.archives) != 0 || len(enqueuer.jobs) != 0 {
 		t.Fatalf("role=%s archives=%d jobs=%d", service.Current().Role, len(archive.archives), len(enqueuer.jobs))
 	}
 }
 
 func TestNodeConverterCommitsNodeRoleFromPrimaryAndFromDemotedNode(t *testing.T) {
 	for _, role := range []domain.TopologyRole{
-		domain.TopologyRolePrimary, domain.TopologyRolePrimaryWithNodes, domain.TopologyRoleNode,
+		domain.TopologyRolePrimary, domain.TopologyRoleStalePrimary, domain.TopologyRoleNode,
 	} {
 		archive := &converterArchiveFake{}
 		enqueuer := &converterEnqueuerFake{}
@@ -243,6 +244,60 @@ func TestNodeConverterCommitsNodeRoleFromPrimaryAndFromDemotedNode(t *testing.T)
 		if result.Identity.Role != domain.TopologyRoleNode || service.Current().Role != domain.TopologyRoleNode {
 			t.Fatalf("role=%s: converted role=%s", role, service.Current().Role)
 		}
+	}
+}
+
+func TestNodeConverterRefusesBoundNodeAndPrimaryWithNodesBeforeImport(t *testing.T) {
+	key := uuid.New()
+	for _, test := range []struct {
+		name string
+		role domain.TopologyRole
+		key  *uuid.UUID
+	}{
+		{"primary with nodes", domain.TopologyRolePrimaryWithNodes, &key},
+		{"bound node", domain.TopologyRoleNode, &key},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			archive := &converterArchiveFake{}
+			enqueuer := &converterEnqueuerFake{}
+			service := newConverterIdentityServiceWithKey(t, test.role, test.key)
+			converter := newTestNodeConverter(archive, enqueuer, service, &converterWaiterFake{
+				statuses: []syncapply.ApplyJobTerminal{{Status: syncapply.ApplyTerminalStatusApplied}},
+			})
+			_, err := converter.Convert(context.Background(), NodeConversionInput{Envelope: converterEnvelope(t), LocalNodeID: service.Current().NodeID})
+			if !errors.Is(err, ErrNodeConversionDenied) {
+				t.Fatalf("error=%v, want ErrNodeConversionDenied", err)
+			}
+			if len(archive.archives) != 0 || len(enqueuer.jobs) != 0 || service.Current().Role != test.role {
+				t.Fatalf("archives=%d jobs=%d role=%s", len(archive.archives), len(enqueuer.jobs), service.Current().Role)
+			}
+		})
+	}
+}
+
+func TestNodeConverterPersistsImportedClusterKeyWithNodeRole(t *testing.T) {
+	archive := &converterArchiveFake{}
+	enqueuer := &converterEnqueuerFake{}
+	service := newConverterIdentityService(t, domain.TopologyRolePrimary)
+	converter := newTestNodeConverter(archive, enqueuer, service, &converterWaiterFake{
+		statuses: []syncapply.ApplyJobTerminal{{Status: syncapply.ApplyTerminalStatusApplied}},
+	})
+	key := uuid.New()
+	result, err := converter.Convert(context.Background(), NodeConversionInput{Envelope: converterEnvelope(t), LocalNodeID: service.Current().NodeID, ClusterKeyID: &key})
+	if err != nil {
+		t.Fatalf("Convert: %v", err)
+	}
+	current := service.Current()
+	if current.Role != domain.TopologyRoleNode || current.ClusterKeyID == nil || *current.ClusterKeyID != key {
+		t.Fatalf("identity=%+v", current)
+	}
+	// The node adopts the joined primary's generation (envelope generation 9)
+	// so a later promotion lands strictly above it.
+	if current.LeadershipGeneration != 9 || current.LatestKnownGeneration != 9 || current.IsStalePrimary() {
+		t.Fatalf("generation not adopted: %+v", current)
+	}
+	if result.NodeLineage.ClusterKeyID == nil || *result.NodeLineage.ClusterKeyID != key {
+		t.Fatalf("lineage key=%v", result.NodeLineage.ClusterKeyID)
 	}
 }
 
@@ -280,12 +335,18 @@ func newTestNodeConverter(archive *converterArchiveFake, enqueuer *converterEnqu
 
 func newConverterIdentityService(t *testing.T, role domain.TopologyRole) *identity.Service {
 	t.Helper()
+	return newConverterIdentityServiceWithKey(t, role, nil)
+}
+
+func newConverterIdentityServiceWithKey(t *testing.T, role domain.TopologyRole, key *uuid.UUID) *identity.Service {
+	t.Helper()
 	store := &converterIdentityStore{current: identity.Identity{
 		InstallationID:        domain.NewInstallationID(),
 		NodeID:                domain.NewNodeID(),
 		Role:                  role,
 		LeadershipGeneration:  7,
 		LatestKnownGeneration: 7,
+		ClusterKeyID:          key,
 	}}
 	service := identity.NewService(store)
 	if _, err := service.Load(context.Background()); err != nil {

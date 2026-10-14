@@ -53,6 +53,9 @@ type confirmFixture struct {
 	localInstall    domain.InstallationID
 	localNode       domain.NodeID
 	loadErr         error
+	localRole       domain.TopologyRole
+	localKeyID      string
+	convertKeyIDs   []*uuid.UUID
 }
 
 type kekValidatorFunc func(context.Context, replicationsnapshot.Envelope, *cluster.KEK) replicationsnapshot.ValidationResult
@@ -76,6 +79,7 @@ func (c fakeConverter) Convert(_ context.Context, in enrollment.NodeConversionIn
 	c.f.mu.Lock()
 	defer c.f.mu.Unlock()
 	c.f.convertCalls++
+	c.f.convertKeyIDs = append(c.f.convertKeyIDs, in.ClusterKeyID)
 	if c.f.convertErr != nil {
 		return enrollment.NodeConversionResult{}, c.f.convertErr
 	}
@@ -91,6 +95,7 @@ func newConfirmFixture(t *testing.T, withToken bool) *confirmFixture {
 		t: t, envelope: workflowTestEnvelope(t), token: workflowTestToken(),
 		sealedByAttempt: map[string]syncpublication.ExchangeResult{}, keys: map[string][]byte{},
 		localInstall: domain.NewInstallationID(), localNode: domain.NewNodeID(),
+		localRole: domain.TopologyRoleStandalone,
 	}
 	f.envelope.Transient.LeadershipGeneration = 3
 	hash, err := f.envelope.ExpectedHash()
@@ -128,7 +133,9 @@ func newConfirmFixture(t *testing.T, withToken bool) *confirmFixture {
 				return replicationsnapshot.ValidationResult{OK: true}
 			}),
 			Identity: func(context.Context) (httpserver.EnrollmentLocalIdentity, error) {
-				return httpserver.EnrollmentLocalIdentity{InstallationID: f.localInstall, NodeID: f.localNode}, nil
+				f.mu.Lock()
+				defer f.mu.Unlock()
+				return httpserver.EnrollmentLocalIdentity{InstallationID: f.localInstall, NodeID: f.localNode, Role: f.localRole, ClusterKeyID: f.localKeyID}, nil
 			},
 			LocalIngress:   func(context.Context) (domain.Ingress, error) { return domain.Ingress{IPv4: "192.0.2.7"}, nil },
 			Converter:      fakeConverter{f},
@@ -369,5 +376,53 @@ func TestConfirmKEKReadBackFailureAfterAcceptDoesNotConvert(t *testing.T) {
 	}
 	if _, ok := f.cache.GetByID(f.draftID); !ok {
 		t.Fatal("draft must stay so confirm can be retried")
+	}
+}
+
+func TestConfirmRoleEligibilityIsCheckedPerRequestBeforeAnyExchange(t *testing.T) {
+	key := uuid.NewString()
+	for _, test := range []struct {
+		name string
+		role domain.TopologyRole
+		key  string
+		want int
+	}{
+		{"standalone", domain.TopologyRoleStandalone, "", http.StatusOK},
+		{"primary", domain.TopologyRolePrimary, key, http.StatusOK},
+		{"stale primary", domain.TopologyRoleStalePrimary, key, http.StatusOK},
+		{"demoted unbound node", domain.TopologyRoleNode, "", http.StatusOK},
+		{"bound node", domain.TopologyRoleNode, key, http.StatusConflict},
+		{"primary with nodes", domain.TopologyRolePrimaryWithNodes, key, http.StatusConflict},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f := newConfirmFixture(t, true)
+			f.localRole, f.localKeyID = test.role, test.key
+			rec := f.confirm()
+			if rec.Code != test.want {
+				t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+			}
+			if test.want != http.StatusOK {
+				if len(f.exchangeReqs) != 0 || f.accepts != 0 || f.convertCalls != 0 {
+					t.Fatalf("ineligible identity reached exchange=%d accepts=%d convert=%d", len(f.exchangeReqs), f.accepts, f.convertCalls)
+				}
+				if !strings.Contains(rec.Body.String(), "enrollment conversion denied") {
+					t.Fatalf("expected generic denial, got %s", rec.Body.String())
+				}
+				assertNoSecretLeak(t, rec, f.token)
+			}
+		})
+	}
+}
+
+func TestConfirmPassesAcceptedClusterKeyToConverter(t *testing.T) {
+	f := newConfirmFixture(t, true)
+	if rec := f.confirm(); rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if len(f.convertKeyIDs) != 1 || f.convertKeyIDs[0] == nil {
+		t.Fatalf("converter key ids=%v", f.convertKeyIDs)
+	}
+	if _, ok := f.keys[f.convertKeyIDs[0].String()]; !ok {
+		t.Fatalf("converter received %s, not the accepted key", f.convertKeyIDs[0])
 	}
 }

@@ -18,6 +18,7 @@ import (
 	"github.com/zerkc/ProxyCore/apps/api/internal/cluster"
 	"github.com/zerkc/ProxyCore/apps/api/internal/domain"
 	"github.com/zerkc/ProxyCore/apps/api/internal/enrollment"
+	"github.com/zerkc/ProxyCore/apps/api/internal/identity"
 	replicationsnapshot "github.com/zerkc/ProxyCore/apps/api/internal/snapshot"
 	syncpublication "github.com/zerkc/ProxyCore/apps/api/internal/sync"
 )
@@ -330,6 +331,13 @@ func (h *enrollmentWorkflowHandler) handleConfirm(w http.ResponseWriter, r *http
 		writeIdentityProofError(w, http.StatusConflict, "identity transition denied")
 		return
 	}
+	// Eligibility is evaluated per request (never at boot) so a demoted
+	// installation can enroll without a restart, and before the exchange so a
+	// refused identity never consumes a token.
+	if !identity.RoleCanEnrollAsNode(local.Role, local.ClusterKeyID != "") {
+		writeIdentityProofError(w, http.StatusConflict, "enrollment conversion denied")
+		return
+	}
 	ingress, err := h.currentIngress(r.Context())
 	if err != nil {
 		writeIdentityProofError(w, http.StatusConflict, "identity transition denied")
@@ -378,6 +386,7 @@ func (h *enrollmentWorkflowHandler) handleConfirm(w http.ResponseWriter, r *http
 	converted, err := h.converter.Convert(r.Context(), enrollment.NodeConversionInput{
 		Envelope: draft.Envelope, LocalNodeID: local.NodeID, LocalIngress: ingress,
 		LocalInstallId: local.InstallationID, ArchiveTTL: h.archiveTTL, ApplyWaitTimeout: h.applyWaitTimeout,
+		ClusterKeyID: &keyID,
 	})
 	if err != nil {
 		writeIdentityProofError(w, http.StatusConflict, genericConversionReason(err))

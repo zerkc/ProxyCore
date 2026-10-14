@@ -342,6 +342,46 @@ func TestSQLitePhase2CreateApplyJobFromSnapshot(t *testing.T) {
 	}
 }
 
+func TestSQLitePhase2CreateApplyJobFromSnapshotRetryReusesLatestImportJob(t *testing.T) {
+	f, store := newSQLitePhase2Fixture(t)
+	ctx := context.Background()
+	body, _ := publicationEnvelopeBody(t, f.primaryID)
+	first, err := store.CreateApplyJobFromSnapshot(ctx, "import", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// An interrupted conversion retries with the same snapshot: it must reuse the
+	// queued job instead of tripping the unique checksum index.
+	retry, err := store.CreateApplyJobFromSnapshot(ctx, "import", body)
+	if err != nil || retry != first {
+		t.Fatalf("retry = %s, %v; want %s", retry, err, first)
+	}
+	if n := phase2Count(t, f, `select count(*) from config_revisions`); n != 1 {
+		t.Fatalf("revisions = %d", n)
+	}
+	if n := phase2Count(t, f, `select count(*) from apply_jobs`); n != 1 {
+		t.Fatalf("jobs = %d", n)
+	}
+	settingsExec(t, f.db, `update apply_jobs set status = 'applied'`)
+	if again, err := store.CreateApplyJobFromSnapshot(ctx, "import", body); err != nil || again != first {
+		t.Fatalf("applied retry = %s, %v", again, err)
+	}
+	// A failed job is never silently reused.
+	settingsExec(t, f.db, `update apply_jobs set status = 'failed'`)
+	if _, err := store.CreateApplyJobFromSnapshot(ctx, "import", body); err == nil {
+		t.Fatal("a failed import job must not be reused")
+	}
+	settingsExec(t, f.db, `update apply_jobs set status = 'applied'`)
+	// Once a newer revision exists the old content is no longer the latest.
+	other, _ := publicationEnvelopeBody(t, uuid.NewString())
+	if _, err := store.CreateApplyJobFromSnapshot(ctx, "import", other); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateApplyJobFromSnapshot(ctx, "import", body); err == nil {
+		t.Fatal("a superseded import revision must not be reused")
+	}
+}
+
 func TestSQLitePhase2CreateApplyJobFromSnapshotErrors(t *testing.T) {
 	f, store := newSQLitePhase2Fixture(t)
 	body, _ := publicationEnvelopeBody(t, f.primaryID)

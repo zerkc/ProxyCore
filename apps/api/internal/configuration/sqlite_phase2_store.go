@@ -431,6 +431,28 @@ func (s *SQLitePhase2Store) CreateApplyJobFromSnapshot(ctx context.Context, sour
 	var jobID uuid.UUID
 	err = s.writer.Write(ctx, func(v sqlitedb.WriteValue) error {
 		conn := v.Conn()
+		// An interrupted enrollment conversion retries with the very same
+		// snapshot. The checksum is unique, so reuse the import job of that
+		// revision while it is still the latest and the job did not fail;
+		// anything else keeps failing closed through the unique index.
+		var existing string
+		err := conn.QueryRowContext(ctx, `select j.id from config_revisions r
+			join apply_jobs j on j.revision_id = r.id and j.source = 'import'
+			where r.checksum = ? and r.source = 'import'
+			  and r.revision_number = (select max(revision_number) from config_revisions)
+			  and j.status in ('queued', 'validating', 'applying', 'applied')
+			order by j.created_at desc limit 1`, metadata.snapshotHash).Scan(&existing)
+		switch {
+		case err == nil:
+			reused, parseErr := uuid.Parse(existing)
+			if parseErr != nil {
+				return parseErr
+			}
+			jobID = reused
+			return nil
+		case !errors.Is(err, sql.ErrNoRows):
+			return err
+		}
 		var revisionNumber int
 		if err := conn.QueryRowContext(ctx, `select coalesce(max(revision_number), 0) + 1 from config_revisions`).Scan(&revisionNumber); err != nil {
 			return err

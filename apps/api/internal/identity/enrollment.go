@@ -91,3 +91,62 @@ func (s *Service) ActivateEnrollment(ctx context.Context, activate func(context.
 	}
 	return id.Role, nil
 }
+
+// ErrEnrollmentIneligible means the identity may not be enrolled as a NODE in
+// its current role/binding.
+var ErrEnrollmentIneligible = errors.New("identity cannot be enrolled as node")
+
+// CommitNodeEnrollment is the commit point of an enrollment conversion: it
+// moves the installation to NODE and records the imported cluster key so the
+// local KEK loader resolves the key the primary delivered. The role is written
+// first; a crash before the key write leaves an unbound NODE, which is
+// eligible for a retry, never a primary pointing at a foreign key. A nil
+// clusterKeyID only moves the role. observedGeneration is the leadership
+// generation of the primary being joined: the NODE adopts it (never lowering
+// its own) so a later promotion always lands above that primary's generation.
+func (s *Service) CommitNodeEnrollment(ctx context.Context, clusterKeyID *uuid.UUID, observedGeneration domain.LeadershipGeneration) (Identity, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.loaded {
+		return Identity{}, ErrIdentityNotLoaded
+	}
+	if clusterKeyID != nil && *clusterKeyID == uuid.Nil {
+		return Identity{}, ErrInvalidEnrollmentActivation
+	}
+	current := s.cached
+	alreadyCommitted := current.Role == domain.TopologyRoleNode && clusterKeyID != nil &&
+		current.ClusterKeyID != nil && *current.ClusterKeyID == *clusterKeyID &&
+		current.LeadershipGeneration >= observedGeneration
+	if alreadyCommitted {
+		return current, nil
+	}
+	if !current.CanEnrollAsNode() {
+		return Identity{}, ErrEnrollmentIneligible
+	}
+	if current.Role != domain.TopologyRoleNode {
+		if !isAllowedTransition(current.Role, domain.TopologyRoleNode) {
+			return Identity{}, ErrInvalidTransition
+		}
+		if err := s.store.UpdateRole(ctx, domain.TopologyRoleNode); err != nil {
+			return Identity{}, err
+		}
+		s.cached.Role = domain.TopologyRoleNode
+	}
+	if observedGeneration > s.cached.LeadershipGeneration {
+		if err := s.store.UpdateLeadershipGeneration(ctx, observedGeneration); err != nil {
+			return Identity{}, err
+		}
+		s.cached.LeadershipGeneration = observedGeneration
+		if observedGeneration > s.cached.LatestKnownGeneration {
+			s.cached.LatestKnownGeneration = observedGeneration
+		}
+	}
+	if clusterKeyID != nil {
+		key := *clusterKeyID
+		if err := s.store.UpdateClusterKeyID(ctx, &key); err != nil {
+			return Identity{}, err
+		}
+		s.cached.ClusterKeyID = &key
+	}
+	return s.cached, nil
+}

@@ -83,6 +83,10 @@ type NodeConversionInput struct {
 	LocalInstallId   domain.InstallationID
 	ArchiveTTL       time.Duration
 	ApplyWaitTimeout time.Duration
+	// ClusterKeyID is the cluster KEK delivered by the accepted grant. It is
+	// recorded on the identity at the commit point so LocalKEKLoader resolves
+	// it after conversion. Nil only moves the role.
+	ClusterKeyID *uuid.UUID
 }
 
 type NodeLineage struct {
@@ -144,6 +148,12 @@ func (c *NodeConverter) Convert(ctx context.Context, in NodeConversionInput) (No
 		return NodeConversionResult{}, err
 	}
 
+	// Defence in depth behind the confirm handler's per-request gate: refuse
+	// an ineligible identity before archiving or applying anything.
+	if !c.identity.Current().CanEnrollAsNode() {
+		return NodeConversionResult{}, &NodeConversionDeniedError{Cause: identity.ErrEnrollmentIneligible}
+	}
+
 	imported, err := c.importer.Import(ctx, in.Envelope, replicationsnapshot.ImporterInput{
 		LocalInstallationID: in.LocalInstallId,
 		LocalNodeID:         in.LocalNodeID,
@@ -171,7 +181,7 @@ func (c *NodeConverter) Convert(ctx context.Context, in NodeConversionInput) (No
 		}
 	}
 
-	postTransition, err := c.identity.TransitionTo(ctx, domain.TopologyRoleNode)
+	postTransition, err := c.identity.CommitNodeEnrollment(ctx, in.ClusterKeyID, in.Envelope.Transient.LeadershipGeneration)
 	if err != nil {
 		c.logger("node conversion identity transition denied archive=%s job=%s", imported.ArchiveID, imported.ApplyJobID)
 		return NodeConversionResult{}, &NodeConversionDeniedError{Cause: err}

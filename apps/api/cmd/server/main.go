@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -140,7 +141,7 @@ func runServerWithNodeConverter(ctx context.Context, cfg config.Config, logger *
 	})
 	nodeConverter = buildNodeConverter(enableNodeConverter, stack.phase2, identitySvc, logger)
 	if nodeConverter != nil {
-		logger.Printf("node converter ready for role=%s", identityResult.Role)
+		logger.Printf("node converter ready (role eligibility is checked per confirm); current role=%s", identityResult.Role)
 	}
 	options = append(options, stack.backupOptions(cfg)...)
 
@@ -508,13 +509,21 @@ func wireEnrollmentGrantExchange(workflow *httpserver.EnrollmentWorkflowHandlerO
 	}
 }
 
+// nodeConverterEnabled reports whether NODE conversion is available. It is ON
+// by default; `--enable-node-converter=false` is the explicit opt-out. The last
+// occurrence wins, and an unparsable value fails closed to disabled.
 func nodeConverterEnabled(args []string) bool {
+	enabled := true
 	for _, arg := range args {
-		if arg == "--enable-node-converter" || arg == "--enable-node-converter=true" {
-			return true
+		switch {
+		case arg == "--enable-node-converter":
+			enabled = true
+		case strings.HasPrefix(arg, "--enable-node-converter="):
+			value, err := strconv.ParseBool(strings.TrimPrefix(arg, "--enable-node-converter="))
+			enabled = err == nil && value
 		}
 	}
-	return false
+	return enabled
 }
 
 func buildNodeConverter(enabled bool, configStore nodeConverterStore, identitySvc *identity.Service, logger *log.Logger) *enrollment.NodeConverter {
@@ -522,7 +531,7 @@ func buildNodeConverter(enabled bool, configStore nodeConverterStore, identitySv
 	if concrete, ok := configStore.(*configuration.SQLitePhase2Store); ok && concrete == nil {
 		configStore = nil
 	}
-	if !enabled || configStore == nil || identitySvc == nil || !nodeConverterRoleEligible(identitySvc) {
+	if !enabled || configStore == nil || identitySvc == nil {
 		return nil
 	}
 	logf := func(format string, args ...any) {}
@@ -538,16 +547,6 @@ func buildNodeConverter(enabled bool, configStore nodeConverterStore, identitySv
 		Logger:        logf,
 		Now:           time.Now,
 	})
-}
-
-func nodeConverterRoleEligible(service *identity.Service) (eligible bool) {
-	defer func() {
-		if recover() != nil {
-			eligible = false
-		}
-	}()
-	current := service.Current()
-	return current.Role == domain.TopologyRoleStandalone || current.Role == domain.TopologyRolePrimary
 }
 
 func localEnrollmentIdentityProvider(service *identity.Service) func(context.Context) (httpserver.EnrollmentLocalIdentity, error) {
