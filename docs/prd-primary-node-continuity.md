@@ -575,3 +575,15 @@ And A reports B as out of sync with the rejection reason
 - Decision: the cluster key is retired on promotion and minted lazily on the next enrollment or publication.
 - Planned switchover (old primary reachable) and failover (old primary offline) are both allowed, with a split-brain warning and an optional expected-generation check.
 - Still open: archive retention for a converted primary and local owner/user handling after demotion.
+
+## Implementation status: node as a near-exact copy (0.6.0)
+
+- `--enable-node-converter` defaults to ON; opt out with `=false`. Roles: `standalone-primary`, `primary`, `primary-with-nodes`, `node`, `stale-primary`.
+- Sync model: a NODE is a near-exact copy of the PRIMARY stored in its own database (zones, records, streams, certificates, settings), so a promotion needs no backup. Secrets and owners are replicated and re-wrapped with the node's own key.
+- The ingress address is excluded from the content hash (hash version 2). A node answers its own ingress IP for proxied domains.
+- The node stores the PRIMARY content hash as received and compares it with the hash the PRIMARY published; a difference marks the node outdated.
+- Sync loop interval: `PROXYCORE_NODE_SYNC_INTERVAL` (default 30s, minimum 5s), bounded backoff on failure; manual **Sync now** via `POST /api/topology/sync/retry`; status via `GET /api/topology/sync`.
+- Promotion returns a `syncWarning` (`NODE_OUTDATED`, `NODE_NEVER_SYNCED`, `NODE_SYNC_UNVERIFIED`); the UI requires explicit acknowledgement and never blocks.
+- PRIMARY URL format for enrollment: `https://<host>:<port>/` (explicit port, trailing slash).
+- A/B procedure: enroll B to A, A fails, promote B and edit, A returns and is converted to NODE of B, wait for In sync, then promote A and convert B to NODE of A.
+- Known limitation: the former primary accepts writes until it observes the new generation; stop it or convert it to NODE before editing on the new PRIMARY.

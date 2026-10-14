@@ -87,6 +87,50 @@ Both actions need an explicit confirmation and are available through
 `POST /api/topology/promote` and `POST /api/topology/demote` (owner only,
 optional `expectedGeneration`).
 
+### Roles and the node converter
+
+- `--enable-node-converter` is **on by default**. Opt out with
+  `--enable-node-converter=false`.
+- Roles: `standalone-primary` (no nodes), `primary` / `primary-with-nodes`,
+  `node`, and `stale-primary` (a former primary that must rejoin as a NODE).
+
+### How a NODE stays in sync
+
+A NODE is a near-exact copy of the PRIMARY, stored in its own database, so a
+promotion needs no backup.
+
+- Configuration, secrets and owners are replicated; the same credentials work
+  after a promotion.
+- The ingress address is excluded from the content hash and stays node-local:
+  for proxied domains each installation answers its own ingress IP.
+- A sync loop pulls the PRIMARY snapshot every `PROXYCORE_NODE_SYNC_INTERVAL`
+  (default `30s`, minimum `5s`) with backoff on failure.
+- A NODE is **outdated** when its applied content hash differs from the hash
+  published by the PRIMARY. The dashboard shows In sync / Outdated, short
+  hashes, the last sync time and the last error. **Sync now** triggers one
+  cycle (`POST /api/topology/sync/retry`; status at `GET /api/topology/sync`).
+- Promoting an outdated or never-synced NODE shows a warning and needs an
+  explicit acknowledgement; it is never blocked.
+
+### PRIMARY URL format
+
+Enter the PRIMARY URL as `https://<host>:<port>/`, with an explicit port and a
+trailing slash (for example `https://primary.example:3443/`). Other forms are
+rejected as an invalid enrollment draft request.
+
+### Failover and failback (A and B)
+
+1. Enroll B as a NODE of A and wait until it shows **In sync**.
+2. A goes down: on B choose **Promote to PRIMARY** (acknowledge the warning if
+   B was outdated). B serves the last synced configuration and can be edited.
+3. A returns: on A choose **Convert to NODE** and enroll it against B (new
+   token from B, URL `https://<B>:<port>/`). Wait until A is **In sync**.
+4. Failback: promote A to PRIMARY, then convert B to NODE and enroll it against A.
+
+Known limitation: a former primary keeps accepting writes until it observes the
+new generation, so stop it or convert it to NODE before editing on the new
+PRIMARY.
+
 ## Stack
 
 Docker Compose on one Linux host:
