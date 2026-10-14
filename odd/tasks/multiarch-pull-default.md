@@ -17,6 +17,7 @@ Support linux/amd64 + linux/arm64 for ALL images. linux/arm/v7 (Pi 2, Pi 3 on 32
 - [x] T3 compose.yaml: image refs resolve to GHCR (overridable by env), pull default, build opt-in
 - [x] T4 install.sh: pull by default, PROXYCORE_INSTALL_MODE=build opt-in, arch detection + clear arm/v7 worker message; update install.test.sh
 - [x] T5 docs/runbooks/bootstrap.md: support matrix + modes
+- [x] T6 updates always pull: remove build mode from updater (Go), updater-bootstrap.sh, compose env wiring, install.sh .env write, docs
 
 ## Route
 Delegated direct: one writer (2+ non-trivial files).
@@ -28,3 +29,4 @@ Delegated direct: one writer (2+ non-trivial files).
 - T4: install.sh pull default, PROXYCORE_INSTALL_MODE=build opt-in, check_arch; bash/sh scripts/install.test.sh rc=0, install_env.test.sh rc=0
 - T5: docs/runbooks/bootstrap.md support matrix + modes + low-memory note
 - Updater: apps/updater defaults to pull (cmd/main.go envOr UpdateModePull), updater-bootstrap.sh defaults pull; compose env default fixed from build to pull; cd apps/updater && go test ./... ok
+- T6: updater Go build mode/fetch-source/SourceDir/PROXYCORE_UPDATE_MODE removed; test proves env build value ignored; bootstrap sh always pulls (sh -n ok); compose env wiring removed; install.sh no longer writes PROXYCORE_UPDATE_MODE; go build/vet/test ok; install.test.sh + install_env.test.sh rc=0; compose config -q rc=0; rg shows only doc note + ignore-test hits; no api/web/packages references
