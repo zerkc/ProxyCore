@@ -21,7 +21,7 @@ Let an owner convert an installation PRIMARY -> NODE and NODE -> PRIMARY from th
 
 ## Tasks
 - [x] T1 Backend: allow primary/primary-with-nodes -> node in both matrices; extend PromoteToPrimary into a transactional workflow (D2, D4); owner-guarded routes `POST /api/topology/promote` and `POST /api/topology/demote` with confirmation + expected generation; audit; Go tests (RED first).
-- [ ] T2 UI: Promote to PRIMARY control (warning dialog) on node surface; Convert to NODE entry on primary surface leading to the enrollment form; UI tests.
+- [x] T2 UI: Promote to PRIMARY control (warning dialog) on node surface; Convert to NODE entry on primary surface leading to the enrollment form; UI tests.
 - [ ] T3 Docs: update PRD status/decisions and README topology section.
 
 ## Acceptance
@@ -35,4 +35,5 @@ Let an owner convert an installation PRIMARY -> NODE and NODE -> PRIMARY from th
 ## Progress
 - Branch: feat/primary-node-role-conversion
 - T1 done: commit ce6c78f (go build/vet/test green; RED observed for cluster and identity SQLite only).
-- Next: T2
+- T2 done (uncommitted): TopologyConversionPanel + promoteTopology/demoteTopology client; 13 new vitest tests; EnrollmentTrustPanel date test fails on base (pre-existing).
+- Next: T3
