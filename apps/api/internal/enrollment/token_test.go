@@ -26,6 +26,9 @@ func (*stubStore) CheckEnrollmentToken(context.Context, string, string, time.Tim
 	return nil
 }
 func (*stubStore) RevokeEnrollmentToken(context.Context, string, string, time.Time) error { return nil }
+func (*stubStore) DeleteEnrollmentToken(context.Context, string, string, time.Time) error {
+	return nil
+}
 
 func owner() auth.User { return auth.User{ID: uuid.NewString(), Role: auth.RoleOwner, Active: true} }
 

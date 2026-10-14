@@ -36,6 +36,10 @@ var (
 	ErrOwnerRequired    = errors.New("active Owner authorization required")
 	ErrInvalidTokenTTL  = errors.New("enrollment token expiry is outside the allowed range")
 	ErrEnrollmentDenied = errors.New("enrollment token denied")
+
+	ErrTokenNotFound = configuration.ErrEnrollmentTokenNotFound
+	ErrTokenActive   = configuration.ErrEnrollmentTokenActive
+	ErrTokenInUse    = configuration.ErrEnrollmentTokenInUse
 )
 
 type CreatedToken struct {
@@ -48,6 +52,9 @@ type Store interface {
 	CreateEnrollmentToken(ctx context.Context, id, selector, hash, hashVersion, ownerID string, createdAt, expiresAt time.Time) (domain.TopologyRole, error)
 	CheckEnrollmentToken(ctx context.Context, selector, hash string, now time.Time, consume bool) error
 	RevokeEnrollmentToken(ctx context.Context, id, ownerID string, now time.Time) error
+	// DeleteEnrollmentToken removes an inactive token without a grant. It
+	// returns ErrTokenNotFound, ErrTokenActive or ErrTokenInUse.
+	DeleteEnrollmentToken(ctx context.Context, id, ownerID string, now time.Time) error
 }
 
 type Options struct {
@@ -136,6 +143,16 @@ func (s *Service) RevokeToken(ctx context.Context, owner auth.User, id string) e
 		return ErrEnrollmentDenied
 	}
 	return s.store.RevokeEnrollmentToken(ctx, id, owner.ID, s.now().UTC())
+}
+
+func (s *Service) DeleteToken(ctx context.Context, owner auth.User, id string) error {
+	if owner.ID == "" || owner.Role != auth.RoleOwner || !owner.Active {
+		return ErrOwnerRequired
+	}
+	if id == "" {
+		return ErrTokenNotFound
+	}
+	return s.store.DeleteEnrollmentToken(ctx, id, owner.ID, s.now().UTC())
 }
 
 func parseToken(value string) (string, []byte, bool) {

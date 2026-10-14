@@ -78,6 +78,9 @@ type EnrollmentTokenAuthority interface {
 	Create(context.Context, auth.User, *EnrollmentTokenRoute) (EnrollmentTokenCreation, error)
 	List(context.Context, string) ([]EnrollmentTokenRecord, error)
 	Revoke(context.Context, auth.User, string) error
+	// Delete removes an inactive token that minted no node. It returns
+	// enrollment.ErrTokenNotFound, ErrTokenActive or ErrTokenInUse.
+	Delete(context.Context, auth.User, string) error
 	Verify(context.Context, string) error
 }
 
@@ -166,6 +169,16 @@ func (a *enrollmentTokenAuthority) Revoke(ctx context.Context, owner auth.User, 
 		return enrollment.ErrEnrollmentDenied
 	}
 	return a.store.RevokeEnrollmentToken(ctx, id, owner.ID, a.now().UTC())
+}
+
+func (a *enrollmentTokenAuthority) Delete(ctx context.Context, owner auth.User, id string) error {
+	if a == nil || a.store == nil || ctx == nil || owner.ID == "" || owner.Role != auth.RoleOwner || !owner.Active {
+		return enrollment.ErrOwnerRequired
+	}
+	if _, err := uuid.Parse(id); err != nil {
+		return enrollment.ErrTokenNotFound
+	}
+	return a.store.DeleteEnrollmentToken(ctx, id, owner.ID, a.now().UTC())
 }
 
 func (a *enrollmentTokenAuthority) Verify(ctx context.Context, plaintext string) error {
@@ -398,6 +411,38 @@ func (s *Server) handleRevokeEnrollmentToken(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleDeleteEnrollmentToken removes an inactive token that minted no node.
+// Active tokens must be revoked first; tokens with a grant stay because the
+// grant still authenticates the node they enrolled.
+func (s *Server) handleDeleteEnrollmentToken(w http.ResponseWriter, r *http.Request) {
+	setNoStore(w)
+	user, ok := s.requireUserReadOnly(w, r, auth.RoleOwner)
+	if !ok {
+		return
+	}
+	id := r.PathValue("id")
+	if _, err := uuid.Parse(id); err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "enrollment token not found"})
+		return
+	}
+	if s.enrollmentTokens == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "enrollment tokens unavailable"})
+		return
+	}
+	switch err := s.enrollmentTokens.Delete(r.Context(), user, id); {
+	case err == nil:
+		w.WriteHeader(http.StatusNoContent)
+	case errors.Is(err, enrollment.ErrTokenNotFound):
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "enrollment token not found"})
+	case errors.Is(err, enrollment.ErrTokenActive):
+		writeJSON(w, http.StatusConflict, map[string]any{"error": "enrollment token is active; revoke it first", "code": "TOKEN_ACTIVE"})
+	case errors.Is(err, enrollment.ErrTokenInUse):
+		writeJSON(w, http.StatusConflict, map[string]any{"error": "enrollment token minted a node; manage it from the Nodes view", "code": "TOKEN_IN_USE"})
+	default:
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "enrollment tokens unavailable"})
+	}
 }
 
 type enrollmentTokenListResponse struct {

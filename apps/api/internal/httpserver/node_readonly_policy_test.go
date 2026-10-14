@@ -38,6 +38,7 @@ func TestNodeIdentityBlocksOrdinaryMutations(t *testing.T) {
 		{"create stream", http.MethodPost, "/api/streams", map[string]any{"name": "s"}},
 		{"issue certificate", http.MethodPost, "/api/certificates", map[string]any{"domains": []string{"example.com"}}},
 		{"delete certificate", http.MethodDelete, "/api/certificates/c1", nil},
+		{"delete enrollment token", http.MethodDelete, "/api/enrollment/tokens/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", nil},
 		{"apply", http.MethodPost, "/api/apply", nil},
 		{"backup import", http.MethodPost, "/api/backup/import?dry_run=true", nil},
 	}

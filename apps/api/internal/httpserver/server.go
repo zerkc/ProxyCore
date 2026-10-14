@@ -198,6 +198,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET "+EnrollmentTokensPath, s.handleListEnrollmentTokens)
 	s.mux.HandleFunc("GET "+EnrollmentTokensPath+"/defaults", s.handleEnrollmentTokenDefaults)
 	s.mux.HandleFunc("POST "+EnrollmentTokensPath+"/{id}/revoke", s.handleRevokeEnrollmentToken)
+	s.mux.HandleFunc("DELETE "+EnrollmentTokensPath+"/{id}", s.handleDeleteEnrollmentToken)
 	s.mux.HandleFunc("GET "+TopologyNodesPath, s.handleListNodes)
 	s.mux.HandleFunc("POST "+TopologyNodesPath+"/{id}/unlink", s.handleUnlinkNode)
 	s.mux.HandleFunc("POST "+TopologyPromotePath, s.handleTopologyPromote)
