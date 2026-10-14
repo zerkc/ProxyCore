@@ -197,6 +197,52 @@ describe("EnrollmentTokenPanel", () => {
     expect(container.textContent).toContain("Token revoked");
   });
 
+  it("shows delete only for revoked or expired unconsumed tokens and confirms before deleting", async () => {
+    const base = { selector: "s", createdAt: "2020-01-01T00:00:00Z" };
+    const list = [
+      { ...base, id: "revoked", expiresAt: "2099-01-01T00:00:00Z", revokedAt: "2020-01-01T01:00:00Z" },
+      { ...base, id: "expired", expiresAt: "2020-01-01T00:15:00Z" },
+      { ...base, id: "active", expiresAt: "2099-01-01T00:00:00Z" },
+      { ...base, id: "consumed", expiresAt: "2020-01-01T00:15:00Z", consumedAt: "2020-01-01T00:05:00Z" },
+    ];
+    const fetchMock = queueFetch(
+      jsonResponse(list),
+      defaultsResponse(),
+      new Response(null, { status: 204 }),
+      jsonResponse(list.filter((token) => token.id !== "revoked")),
+    );
+    const container = await mount(panel());
+    const has = (id: string) => container.findAll((c) => c.getAttribute("data-testid") === `delete-enrollment-token-${id}`).length > 0;
+    expect([has("revoked"), has("expired"), has("active"), has("consumed")]).toEqual([true, true, false, false]);
+    expect(container.textContent).toContain("Manage that node in the Nodes view");
+
+    await click(container, "delete-enrollment-token-revoked");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    await click(container, "confirm-delete-revoked");
+    expect(fetchMock.mock.calls[2]![0]).toBe("/api/enrollment/tokens/revoked");
+    expect(fetchMock.mock.calls[2]![1]).toMatchObject({ method: "DELETE" });
+    expect(container.textContent).toContain("Token deleted");
+    expect(has("revoked")).toBe(false);
+  });
+
+  it.each([
+    [409, { code: "TOKEN_ACTIVE", error: "x" }, "still active"],
+    [409, { code: "TOKEN_IN_USE", error: "x" }, "Nodes view"],
+    [404, { error: "x" }, "no longer exists"],
+    [403, { error: "x" }, "Owner access"],
+    [503, { error: "x" }, "temporarily unavailable"],
+  ])("maps delete failure %s to a clear message", async (status, body, text) => {
+    queueFetch(
+      jsonResponse([{ id: "t", selector: "s", createdAt: "2020-01-01T00:00:00Z", expiresAt: "2099-01-01T00:00:00Z", revokedAt: "2020-01-01T01:00:00Z" }]),
+      defaultsResponse(),
+      jsonResponse(body, status),
+    );
+    const container = await mount(panel());
+    await click(container, "delete-enrollment-token-t");
+    await click(container, "confirm-delete-t");
+    expect(container.textContent).toContain(text);
+  });
+
   it("removes the temporary clipboard fallback node and keeps copy feedback generic", async () => {
     queueFetch(jsonResponse([]), defaultsResponse(), jsonResponse(created, 201));
     const container = await mount(panel());

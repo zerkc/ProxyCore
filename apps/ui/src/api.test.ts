@@ -16,6 +16,7 @@ import {
   previewEnrollment,
   recoverEnrollment,
   revokeEnrollmentToken,
+  deleteEnrollmentToken,
 } from "./api";
 
 const originalFetch = globalThis.fetch;
@@ -231,6 +232,26 @@ describe("enrollment workflow API client", () => {
         () => revokeEnrollmentToken("token-id", "replace-and-revoke"),
         status,
       );
+    }
+  });
+
+  it("deletes a token with DELETE and maps typed conflicts", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    await expect(deleteEnrollmentToken("token/id")).resolves.toBeUndefined();
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/enrollment/tokens/token%2Fid",
+      expect.objectContaining({ method: "DELETE", credentials: "include", redirect: "error" }),
+    );
+    for (const [code, kind] of [["TOKEN_ACTIVE", "token-active"], ["TOKEN_IN_USE", "token-in-use"]] as const) {
+      globalThis.fetch = vi.fn().mockResolvedValue(
+        new Response(JSON.stringify({ error: "x", code }), { status: 409 }),
+      ) as unknown as typeof fetch;
+      await expect(deleteEnrollmentToken("token-id")).rejects.toMatchObject({ status: 409, kind });
+    }
+    for (const [status, kind] of [[404, "not-found"], [403, "forbidden"], [503, "server"]] as const) {
+      globalThis.fetch = vi.fn().mockResolvedValue(errorResponse(status)) as unknown as typeof fetch;
+      await expect(deleteEnrollmentToken("token-id")).rejects.toMatchObject({ status, kind });
     }
   });
 

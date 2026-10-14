@@ -53,7 +53,9 @@ export type EnrollmentApiErrorKind =
   | "trust-unavailable"
   | "primary-url-required"
   | "primary-url-invalid"
-  | "primary-url-not-in-cert";
+  | "primary-url-not-in-cert"
+  | "token-active"
+  | "token-in-use";
 
 export class EnrollmentApiError extends ApiError {
   constructor(
@@ -151,6 +153,7 @@ type EnrollmentOperation =
   | "token-defaults"
   | "list-tokens"
   | "revoke-token"
+  | "delete-token"
   | "draft"
   | "preview"
   | "confirm"
@@ -205,6 +208,19 @@ export function revokeEnrollmentToken(
     "revoke-token",
     path,
     { method: "POST" },
+    signal,
+  );
+}
+
+/** Deletes a revoked or expired token that never minted a node. */
+export function deleteEnrollmentToken(
+  id: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  return enrollmentRequest<void>(
+    "delete-token",
+    `/api/enrollment/tokens/${encodeURIComponent(id)}`,
+    { method: "DELETE" },
     signal,
   );
 }
@@ -422,12 +438,18 @@ const tokenCreateErrors: Record<string, { status: number; kind: EnrollmentApiErr
   PRIMARY_URL_NOT_IN_CERT: { status: 422, kind: "primary-url-not-in-cert", message: "The primary URL host is not covered by the enrollment certificate." },
 };
 
+const tokenDeleteErrors: Record<string, { status: number; kind: EnrollmentApiErrorKind; message: string }> = {
+  TOKEN_ACTIVE: { status: 409, kind: "token-active", message: "The enrollment token is still active; revoke it first." },
+  TOKEN_IN_USE: { status: 409, kind: "token-in-use", message: "The enrollment token minted a node and cannot be deleted." },
+};
+
 function tokenCreateErrorKind(operation: EnrollmentOperation, status: number, text: string) {
-  if (operation !== "create-token") return undefined;
+  if (operation !== "create-token" && operation !== "delete-token") return undefined;
+  const table = operation === "create-token" ? tokenCreateErrors : tokenDeleteErrors;
   try {
     const parsed = JSON.parse(text) as { code?: unknown };
-    if (typeof parsed.code !== "string" || !Object.hasOwn(tokenCreateErrors, parsed.code)) return undefined;
-    const known = tokenCreateErrors[parsed.code]!;
+    if (typeof parsed.code !== "string" || !Object.hasOwn(table, parsed.code)) return undefined;
+    const known = table[parsed.code]!;
     return known.status === status ? known : undefined;
   } catch {
     return undefined;
@@ -485,6 +507,13 @@ function enrollmentStatusError(operation: EnrollmentOperation, status: number) {
       forbidden: "Owner access is required to revoke enrollment tokens.",
       conflict: "The enrollment token could not be revoked.",
       server: "Enrollment token revocation is temporarily unavailable.",
+    },
+    "delete-token": {
+      unauthorized: "Sign in again to delete an enrollment token.",
+      forbidden: "Owner access is required to delete enrollment tokens.",
+      "not-found": "The enrollment token no longer exists.",
+      conflict: "The enrollment token could not be deleted.",
+      server: "Enrollment token deletion is temporarily unavailable.",
     },
     draft: {
       "bad-request": "The enrollment draft request is invalid.",
