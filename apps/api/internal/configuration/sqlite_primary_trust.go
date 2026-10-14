@@ -17,7 +17,9 @@ import (
 
 const (
 	primaryTrustMaxPEMBytes = 64 << 10
-	primaryTrustMaxCerts    = 4
+	// One certificate only: the owner compares a single fingerprint, so nothing
+	// else may ride along unseen.
+	primaryTrustMaxCerts = 1
 )
 
 // ErrPrimaryTrustInvalid is the only validation outcome; it carries no detail

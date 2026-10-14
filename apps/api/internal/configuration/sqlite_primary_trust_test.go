@@ -74,7 +74,7 @@ func TestNormalizePrimaryTrustCARejectsUnsafeInput(t *testing.T) {
 		"expired":          expiredPEM,
 		"private key":      caPEM + keyBlock,
 		"trailing data":    caPEM + "junk",
-		"too many":         strings.Repeat(caPEM, 5),
+		"bundle":           caPEM + caPEM,
 		"oversize":         caPEM + strings.Repeat("A", 70<<10),
 	}
 	for name, input := range cases {
