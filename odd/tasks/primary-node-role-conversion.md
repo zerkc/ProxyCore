@@ -99,3 +99,13 @@ Tasks (sequential, one writer each, one commit each):
 - FAIL D5: `ListReplicableOwners` (`configuration/sqlite_phase2_store.go:305`) selects every user (no `active` filter, any role) and the importer sets `active=1`: a deactivated user on the primary becomes active on nodes.
 - Resolved by T19/T20 (uncommitted): D1, D2, D3, D5. Re-run the Docker E2E to confirm.
 - Minor: after promote, nothing is published until a token mints the new cluster key (producer then publishes after backoff); a freshly enrolled node saw `primary_unavailable` for ~2 min until the primary's next apply re-published (envelope role primary vs primary-with-nodes, hypothesis); manual retry blocks > 60s when the worker is down; an enrollment-TLS-ineligible standalone-primary becomes `primary` only by creating a token.
+
+## T18b evidence (Docker E2E re-run on 6916f4d, images rebuilt, no manual DB patch, nothing committed)
+- PASS D1: node ack accepted with 0 `enrollment_attempts` rows on the primary; node `acknowledged:true`, `lastSyncAt` advancing every ~5s, `consecutiveFailures:0`; primary has `node_snapshot_acks` rows per published hash. Same after failover (A node of B) and failback (B node of A).
+- PASS D2: 3 and later 2 more no-op applies on A leave the published hash and `applied_snapshots` row count unchanged and B performs no new import job; a record change and a secret-only change (basic-auth password) each produce a new hash and B converges.
+- PASS D3: record X->Y->X: B ends on X, `appliedHash == primaryHash`, tables on both nodes show X.
+- PASS D5: deactivated owner and operator exported inactive, inactive on B after sync, still inactive after A re-enrolled as a node of B and B re-enrolled to A.
+- PASS ingress exclusion: equal hashes with A 10.10.0.1 / B 10.20.0.1; proxied records answer each node's own ingress in `corp.test.zone`, non-proxied identical.
+- PASS failover/failback: A stopped, B promoted (gen 2) and edited, A demoted and enrolled to B, B edit synced to A, A promoted (gen 3), B demoted and re-enrolled; data, users, secrets intact, acks working.
+- PASS log scan: no `pcenr1_` tokens, KEKs, passwords or PEM keys in api/worker/control logs.
+- Observations (not regressions): after promote the first draft against the new primary returned 409 `primary snapshot unavailable` until the next apply published a snapshot (known minor from T18); a deactivated user needs an explicit apply to reach nodes; superseded `basic-auth-password` secrets are retained (2 rows on both nodes).
