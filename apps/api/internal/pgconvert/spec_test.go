@@ -85,7 +85,9 @@ func TestSpecMatchesSQLiteSchema(t *testing.T) {
 		}
 		fks.Close()
 	}
-	if sqliteTables != len(specs) {
-		t.Errorf("SQLite has %d tables, spec %d", sqliteTables, len(specs))
+	// Tables that exist only in SQLite have no PostgreSQL origin to convert.
+	sqliteOnlyTables := 1 // primary_trust_anchors
+	if sqliteTables-sqliteOnlyTables != len(specs) {
+		t.Errorf("SQLite has %d tables (%d SQLite-only), spec %d", sqliteTables, sqliteOnlyTables, len(specs))
 	}
 }
