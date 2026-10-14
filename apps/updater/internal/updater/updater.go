@@ -34,22 +34,8 @@ const (
 	sqliteDatabasePath = "/var/lib/proxycore-db/proxycore.db"
 )
 
-const (
-	// UpdateModePull uses registry images already referenced by compose.yaml.
-	UpdateModePull = "pull"
-	// UpdateModeBuild rebuilds local compose services from the checked-out source.
-	UpdateModeBuild = "build"
-)
-
 // Options configures an Updater. Defaults are applied in New.
 type Options struct {
-	// UpdateMode selects whether api/worker images are pulled or built locally.
-	// Pull is the default to preserve registry-backed deployments.
-	UpdateMode string
-	// SourceDir, when non-empty, is the path to the managed Git checkout on the
-	// host. In build mode the updater fetches and checks out the target tag
-	// here before building. Must be writable by the updater container.
-	SourceDir string
 	// ComposeFile is the absolute path to compose.yaml inside the container.
 	ComposeFile string
 	// ProjectName is the docker compose project name (matches
@@ -116,7 +102,7 @@ type StepResult struct {
 	StartedAt  time.Time     `json:"startedAt"`
 }
 
-// Updater orchestrates build/pull → preflight → restart → verify → bootstrap.
+// Updater orchestrates pull → preflight → restart → verify → bootstrap.
 type Updater struct {
 	opts Options
 
@@ -127,7 +113,6 @@ type Updater struct {
 
 // New returns an Updater with defaults applied.
 func New(opts Options) *Updater {
-	opts.UpdateMode = normalizeUpdateMode(opts.UpdateMode)
 	if opts.ComposeFile == "" {
 		opts.ComposeFile = "/app/compose.yaml"
 	}
@@ -182,7 +167,7 @@ func (u *Updater) InFlight() bool {
 // (typically an HTTP handler) should treat Apply as long-running and return
 // quickly to the client with 202; the actual work continues here.
 func (u *Updater) Apply(ctx context.Context, targetVersion string) (*Status, error) {
-	canonicalTag, err := normalizeTag(targetVersion)
+	_, err := normalizeTag(targetVersion)
 	if err != nil {
 		return nil, err
 	}
@@ -210,7 +195,6 @@ func (u *Updater) Apply(ctx context.Context, targetVersion string) (*Status, err
 	}()
 
 	steps := []StepResult{}
-	originalHead := ""
 
 	runStep := func(name string, fn func() (string, error)) {
 		step := StepResult{Name: name, Status: "ok", StartedAt: time.Now().UTC()}
@@ -226,73 +210,15 @@ func (u *Updater) Apply(ctx context.Context, targetVersion string) (*Status, err
 		u.opts.Logger.Printf("updater: %s status=%s duration=%s err=%q",
 			name, step.Status, step.Duration, step.Error)
 		if err != nil {
-			// Capture current state before bailing. If we fetched source earlier
-			// in this run, try to restore the original HEAD.
 			u.mu.Lock()
 			status.Steps = append([]StepResult(nil), steps...)
 			status.Status = "failed"
 			u.mu.Unlock()
-			if originalHead != "" {
-				u.restoreSource(ctx, originalHead)
-				originalHead = ""
-			}
-		} else if name == "bootstrap" {
-			// Bootstrap step succeeded — update is committed. Discard originalHead
-			// so we do not accidentally restore on a later failure.
-			originalHead = ""
 		}
 	}
 
-	// ── fetch-source (build mode only) ──────────────────────────────────────
-	// In build mode we must checkout the requested tag before building so that
-	// Dockerfile.api picks up the right VERSION file instead of whatever
-	// source is currently on disk.
-	if u.opts.UpdateMode == UpdateModeBuild && u.opts.SourceDir != "" {
-		runStep("fetch-source", func() (string, error) {
-			tag := canonicalTag
-			// 1. Record current HEAD so we can restore on failure.
-			head, err := u.opts.Exec(ctx, "git", u.gitArgs(u.opts.SourceDir, "rev-parse", "HEAD")...)
-			if err != nil {
-				return "", fmt.Errorf("rev-parse HEAD: %w", err)
-			}
-			originalHead = strings.TrimSpace(head)
-			// 2. Reject dirty working tree.
-			dirty, err := u.opts.Exec(ctx, "git", u.gitArgs(u.opts.SourceDir, "status", "--porcelain")...)
-			if err != nil {
-				return "", fmt.Errorf("git status: %w", err)
-			}
-			if strings.TrimSpace(dirty) != "" {
-				return "", ErrSourceDirty
-			}
-			// 3. Fetch the tag from origin.
-			_, err = u.opts.Exec(ctx, "git", u.gitArgs(u.opts.SourceDir, "fetch", "origin", "refs/tags/"+tag+":refs/tags/"+tag)...)
-			if err != nil {
-				return "", fmt.Errorf("%w: git fetch origin tag %s", ErrGitFetchFailed, tag)
-			}
-			// 4. Checkout the tag as detached HEAD.
-			_, err = u.opts.Exec(
-				ctx,
-				"git",
-				u.gitArgs(u.opts.SourceDir, "checkout", "--detach", "--force", "refs/tags/"+tag)...,
-			)
-			if err != nil {
-				return "", fmt.Errorf("%w: git checkout %s", ErrGitCheckoutFailed, tag)
-			}
-			return fmt.Sprintf("checked out %s (was %s)", tag, originalHead), nil
-		})
-		if lastStepFailed(steps) {
-			return u.fail(status, steps), ErrStepFailed
-		}
-	}
-
-	updateStep := UpdateModePull
-	if u.opts.UpdateMode == UpdateModeBuild {
-		updateStep = UpdateModeBuild
-	}
-	runStep(updateStep, func() (string, error) {
-		if u.opts.UpdateMode == UpdateModeBuild {
-			return u.buildSequentially(ctx)
-		}
+	// Updates always pull registry images; building from source is install-only.
+	runStep("pull", func() (string, error) {
 		args := append([]string{"compose"}, u.composeArgs()...)
 		args = append(args, "pull")
 		args = append(args, u.opts.Services...)
@@ -367,27 +293,6 @@ func (u *Updater) Apply(ctx context.Context, targetVersion string) (*Status, err
 	return status, nil
 }
 
-// buildSequentially builds the configured services one at a time, in order.
-//
-// A single multi-service `compose build` runs the builds in parallel, which
-// exhausts small (1 GB RAM) nodes. Building serially keeps peak memory at one
-// image build. It stops at the first failure and names the failing service.
-// A service without a build section (it reuses another service's image) is a
-// no-op for compose, so it is safe to include in the list.
-func (u *Updater) buildSequentially(ctx context.Context) (string, error) {
-	var outs []string
-	for _, svc := range u.opts.Services {
-		args := append([]string{"compose"}, u.composeArgs()...)
-		args = append(args, "build", svc)
-		out, err := u.opts.Exec(ctx, "docker", args...)
-		if err != nil {
-			return strings.Join(append(outs, out), "\n"), fmt.Errorf("build %s: %w", svc, err)
-		}
-		outs = append(outs, out)
-	}
-	return strings.Join(outs, "\n"), nil
-}
-
 // preflightLegacyPostgres refuses the update when a legacy PostgreSQL data
 // volume exists and no SQLite database has been created yet.
 //
@@ -420,41 +325,6 @@ func (u *Updater) fail(status *Status, steps []StepResult) *Status {
 	return status
 }
 
-// restoreSource attempts to git checkout the original HEAD. Errors are logged
-// but not returned because restore is best-effort after a failure.
-func (u *Updater) restoreSource(ctx context.Context, originalHead string) {
-	if originalHead == "" {
-		return
-	}
-	if u.opts.SourceDir == "" || u.opts.Exec == nil {
-		u.opts.Logger.Printf("updater: restoreSource skipped (no SourceDir or Exec)")
-		return
-	}
-
-	restoreCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	out, err := u.opts.Exec(
-		restoreCtx,
-		"git",
-		u.gitArgs(u.opts.SourceDir, "checkout", "--detach", "--force", originalHead)...,
-	)
-	if err != nil {
-		u.opts.Logger.Printf("updater: restoreSource failed to checkout %s: %s — %v",
-			originalHead, out, err)
-		return
-	}
-	u.opts.Logger.Printf("updater: restored source to %s", originalHead)
-}
-
-// gitArgs prepends -C <dir> to a git argument list, using argument arrays
-// instead of shell interpolation for safety.
-func (u *Updater) gitArgs(dir string, args ...string) []string {
-	out := make([]string, 0, 2+len(args))
-	out = append(out, "-C", dir)
-	out = append(out, args...)
-	return out
-}
-
 // normalizeTag strips an optional leading 'v' from a stable release version
 // and returns the canonical tag form (e.g. "0.1.5" → "v0.1.5").
 func normalizeTag(version string) (string, error) {
@@ -469,13 +339,6 @@ var validVersionRe = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+$`)
 
 func isValidVersion(version string) bool {
 	return validVersionRe.MatchString(strings.TrimSpace(version))
-}
-
-func normalizeUpdateMode(mode string) string {
-	if strings.EqualFold(strings.TrimSpace(mode), UpdateModeBuild) {
-		return UpdateModeBuild
-	}
-	return UpdateModePull
 }
 
 func lastStepFailed(steps []StepResult) bool {
@@ -565,16 +428,6 @@ var ErrBootstrapRequestFailed = errors.New("updater: bootstrap request write fai
 // ErrInvalidTargetVersion is returned when an update target is not a stable
 // semantic version that can be mapped to a release tag.
 var ErrInvalidTargetVersion = errors.New("updater: invalid target version")
-
-// ErrSourceDirty is returned when the managed Git checkout has uncommitted
-// changes and the updater cannot safely fetch/checkout the target tag.
-var ErrSourceDirty = errors.New("updater: managed source directory has uncommitted changes")
-
-// ErrGitFetchFailed is wrapped with the tag name when git fetch fails.
-var ErrGitFetchFailed = errors.New("updater: git fetch of tag failed")
-
-// ErrGitCheckoutFailed is wrapped with the tag name when git checkout fails.
-var ErrGitCheckoutFailed = errors.New("updater: git checkout of tag failed")
 
 // atomicWriteFile writes data to a new file inside dir with the given prefix
 // and returns the absolute path. The caller is responsible for renaming or
