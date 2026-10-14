@@ -12,7 +12,7 @@ Let a NODE trust a self-signed / private-CA primary by loading the primary's CA 
 
 ## Tasks
 - [x] T1 (S3,S5,S6) Backend: CA PEM validation + per-origin trust store. Migration 007 `primary_trust_anchors` (STRICT), `configuration/sqlite_primary_trust.go`, tests RED->GREEN; schema mirrors (Bun ledger 7, 32 tables, pgconvert SQLite-only table) updated. Full `go test ./...` green. Commit: e28baf8
-- [ ] T2 (S2,S4) Backend: wire trust into draft/confirm/ack/exchange and node syncer clients; replace on re-enrollment; Go tests.
+- [~] T2 (S2,S4) [T2a done: `sync/origin_trust.go` per-origin RoundTripper + ErrSnapshotClientUntrusted, tests green; T2b wiring in progress] Backend: wire trust into draft/confirm/ack/exchange and node syncer clients; replace on re-enrollment; Go tests.
 - [ ] T3 (S6) Backend: distinguish TLS trust failure from generic "primary snapshot unavailable" in draft response.
 - [ ] T4 (S1,S5) UI: CA upload/paste + fingerprint in NodeContinuityView, API client, UI tests.
 - [ ] T5 Docs: README/PRD topology + help text.

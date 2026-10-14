@@ -39,6 +39,9 @@ var (
 	ErrSnapshotClientNotFound     = errors.New("snapshot client snapshot not found")
 	ErrSnapshotClientUnavailable  = errors.New("snapshot client unavailable")
 	ErrSnapshotClientInvalid      = errors.New("snapshot client response invalid")
+	// ErrSnapshotClientUntrusted means the primary's certificate was rejected:
+	// the node has no (or the wrong) CA for that primary.
+	ErrSnapshotClientUntrusted = errors.New("snapshot client primary certificate untrusted")
 )
 
 // SnapshotClient is the NODE-side HTTPS adapter for the canonical PRIMARY
@@ -288,6 +291,9 @@ func (c *SnapshotClient) fetchWithRetries(request *http.Request, allowNotModifie
 		}
 		response, err := c.httpClient.Do(request)
 		if err != nil {
+			if IsUntrustedCertificate(err) {
+				return SnapshotFetchResult{}, ErrSnapshotClientUntrusted
+			}
 			if snapshotTLSFailure(err) {
 				return SnapshotFetchResult{}, ErrSnapshotClientInvalid
 			}
