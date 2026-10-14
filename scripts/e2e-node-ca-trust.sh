@@ -109,7 +109,7 @@ wait_node_synced() { # want zone name
   local zone="$1" i
   for i in $(seq 1 60); do
     req node GET /api/zones >/dev/null
-    if jq -e --arg z "$zone" 'map(select(.name==$z)) | length > 0' "$BODY" >/dev/null 2>&1; then return 0; fi
+    if jq -e --arg z "$zone" '(if type=="array" then . else (.zones // .items // []) end) | map(select(.name==$z)) | length > 0' "$BODY" >/dev/null 2>&1; then return 0; fi
     sleep 1
   done
   return 1
@@ -153,6 +153,10 @@ install primary
 configure_primary "rebuilt.pcca.test"
 TOKEN2="$(new_token)"; wait_trust; FP2="$(primary_ca)"
 [[ "$FP2" != "$FP" ]] && record PASS "new primary has a new CA" "$FP2" || bail "new primary has a new CA" "fingerprint unchanged"
+# A NODE that holds a cluster key is bound to its primary and is never re-pointed
+# silently; the supported path is Promote to PRIMARY, then Convert to NODE.
+expect "node promote" 200 "$(req node POST /api/topology/promote '{"confirm":true}')" "POST /api/topology/promote"
+expect "node convert to NODE" 200 "$(req node POST /api/topology/demote '{"confirm":true}')" "POST /api/topology/demote"
 code="$(draft "$TOKEN2")"
 if [[ "$code" == 409 ]] && jq -e '.error | test("not trusted")' "$BODY" >/dev/null; then record PASS "stored old CA does not trust the new primary" "draft 409"
 else bail "stored old CA does not trust the new primary" "draft -> $code: $(head -c 300 "$BODY")"; fi
