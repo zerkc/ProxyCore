@@ -15,7 +15,7 @@ Let a NODE trust a self-signed / private-CA primary by loading the primary's CA 
 - [x] T2 (S2,S4) Backend wiring: `sync/origin_trust.go` per-origin RoundTripper shared by snapshot (draft, sync, ack) and exchange clients; draft accepts optional `caPem` (validated, request-scoped, fingerprint returned as `primaryCaFingerprint`); confirm uses it for the exchange and persists it (replacing the previous CA for that origin) BEFORE the sync binding, failing closed (503). Commits: 5da2a3c (transport), 9e25c30.
 - [x] T3 (S6) Draft answers 409 "primary certificate not trusted; load the primary CA" for a rejected certificate (generic "primary snapshot unavailable" kept for other failures); invalid CA -> 400 "invalid CA certificate". Commit: 9e25c30.
 - [x] T4 (S1,S5) UI: NodeContinuityView has an optional PRIMARY CA field (paste or load .pem/.crt/.cer, <=64 KiB) sent with the draft; preview shows `primary ca fingerprint`; two fixed draft errors (409 untrusted / 400 invalid CA) get specific messages via a closed allowlist (other bodies still discarded). vitest: only the pre-existing EnrollmentTrustPanel date failure remains (fails on clean main too); tsc clean. Commit: c927485.
-- [ ] T5 Docs: README/PRD topology + help text.
+- [x] T5 Docs: README section "Trusting a self-signed or private-CA PRIMARY" (flow, fingerprint check, per-address scope, re-enrollment replaces the CA, SAN requirement). In-UI help text added in T4. Commit: c88dc23.
 
 ## Log
 - L1 (user): "Hola mira, cuando intento unirme al primario me da este error, {error: "primary snapshot unavailable"} ... paero el primary esta publicado hace rato con cambios, incluso de di a reaplicar"
