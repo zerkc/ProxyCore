@@ -432,20 +432,32 @@ sync_repo() {
   git clone --depth 1 --branch "$PROXYCORE_BRANCH" "$PROXYCORE_REPO" "$PROXYCORE_HOME"
 }
 
+# True when something on the host is already listening on tcp or udp $1.
+port_in_use() {
+  command -v ss >/dev/null 2>&1 || return 1
+  ss -lntu 2>/dev/null | grep -Eq ":${1}([[:space:]]|\$)"
+}
+
+# True when this project's CoreDNS container is already running, so a busy
+# DNS_PORT is our own listener from a previous install (an update).
+coredns_running() {
+  docker compose ps --status running --services 2>/dev/null | grep -qx coredns
+}
+
 check_host_ports() {
-  # Best-effort conflict detection for nginx host networking, CoreDNS, and
-  # the direct TLS enrollment publish. Existing installs receive warnings,
-  # rather than a new hard failure, so update behavior stays compatible.
-  for port in 80 443 "$DNS_PORT" "$ENROLLMENT_PORT"; do
-    if command -v ss >/dev/null 2>&1; then
-      if ss -lntu 2>/dev/null | grep -Eq ":${port}([[:space:]]|$)"; then
-        if [ "$port" = "$DNS_PORT" ]; then
-          warn "port ${port} appears in use; CoreDNS may fail to publish (disable systemd-resolved DNSStubListener or set DNS_PORT)"
-        elif [ "$port" = "$ENROLLMENT_PORT" ]; then
-          warn "port ${port} appears in use; direct TLS enrollment may fail to bind (set ENROLLMENT_PORT)"
-        else
-          warn "port ${port} appears in use; nginx host mode may fail to bind"
-        fi
+  # Best-effort conflict detection. A busy DNS_PORT held by something other
+  # than our own CoreDNS is fatal: the container cannot start and compose
+  # would fail halfway through the deploy. The other ports stay warnings so
+  # update behavior remains compatible.
+  if port_in_use "$DNS_PORT" && ! coredns_running; then
+    die "host port ${DNS_PORT} is already in use, so CoreDNS cannot bind it. On Ubuntu/Debian this is usually systemd-resolved: set DNSStubListener=no in /etc/systemd/resolved.conf and run 'systemctl restart systemd-resolved'. Or pick another port with DNS_PORT=<port> (inspect the owner with: ss -lntup | grep ':${DNS_PORT} ')"
+  fi
+  for port in 80 443 "$ENROLLMENT_PORT"; do
+    if port_in_use "$port"; then
+      if [ "$port" = "$ENROLLMENT_PORT" ]; then
+        warn "port ${port} appears in use; direct TLS enrollment may fail to bind (set ENROLLMENT_PORT)"
+      else
+        warn "port ${port} appears in use; nginx host mode may fail to bind"
       fi
     fi
   done

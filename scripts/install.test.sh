@@ -584,3 +584,25 @@ if grep -Fq -- 'pull_policy: never' "$ROOT/compose.yaml"; then
   printf 'compose.yaml must not forbid pulling\n' >&2
   exit 1
 fi
+
+# A busy DNS_PORT held by a foreign process fails before anything is deployed;
+# our own running CoreDNS (an update) and a free port both pass.
+run_port_check() {
+  port_busy=$1
+  own_coredns=$2
+  (
+    PROXYCORE_INSTALL_NO_MAIN=1 . "$ROOT/scripts/install.sh"
+    DNS_PORT=53
+    ENROLLMENT_PORT=3443
+    port_in_use() { [ "$port_busy" = 1 ] && [ "$1" = 53 ]; }
+    coredns_running() { [ "$own_coredns" = 1 ]; }
+    check_host_ports
+  ) 2>&1
+}
+output=$(run_port_check 1 0) && { printf 'busy DNS port was accepted\n' >&2; exit 1; }
+case "$output" in
+  *'systemd-resolved'*'DNS_PORT='*) ;;
+  *) printf 'busy DNS port refusal is not actionable: %s\n' "$output" >&2; exit 1 ;;
+esac
+output=$(run_port_check 1 1) || { printf 'own CoreDNS on DNS port was refused: %s\n' "$output" >&2; exit 1; }
+output=$(run_port_check 0 0) || { printf 'free DNS port was refused: %s\n' "$output" >&2; exit 1; }
