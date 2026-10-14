@@ -35,6 +35,12 @@ type Identity struct {
 	ClusterKeyID *uuid.UUID
 	// UpdatedAt is the last write timestamp recorded by the store.
 	UpdatedAt time.Time
+	// NodeUnlinked is an in-memory overlay (never persisted here): the
+	// persisted node-sync state says the primary explicitly unlinked this
+	// NODE. It only relaxes the "bound NODE must not re-enroll" refusal.
+	// Service.SetNodeUnlinked is its only writer; it is restored from the
+	// persisted sync state at startup, so a store error leaves it false.
+	NodeUnlinked bool
 }
 
 // IsStalePrimary reports whether the installation is in the stale-primary
@@ -76,7 +82,26 @@ func RoleCanEnrollAsNode(role domain.TopologyRole, hasClusterKey bool) bool {
 	}
 }
 
-// CanEnrollAsNode applies RoleCanEnrollAsNode to the identity.
+// RoleCanReEnrollAsNode is RoleCanEnrollAsNode plus one exception: a NODE the
+// primary explicitly unlinked (unlinked=true) may enroll again even though it
+// still holds its cluster key, because that key is what keeps it serving. A
+// linked NODE (unlinked=false) keeps the original refusal.
+func RoleCanReEnrollAsNode(role domain.TopologyRole, hasClusterKey, unlinked bool) bool {
+	if role == domain.TopologyRoleNode && unlinked {
+		return true
+	}
+	return RoleCanEnrollAsNode(role, hasClusterKey)
+}
+
+// CanEnrollAsNode applies RoleCanReEnrollAsNode to the identity.
 func (i Identity) CanEnrollAsNode() bool {
-	return RoleCanEnrollAsNode(i.Role, i.ClusterKeyID != nil)
+	return RoleCanReEnrollAsNode(i.Role, i.ClusterKeyID != nil, i.NodeUnlinked)
+}
+
+// SetNodeUnlinked records (or clears) the unlinked overlay on the cached
+// identity. It never touches the store and never changes role or key.
+func (s *Service) SetNodeUnlinked(unlinked bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cached.NodeUnlinked = unlinked
 }

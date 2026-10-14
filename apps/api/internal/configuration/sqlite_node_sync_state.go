@@ -42,6 +42,8 @@ type nodeSyncProgressWire struct {
 	NextAttemptAt       string `json:"nextAttemptAt,omitempty"`
 	ConsecutiveFailures int    `json:"consecutiveFailures"`
 	LastError           string `json:"lastError,omitempty"`
+	Unlinked            bool   `json:"unlinked,omitempty"`
+	UnlinkedAt          string `json:"unlinkedAt,omitempty"`
 }
 
 func formatSyncTime(t time.Time) string {
@@ -68,6 +70,7 @@ func (p NodeSyncProgress) wire() nodeSyncProgressWire {
 		PrimaryAppliedAt: formatSyncTime(p.PrimaryAppliedAt), LastAttemptAt: formatSyncTime(p.LastAttemptAt),
 		LastSuccessAt: formatSyncTime(p.LastSuccessAt), NextAttemptAt: formatSyncTime(p.NextAttemptAt),
 		ConsecutiveFailures: p.ConsecutiveFailures, LastError: p.LastError,
+		Unlinked: p.Unlinked, UnlinkedAt: formatSyncTime(p.UnlinkedAt),
 	}
 }
 
@@ -77,11 +80,14 @@ func (w nodeSyncProgressWire) progress() NodeSyncProgress {
 		PrimaryAppliedAt: parseSyncTime(w.PrimaryAppliedAt), LastAttemptAt: parseSyncTime(w.LastAttemptAt),
 		LastSuccessAt: parseSyncTime(w.LastSuccessAt), NextAttemptAt: parseSyncTime(w.NextAttemptAt),
 		ConsecutiveFailures: w.ConsecutiveFailures, LastError: w.LastError,
+		Unlinked: w.Unlinked, UnlinkedAt: parseSyncTime(w.UnlinkedAt),
 	}
 }
 
 func (p NodeSyncProgress) healthStatus() string {
 	switch {
+	case p.Unlinked:
+		return "unlinked"
 	case p.LastError != "":
 		return "error"
 	case p.Outdated():

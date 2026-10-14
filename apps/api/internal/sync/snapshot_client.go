@@ -27,6 +27,12 @@ const (
 	snapshotAcknowledgementHTTPPath = "/api/topology/sync/acknowledge"
 	snapshotAfterQueryKey           = "after"
 
+	// NodeUnlinkedSignalCode is the machine-readable code in the primary's
+	// 410 body when the node was unlinked (httpserver.NodeUnlinkedCode).
+	NodeUnlinkedSignalCode = "NODE_UNLINKED"
+	// maxUnlinkedBodyBytes bounds the 410 body that is inspected.
+	maxUnlinkedBodyBytes = 1 << 10
+
 	// SnapshotContentHashHeader and SnapshotAppliedAtHeader carry the primary's
 	// metadata for the latest snapshot on publication responses (200 and 304).
 	SnapshotContentHashHeader = "X-ProxyCore-Snapshot-Hash"
@@ -36,9 +42,13 @@ const (
 var (
 	ErrSnapshotClientUnauthorized = errors.New("snapshot client unauthorized")
 	ErrSnapshotClientGone         = errors.New("snapshot client credential gone")
-	ErrSnapshotClientNotFound     = errors.New("snapshot client snapshot not found")
-	ErrSnapshotClientUnavailable  = errors.New("snapshot client unavailable")
-	ErrSnapshotClientInvalid      = errors.New("snapshot client response invalid")
+	// ErrSnapshotClientUnlinked means the primary explicitly answered 410 with
+	// the NODE_UNLINKED code: the owner unlinked this node. It is the only
+	// authoritative unlink signal; a bare 410 stays ErrSnapshotClientGone.
+	ErrSnapshotClientUnlinked    = errors.New("snapshot client node unlinked")
+	ErrSnapshotClientNotFound    = errors.New("snapshot client snapshot not found")
+	ErrSnapshotClientUnavailable = errors.New("snapshot client unavailable")
+	ErrSnapshotClientInvalid     = errors.New("snapshot client response invalid")
 	// ErrSnapshotClientUntrusted means the primary's certificate was rejected:
 	// the node has no (or the wrong) CA for that primary.
 	ErrSnapshotClientUntrusted = errors.New("snapshot client primary certificate untrusted")
@@ -224,15 +234,17 @@ func (c *SnapshotClient) AcknowledgeSnapshot(ctx context.Context, primaryURL str
 		return ErrSnapshotClientUnavailable
 	}
 	defer response.Body.Close()
-	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4<<10))
 	if response.ProtoMajor != 2 {
+		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4<<10))
 		return ErrSnapshotClientInvalid
 	}
+	if response.StatusCode == http.StatusGone {
+		return gonePrimaryError(response.Body)
+	}
+	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4<<10))
 	switch {
 	case response.StatusCode == http.StatusNoContent || response.StatusCode == http.StatusOK:
 		return nil
-	case response.StatusCode == http.StatusGone:
-		return ErrSnapshotClientGone
 	case response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden:
 		return ErrSnapshotClientUnauthorized
 	case response.StatusCode >= 500 && response.StatusCode <= 599:
@@ -335,7 +347,7 @@ func (c *SnapshotClient) handleSnapshotResponse(response *http.Response, allowNo
 	case response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden:
 		return SnapshotFetchResult{}, false, ErrSnapshotClientUnauthorized
 	case response.StatusCode == http.StatusGone:
-		return SnapshotFetchResult{}, false, ErrSnapshotClientGone
+		return SnapshotFetchResult{}, false, gonePrimaryError(response.Body)
 	case response.StatusCode == http.StatusNotFound:
 		return SnapshotFetchResult{}, false, ErrSnapshotClientNotFound
 	case response.StatusCode == http.StatusNoContent:
@@ -371,6 +383,27 @@ func (c *SnapshotClient) handleSnapshotResponse(response *http.Response, allowNo
 		result.ContentHash, result.AppliedAt = meta.ContentHash, meta.AppliedAt
 	}
 	return result, false, nil
+}
+
+// gonePrimaryError classifies a 410: ErrSnapshotClientUnlinked only when the
+// bounded body is exactly the primary's JSON error carrying code NODE_UNLINKED;
+// any other body (empty, oversized, malformed, another code) is a plain
+// ErrSnapshotClientGone, so a bare revocation never reads as an unlink.
+func gonePrimaryError(body io.Reader) error {
+	if body == nil {
+		return ErrSnapshotClientGone
+	}
+	raw, err := io.ReadAll(io.LimitReader(body, maxUnlinkedBodyBytes+1))
+	if err != nil || len(raw) == 0 || len(raw) > maxUnlinkedBodyBytes {
+		return ErrSnapshotClientGone
+	}
+	var parsed struct {
+		Code string `json:"code"`
+	}
+	if json.Unmarshal(raw, &parsed) != nil || parsed.Code != NodeUnlinkedSignalCode {
+		return ErrSnapshotClientGone
+	}
+	return ErrSnapshotClientUnlinked
 }
 
 func snapshotResponseMetadata(header http.Header) (SnapshotFetchResult, bool) {

@@ -107,3 +107,55 @@ func TestNodeSyncStoreRebindResetsBackoff(t *testing.T) {
 		t.Fatalf("state=%+v bound=%v err=%v", state, bound, err)
 	}
 }
+
+func TestNodeSyncStorePersistsUnlinkedAndReEnrollmentClearsIt(t *testing.T) {
+	store, _ := nodeSyncFixture(t)
+	ctx := context.Background()
+	binding := NodeSyncBinding{PrimaryURL: "https://primary.example:3443", CredentialID: uuid.NewString()}
+	hash := strings.Repeat("a", 64)
+	now := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	if err := store.BindNodeSync(ctx, binding, hash, now); err != nil {
+		t.Fatal(err)
+	}
+	if state, _, err := store.LoadNodeSyncState(ctx); err != nil || state.Unlinked || !state.UnlinkedAt.IsZero() {
+		t.Fatalf("fresh binding must not be unlinked: %+v err=%v", state.NodeSyncProgress, err)
+	}
+	state, _, _ := store.LoadNodeSyncState(ctx)
+	state.Unlinked, state.UnlinkedAt = true, now.Add(time.Hour)
+	state.LastError = "The primary unlinked this node."
+	if err := store.SaveNodeSyncProgress(ctx, state.NodeSyncProgress); err != nil {
+		t.Fatal(err)
+	}
+	got, bound, err := store.LoadNodeSyncState(ctx)
+	if err != nil || !bound || !got.Unlinked || !got.UnlinkedAt.Equal(now.Add(time.Hour)) || got.AppliedHash != hash {
+		t.Fatalf("unlinked state lost across reload (restart): %+v bound=%v err=%v", got.NodeSyncProgress, bound, err)
+	}
+	// Re-enrollment binds a new credential and must clear the flag.
+	relinked := NodeSyncBinding{PrimaryURL: binding.PrimaryURL, CredentialID: uuid.NewString()}
+	if err := store.BindNodeSync(ctx, relinked, hash, now.Add(2*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if got, _, err := store.LoadNodeSyncState(ctx); err != nil || got.Unlinked || !got.UnlinkedAt.IsZero() || got.CredentialID != relinked.CredentialID {
+		t.Fatalf("re-enroll must clear unlinked: %+v err=%v", got, err)
+	}
+}
+
+func TestNodeSyncStoreReadFailureNeverReportsUnlinked(t *testing.T) {
+	store, exec := nodeSyncFixture(t)
+	ctx := context.Background()
+	if err := store.BindNodeSync(ctx, NodeSyncBinding{PrimaryURL: "https://p.example:3443", CredentialID: uuid.NewString()}, strings.Repeat("a", 64), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	// Corrupt the progress blob: the load must succeed without inventing an
+	// unlinked state (and the syncer would simply keep polling).
+	exec(`update health_observations set details = '{"unlinked":' || '1' || '}' where component = 'node-sync'`)
+	state, bound, err := store.LoadNodeSyncState(ctx)
+	if err != nil || !bound || state.Unlinked {
+		t.Fatalf("malformed progress: unlinked=%v bound=%v err=%v", state.Unlinked, bound, err)
+	}
+	cancelled, cancel := context.WithCancel(ctx)
+	cancel()
+	if state, _, err := store.LoadNodeSyncState(cancelled); err == nil || state.Unlinked {
+		t.Fatalf("cancelled read: err=%v unlinked=%v", err, state.Unlinked)
+	}
+}

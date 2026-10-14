@@ -135,6 +135,13 @@ func (e *NodeConversionDeniedError) Error() string {
 
 func (e *NodeConversionDeniedError) Unwrap() error { return ErrNodeConversionDenied }
 
+// CanEnrollAsNode reports whether the live identity may currently enroll as a
+// NODE (including an unlinked NODE re-enrolling). The confirm handler asks it
+// when its own role/key rule refuses.
+func (c *NodeConverter) CanEnrollAsNode() bool {
+	return c != nil && c.identity != nil && c.identity.Current().CanEnrollAsNode()
+}
+
 // Convert archives and queues the validated envelope, waits for exact
 // terminal apply success, and only then commits the local NODE role.
 func (c *NodeConverter) Convert(ctx context.Context, in NodeConversionInput) (NodeConversionResult, error) {
@@ -186,6 +193,10 @@ func (c *NodeConverter) Convert(ctx context.Context, in NodeConversionInput) (No
 		c.logger("node conversion identity transition denied archive=%s job=%s", imported.ArchiveID, imported.ApplyJobID)
 		return NodeConversionResult{}, &NodeConversionDeniedError{Cause: err}
 	}
+	// The node is linked again: drop the unlinked overlay that allowed this
+	// re-enrollment so a linked node is refused like any other.
+	c.identity.SetNodeUnlinked(false)
+	postTransition.NodeUnlinked = false
 	lineage := NodeLineage{
 		NodeID:     postTransition.NodeID,
 		Generation: uint64(postTransition.LeadershipGeneration),

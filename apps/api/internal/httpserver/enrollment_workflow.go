@@ -362,7 +362,7 @@ func (h *enrollmentWorkflowHandler) handleConfirm(w http.ResponseWriter, r *http
 	// Eligibility is evaluated per request (never at boot) so a demoted
 	// installation can enroll without a restart, and before the exchange so a
 	// refused identity never consumes a token.
-	if !identity.RoleCanEnrollAsNode(local.Role, local.ClusterKeyID != "") {
+	if !identity.RoleCanEnrollAsNode(local.Role, local.ClusterKeyID != "") && !h.converterAllowsReEnroll(local) {
 		writeIdentityProofError(w, http.StatusConflict, "enrollment conversion denied")
 		return
 	}
@@ -458,6 +458,24 @@ func (h *enrollmentWorkflowHandler) handleConfirm(w http.ResponseWriter, r *http
 		response.ClusterKeyID = result2.Identity.ClusterKeyID.String()
 	}
 	writeWorkflowJSON(w, http.StatusOK, response)
+}
+
+// enrollmentEligibility is implemented by the production converter, which sees
+// the live identity including the "explicitly unlinked" overlay the handler's
+// own role/key rule cannot know.
+type enrollmentEligibility interface {
+	CanEnrollAsNode() bool
+}
+
+// converterAllowsReEnroll lets only a NODE through the exception, and only when
+// the converter itself (live identity) says it is eligible, which for a NODE
+// holding its cluster key means the primary explicitly unlinked it.
+func (h *enrollmentWorkflowHandler) converterAllowsReEnroll(local EnrollmentLocalIdentity) bool {
+	if local.Role != domain.TopologyRoleNode {
+		return false
+	}
+	eligible, ok := h.converter.(enrollmentEligibility)
+	return ok && eligible.CanEnrollAsNode()
 }
 
 // confirmBinding derives the grant binding deterministically from the draft so

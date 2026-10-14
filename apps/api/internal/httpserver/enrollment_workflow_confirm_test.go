@@ -50,20 +50,23 @@ type confirmFixture struct {
 	keys            map[string][]byte
 	validateKEKs    int
 	convertCalls    int
-	convertErr      error
-	localInstall    domain.InstallationID
-	localNode       domain.NodeID
-	loadErr         error
-	localRole       domain.TopologyRole
-	localKeyID      string
-	convertKeyIDs   []*uuid.UUID
-	bindings        []configuration.NodeSyncBinding
-	boundHashes     []string
-	bindErr         error
-	exchangeCAs     []string
-	trusts          []trustRecord
-	trustErr        error
-	order           []string
+	// reEnrollEligible is what the converter reports for the live identity
+	// (the "explicitly unlinked" exception); false by default.
+	reEnrollEligible bool
+	convertErr       error
+	localInstall     domain.InstallationID
+	localNode        domain.NodeID
+	loadErr          error
+	localRole        domain.TopologyRole
+	localKeyID       string
+	convertKeyIDs    []*uuid.UUID
+	bindings         []configuration.NodeSyncBinding
+	boundHashes      []string
+	bindErr          error
+	exchangeCAs      []string
+	trusts           []trustRecord
+	trustErr         error
+	order            []string
 }
 
 type trustRecord struct{ origin, caPEM string }
@@ -84,6 +87,8 @@ func (f kekValidatorFunc) ValidatePreview(context.Context, replicationsnapshot.E
 }
 
 type fakeConverter struct{ f *confirmFixture }
+
+func (c fakeConverter) CanEnrollAsNode() bool { return c.f.reEnrollEligible }
 
 func (c fakeConverter) Convert(_ context.Context, in enrollment.NodeConversionInput) (enrollment.NodeConversionResult, error) {
 	c.f.mu.Lock()
@@ -486,5 +491,31 @@ func TestConfirmFailsClosedWhenSyncBindingCannotBeRecorded(t *testing.T) {
 	}
 	if f.convertCalls != 0 {
 		t.Fatalf("convert ran %d times without a sync binding", f.convertCalls)
+	}
+}
+
+func TestConfirmUnlinkedNodeMayReEnrollButTheExceptionIsNodeOnly(t *testing.T) {
+	key := uuid.NewString()
+	for _, test := range []struct {
+		name     string
+		role     domain.TopologyRole
+		eligible bool
+		want     int
+	}{
+		{"unlinked node", domain.TopologyRoleNode, true, http.StatusOK},
+		{"linked node", domain.TopologyRoleNode, false, http.StatusConflict},
+		{"primary with nodes never gets the exception", domain.TopologyRolePrimaryWithNodes, true, http.StatusConflict},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f := newConfirmFixture(t, true)
+			f.localRole, f.localKeyID, f.reEnrollEligible = test.role, key, test.eligible
+			rec := f.confirm()
+			if rec.Code != test.want {
+				t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+			}
+			if test.want != http.StatusOK && (len(f.exchangeReqs) != 0 || f.convertCalls != 0) {
+				t.Fatalf("refused identity reached exchange=%d convert=%d", len(f.exchangeReqs), f.convertCalls)
+			}
+		})
 	}
 }

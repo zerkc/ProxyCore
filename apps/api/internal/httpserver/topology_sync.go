@@ -48,18 +48,22 @@ func WithTopologySync(opts TopologySyncOptions) Option {
 }
 
 type topologySyncStatus struct {
-	OK              bool    `json:"ok"`
-	Role            string  `json:"role"`
-	Bound           bool    `json:"bound"`
-	AppliedHash     *string `json:"appliedHash"`
-	PrimaryHash     *string `json:"primaryHash"`
-	Outdated        bool    `json:"outdated"`
-	LastSyncAt      *string `json:"lastSyncAt"`
-	LastAttemptAt   *string `json:"lastAttemptAt"`
-	LastError       *string `json:"lastError"`
-	NextAttemptAt   *string `json:"nextAttemptAt"`
-	FailureCount    int     `json:"consecutiveFailures"`
-	Acknowledged    bool    `json:"acknowledged"`
+	OK            bool    `json:"ok"`
+	Role          string  `json:"role"`
+	Bound         bool    `json:"bound"`
+	AppliedHash   *string `json:"appliedHash"`
+	PrimaryHash   *string `json:"primaryHash"`
+	Outdated      bool    `json:"outdated"`
+	LastSyncAt    *string `json:"lastSyncAt"`
+	LastAttemptAt *string `json:"lastAttemptAt"`
+	LastError     *string `json:"lastError"`
+	NextAttemptAt *string `json:"nextAttemptAt"`
+	FailureCount  int     `json:"consecutiveFailures"`
+	Acknowledged  bool    `json:"acknowledged"`
+	// Unlinked is true only after the primary explicitly signalled NODE_UNLINKED;
+	// UnlinkedAt is when the node learned it.
+	Unlinked        bool    `json:"unlinked"`
+	UnlinkedAt      *string `json:"unlinkedAt"`
 	PublishedSource string  `json:"hashSource"`
 }
 
@@ -112,6 +116,8 @@ func (s *Server) topologySyncStatus(ctx context.Context) (topologySyncStatus, er
 		status.NextAttemptAt = optionalTime(state.NextAttemptAt)
 		status.FailureCount = state.ConsecutiveFailures
 		status.Acknowledged = state.AckedHash != "" && state.AckedHash == state.AppliedHash
+		status.Unlinked = state.Unlinked
+		status.UnlinkedAt = optionalTime(state.UnlinkedAt)
 	default:
 		// Every non-node role may publish snapshots (standalone-primary,
 		// primary, primary-with-nodes); a role that has none reports "none".
