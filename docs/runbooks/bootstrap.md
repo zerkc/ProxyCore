@@ -53,9 +53,9 @@ but the worker will not start there; it exists only for experiments.
   compiler or build cache is needed on the host, and the install takes minutes
   even on a Raspberry Pi. Pin a release with `PROXYCORE_VERSION=0.5.4`.
 - **build (opt-in)**: `PROXYCORE_INSTALL_MODE=build` builds every image on the
-  host, one at a time, and writes `PROXYCORE_UPDATE_MODE=build` to `.env` so the
-  dashboard updater also builds. Use it for local development or forks that do
-  not publish images (set `PROXYCORE_IMAGE_REPO` accordingly).
+  host, one at a time. It is install-only: dashboard updates always pull
+  images. Use it for local development or forks that do not publish images (set
+  `PROXYCORE_IMAGE_REPO` accordingly).
 
 ### Low-memory hosts (Raspberry Pi 3 B+ / 1 GB)
 
@@ -79,15 +79,11 @@ at one image build, but the first build can still take a long time on a small ho
 
 ### Dashboard self-updates
 
-The dashboard update action defaults to pull mode: it pulls the published images
-referenced by `compose.yaml` (`PROXYCORE_VERSION`, default `latest`) and
-recreates the services; no source is compiled. With `PROXYCORE_UPDATE_MODE=build`
-(set automatically by a build-mode install) the updater instead fetches and
-checks out the requested `v<version>` tag in the managed checkout and rebuilds
-the API and worker images from that source. Keep the checkout clean and allow
-the host to reach GitHub in build mode; an update stops before restarting
-services when tracked files have local changes or the target tag cannot be
-fetched.
+The dashboard update action always pulls the published images referenced by
+`compose.yaml` (`PROXYCORE_VERSION`, default `latest`) and recreates the
+services; no source is compiled and no source checkout is modified. Building
+from source is only available at install time (`PROXYCORE_INSTALL_MODE=build`).
+A leftover `PROXYCORE_UPDATE_MODE` value in `.env` is ignored.
 
 During an update the dashboard locks the page and keeps a full-screen progress
 dialog open through the service restart. Refresh the page only after the dialog
