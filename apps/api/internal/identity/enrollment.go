@@ -5,6 +5,8 @@ import (
 	"errors"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/zerkc/ProxyCore/apps/api/internal/domain"
 )
 
@@ -12,6 +14,42 @@ var (
 	ErrIdentityNotLoaded           = errors.New("installation identity is not loaded")
 	ErrInvalidEnrollmentActivation = errors.New("invalid enrollment activation role")
 )
+
+// SetClusterKeyProvisioner registers the hook that mints (or loads) the
+// cluster KEK a PRIMARY needs before it can publish a snapshot or serve the
+// enrollment snapshot-by-token read. It is invoked, under the identity lock,
+// the first time enrollment is activated on a PRIMARY-capable identity that has
+// no cluster key yet. Call it during startup, before serving traffic.
+func (s *Service) SetClusterKeyProvisioner(provision func(context.Context) (uuid.UUID, error)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.provisionClusterKey = provision
+}
+
+// ensureClusterKeyLocked persists a cluster key id for a PRIMARY-capable
+// identity that has none. Callers must hold s.mu for writing.
+func (s *Service) ensureClusterKeyLocked(ctx context.Context) error {
+	if s.provisionClusterKey == nil || s.cached.ClusterKeyID != nil {
+		return nil
+	}
+	switch s.cached.Role {
+	case domain.TopologyRoleStandalone, domain.TopologyRolePrimary, domain.TopologyRolePrimaryWithNodes:
+	default:
+		return nil
+	}
+	id, err := s.provisionClusterKey(ctx)
+	if err != nil {
+		return err
+	}
+	if id == uuid.Nil {
+		return ErrInvalidEnrollmentActivation
+	}
+	if err := s.store.UpdateClusterKeyID(ctx, &id); err != nil {
+		return err
+	}
+	s.cached.ClusterKeyID = &id
+	return nil
+}
 
 // WithAtomicEnrollment holds the identity lock through the durable enrollment
 // callback and the cache update. An invalid callback result refreshes the
@@ -24,6 +62,9 @@ func (s *Service) WithAtomicEnrollment(ctx context.Context, activate func(contex
 	}
 	if activate == nil {
 		return Identity{}, ErrInvalidEnrollmentActivation
+	}
+	if err := s.ensureClusterKeyLocked(ctx); err != nil {
+		return Identity{}, err
 	}
 	role, err := activate(ctx)
 	if err != nil {

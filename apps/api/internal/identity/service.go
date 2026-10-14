@@ -41,6 +41,10 @@ type Service struct {
 	mu     sync.RWMutex
 	cached Identity
 	loaded bool
+
+	// provisionClusterKey mints (or loads) the cluster KEK id a PRIMARY needs
+	// before it can publish a snapshot. See SetClusterKeyProvisioner.
+	provisionClusterKey func(context.Context) (uuid.UUID, error)
 }
 
 // NewService constructs a Service over the given Store. The identity is not

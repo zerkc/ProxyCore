@@ -25,6 +25,8 @@ Let an owner convert an installation PRIMARY -> NODE and NODE -> PRIMARY from th
 - [x] T3 Docs: update PRD status/decisions and README topology section.
 - [x] T4 Backend: serve enrollment draft/preview/confirm/recover on the main API (:3000) behind owner session auth, reusing the existing workflow handler and its dependency wiring; the UI gets 404 today because these routes only exist on the TLS enrollment listener (:3443). Go tests (RED first).
 
+- [ ] T5 E2E: stand up a PRIMARY and a NODE with Docker (isolated compose projects), run the real enrollment (token on primary -> draft/preview/confirm from the node) and fix the defects found. Known candidate: handleDraft/handleConfirm verify the token against the LOCAL token store (`workflow.VerifyToken = tokenAuthority.Verify`), but the token is minted by the primary -> 403 "Permission denied". Branch: fix/enrollment-routes-main-api (PR #17).
+
 ## Acceptance
 - Promote NODE -> PRIMARY works offline and online, bumps generation, old nodes must re-enroll.
 - Demote PRIMARY -> NODE leads into the enrollment preview/confirm flow.
@@ -39,3 +41,4 @@ Let an owner convert an installation PRIMARY -> NODE and NODE -> PRIMARY from th
 - T2 done (commit 28270ae): TopologyConversionPanel + promoteTopology/demoteTopology client; 13 new vitest tests; EnrollmentTrustPanel date test fails on base (pre-existing).
 - T3 done: README + PRD status updated.
 - Reopened: T4 (user report: POST /api/topology/enrollment/draft -> 404 on :3000; pre-existing wiring gap, confirmed by user choice 1 = mount routes on main API).
+- T5 (partial, uncommitted): real Docker E2E (pcprimary + pcnode). Fixed: (1) token no longer verified against the node local store on the owner-session main API; (2) FetchSnapshot argument order swapped (url/token); (3) dedicated TLS 1.3 listener now advertises ALPN h2 (snapshot client is h2-only); (4) draft/preview/recover validate without local KEK (confirm still fails closed); (5) PRIMARY mints its cluster KEK before first token activation. E2E: draft 200, preview 200, promote 200, demote 200. BLOCKED: confirm returns 409 "primary snapshot denied" because the grant exchange (PrimaryService.IssueGrant HTTP endpoint, SQLite PrimaryGrantStore, node-side BootstrapRecipient/OpenBootstrap, KEK/credential persistence, token consumption) is not wired anywhere; the converter also requires --enable-node-converter. Needs a design/scope decision.

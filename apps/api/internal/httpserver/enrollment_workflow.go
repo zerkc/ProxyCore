@@ -48,20 +48,46 @@ type localKEKSnapshotValidator struct {
 }
 
 func (v localKEKSnapshotValidator) Validate(ctx context.Context, envelope replicationsnapshot.Envelope) replicationsnapshot.ValidationResult {
-	if v.loader == nil {
-		return replicationsnapshot.ValidationResult{Issues: []replicationsnapshot.ValidationIssue{{Code: "NO_KEY", Field: "kek", Message: "local cluster KEK unavailable"}}}
+	result, _ := v.validate(ctx, envelope)
+	return result
+}
+
+// ValidatePreview validates structure, compatibility and owners for a read-only
+// preview. A not-yet-enrolled installation holds no cluster KEK (the primary's
+// KEK only arrives with the enrollment grant), so secrets that cannot be
+// decrypted yet are tolerated here and ONLY here. Validate, used before any
+// conversion, still fails closed on them.
+func (v localKEKSnapshotValidator) ValidatePreview(ctx context.Context, envelope replicationsnapshot.Envelope) replicationsnapshot.ValidationResult {
+	result, hasKEK := v.validate(ctx, envelope)
+	if hasKEK {
+		return result
 	}
-	kek, _, err := v.loader.LoadLocalKEK(ctx)
-	if err != nil || kek == nil {
-		return replicationsnapshot.ValidationResult{Issues: []replicationsnapshot.ValidationIssue{{Code: "NO_KEY", Field: "kek", Message: "local cluster KEK unavailable"}}}
+	filtered := replicationsnapshot.ValidationResult{OK: true}
+	for _, issue := range result.Issues {
+		if issue.Code == "NO_KEY" {
+			continue
+		}
+		filtered.Issues = append(filtered.Issues, issue)
+		filtered.OK = false
 	}
-	defer kek.Destroy()
-	return replicationsnapshot.NewValidator(kek).Validate(ctx, envelope)
+	return filtered
+}
+
+func (v localKEKSnapshotValidator) validate(ctx context.Context, envelope replicationsnapshot.Envelope) (replicationsnapshot.ValidationResult, bool) {
+	var kek *cluster.KEK
+	if v.loader != nil {
+		if loaded, _, err := v.loader.LoadLocalKEK(ctx); err == nil && loaded != nil {
+			kek = loaded
+			defer kek.Destroy()
+		}
+	}
+	return replicationsnapshot.NewValidator(kek).Validate(ctx, envelope), kek != nil
 }
 
 // EnrollmentSnapshotFetcher is the transport boundary for the authenticated
 // PRIMARY exchange. Implementations receive the token only in memory and must
-// never place it in a URL, log line, or response.
+// never place it in a URL, log line, or response. Arguments are
+// (ctx, primaryURL, credential).
 type EnrollmentSnapshotFetcher func(context.Context, string, string) (*replicationsnapshot.Envelope, error)
 
 type EnrollmentSnapshotValidator interface {
@@ -143,9 +169,8 @@ func (h *enrollmentWorkflowHandler) handleDraft(w http.ResponseWriter, r *http.R
 	if !h.requireTLSAuthority(w, r, canonicalURL) {
 		return
 	}
-	selector, secret, valid := parseHTTPEnrollmentToken(request.Token)
-	zeroBytes(secret)
-	if !valid || h.verifyToken == nil || h.verifyToken(r.Context(), request.Token) != nil {
+	selector, valid := h.acceptToken(r.Context(), request.Token)
+	if !valid {
 		writeIdentityProofError(w, http.StatusForbidden, "Permission denied")
 		return
 	}
@@ -153,12 +178,12 @@ func (h *enrollmentWorkflowHandler) handleDraft(w http.ResponseWriter, r *http.R
 		writeIdentityProofError(w, http.StatusServiceUnavailable, "enrollment workflow unavailable")
 		return
 	}
-	envelope, err := h.fetchSnapshot(r.Context(), request.Token, canonicalURL)
+	envelope, err := h.fetchSnapshot(r.Context(), canonicalURL, request.Token)
 	if err != nil || envelope == nil {
 		writeIdentityProofError(w, http.StatusConflict, "primary snapshot unavailable")
 		return
 	}
-	if !h.validateEnvelope(r, envelope) {
+	if !h.validatePreviewEnvelope(r, envelope) {
 		writeIdentityProofError(w, http.StatusConflict, "primary snapshot denied")
 		return
 	}
@@ -202,7 +227,7 @@ func (h *enrollmentWorkflowHandler) handlePreview(w http.ResponseWriter, r *http
 		writeIdentityProofError(w, http.StatusConflict, "requested node values are not authoritative")
 		return
 	}
-	if !h.validateEnvelope(r, draft.Envelope) {
+	if !h.validatePreviewEnvelope(r, draft.Envelope) {
 		writeIdentityProofError(w, http.StatusConflict, "primary snapshot denied")
 		return
 	}
@@ -269,9 +294,8 @@ func (h *enrollmentWorkflowHandler) handleRecover(w http.ResponseWriter, r *http
 	if !ok {
 		return
 	}
-	selector, secret, valid := parseHTTPEnrollmentToken(request.Token)
-	zeroBytes(secret)
-	if !valid || h.verifyToken == nil || h.verifyToken(r.Context(), request.Token) != nil || h.cache == nil {
+	selector, valid := h.acceptToken(r.Context(), request.Token)
+	if !valid || h.cache == nil {
 		writeIdentityProofError(w, http.StatusGone, "enrollment draft expired; re-enter the token")
 		return
 	}
@@ -283,7 +307,7 @@ func (h *enrollmentWorkflowHandler) handleRecover(w http.ResponseWriter, r *http
 	if !h.requireTLSAuthority(w, r, draft.PrimaryURL) {
 		return
 	}
-	if h.validator == nil || h.identity == nil || !h.validateEnvelope(r, draft.Envelope) {
+	if h.validator == nil || h.identity == nil || !h.validatePreviewEnvelope(r, draft.Envelope) {
 		writeIdentityProofError(w, http.StatusConflict, "enrollment preview unavailable")
 		return
 	}
@@ -295,11 +319,30 @@ func (h *enrollmentWorkflowHandler) handleRecover(w http.ResponseWriter, r *http
 	h.writePreview(w, http.StatusOK, draft, overlay)
 }
 
+// previewEnvelopeValidator is implemented by validators that can check a
+// snapshot for a read-only preview before the cluster KEK is available.
+type previewEnvelopeValidator interface {
+	ValidatePreview(context.Context, replicationsnapshot.Envelope) replicationsnapshot.ValidationResult
+}
+
 func (h *enrollmentWorkflowHandler) validateEnvelope(r *http.Request, envelope *replicationsnapshot.Envelope) bool {
+	return h.validate(r, envelope, false)
+}
+
+func (h *enrollmentWorkflowHandler) validatePreviewEnvelope(r *http.Request, envelope *replicationsnapshot.Envelope) bool {
+	return h.validate(r, envelope, true)
+}
+
+func (h *enrollmentWorkflowHandler) validate(r *http.Request, envelope *replicationsnapshot.Envelope, preview bool) bool {
 	if envelope == nil || h.validator == nil {
 		return false
 	}
-	result := h.validator.Validate(r.Context(), *envelope)
+	var result replicationsnapshot.ValidationResult
+	if previewer, ok := h.validator.(previewEnvelopeValidator); ok && preview {
+		result = previewer.ValidatePreview(r.Context(), *envelope)
+	} else {
+		result = h.validator.Validate(r.Context(), *envelope)
+	}
 	return result.OK && len(result.Issues) == 0
 }
 
@@ -359,6 +402,26 @@ func newEnvelopePreview(envelope *replicationsnapshot.Envelope, overlay enrollme
 		preview.ClusterKeyID = envelope.NodeLocal.ClusterKeyRef.String()
 	}
 	return preview
+}
+
+// acceptToken validates the token shape and returns its selector. The token is
+// minted and owned by the primary, so on the owner-session main API (trusted
+// transport) the node never consults its own token store: it forwards the token
+// and the primary verifies and consumes it. The dedicated unauthenticated
+// listener keeps requiring a locally verifiable token as its only gate.
+func (h *enrollmentWorkflowHandler) acceptToken(ctx context.Context, token string) (string, bool) {
+	selector, secret, valid := parseHTTPEnrollmentToken(token)
+	zeroBytes(secret)
+	if !valid {
+		return "", false
+	}
+	if h.trustedTransport {
+		return selector, true
+	}
+	if h.verifyToken == nil || h.verifyToken(ctx, token) != nil {
+		return "", false
+	}
+	return selector, true
 }
 
 func (h *enrollmentWorkflowHandler) requireTLSAuthority(w http.ResponseWriter, r *http.Request, primaryURL string) bool {

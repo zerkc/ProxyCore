@@ -61,7 +61,10 @@ func NewEnrollmentTLSServer(listener net.Listener, handler http.Handler, provide
 		},
 		listener: listener,
 		config: &tls.Config{
-			MinVersion:     tls.VersionTLS13,
+			MinVersion: tls.VersionTLS13,
+			// The node snapshot client negotiates h2 only; Serve over a
+			// pre-wrapped listener does not advertise ALPN on its own.
+			NextProtos:     []string{"h2", "http/1.1"},
 			GetCertificate: provider.GetCertificate,
 			ClientAuth:     tls.NoClientCert,
 		},
