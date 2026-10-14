@@ -27,6 +27,18 @@ Let an owner convert an installation PRIMARY -> NODE and NODE -> PRIMARY from th
 
 - [ ] T5 E2E: stand up a PRIMARY and a NODE with Docker (isolated compose projects), run the real enrollment (token on primary -> draft/preview/confirm from the node) and fix the defects found. Known candidate: handleDraft/handleConfirm verify the token against the LOCAL token store (`workflow.VerifyToken = tokenAuthority.Verify`), but the token is minted by the primary -> 403 "Permission denied". Branch: fix/enrollment-routes-main-api (PR #17).
 
+### Grant exchange (needed so enrollment can complete; ships in 0.5.8, same PR #17)
+Decisions (defaults adopted from the explorer, owner may override):
+- D5: eligible roles to enroll: `standalone-primary`, `primary`, and a demoted node/`stale-primary` only after explicit owner confirmation (verify role semantics first).
+- D6: `--enable-node-converter` defaults ON with an explicit opt-out.
+- D7: the draft cache keeps the raw token in memory only, bounded by the draft expiry; never written to disk or logs.
+
+- [x] T6 SQLite `configuration.PrimaryGrantStore` (token consume + grant atomic; BEGIN IMMEDIATE; concurrent issue -> one grant; exact retry same payload; other binding denied). SECURITY. Done: `SQLitePhase2Store.WithPrimaryGrant` in `sqlite_primary_grant.go`; no new migration; tests in `sqlite_primary_grant_test.go` (commit pending).
+- [ ] T7 `NodeCredentialIssuer` + `POST /api/topology/enroll` (`Authorization: Enrollment <token>`, 201 sealed payload, uniform 401 ENROLLMENT_DENIED, no-store, size/time/rate limits, wired in main.go). SECURITY.
+- [ ] T8 Node-side exchange client (same pinned TLS h2 transport) + atomic KEK/credential persistence, zeroing of secrets. SECURITY.
+- [ ] T9 `handleConfirm` orchestration: ephemeral key -> exchange -> OpenBootstrap -> persist -> strict validate -> Convert; failure leaves a recoverable standalone node.
+- [ ] T10 Converter flag default + role eligibility (D5, D6), tests, then real Docker E2E (draft->preview->confirm->node applies, demote->re-enroll, promote).
+
 ## Acceptance
 - Promote NODE -> PRIMARY works offline and online, bumps generation, old nodes must re-enroll.
 - Demote PRIMARY -> NODE leads into the enrollment preview/confirm flow.
