@@ -52,3 +52,31 @@ func (i Identity) IsWritable() bool {
 		i.Role == domain.TopologyRolePrimary ||
 		i.Role == domain.TopologyRolePrimaryWithNodes
 }
+
+// RoleCanEnrollAsNode reports whether an installation with the given role may
+// be enrolled against a primary (converted to NODE) right now. hasClusterKey
+// says whether the installation currently points at a cluster KEK.
+//
+//   - standalone-primary, primary and stale-primary may enroll; their own
+//     cluster key (if any) is replaced by the one the grant delivers;
+//   - a NODE may enroll only while it is unbound. Demotion clears
+//     cluster_key_id, so a demoted installation is exactly "node without a
+//     cluster key"; a NODE that already holds a cluster key is bound to a
+//     primary and must not be silently re-pointed;
+//   - primary-with-nodes must be demoted first so its nodes lose their
+//     credentials through the audited workflow.
+func RoleCanEnrollAsNode(role domain.TopologyRole, hasClusterKey bool) bool {
+	switch role {
+	case domain.TopologyRoleStandalone, domain.TopologyRolePrimary, domain.TopologyRoleStalePrimary:
+		return true
+	case domain.TopologyRoleNode:
+		return !hasClusterKey
+	default:
+		return false
+	}
+}
+
+// CanEnrollAsNode applies RoleCanEnrollAsNode to the identity.
+func (i Identity) CanEnrollAsNode() bool {
+	return RoleCanEnrollAsNode(i.Role, i.ClusterKeyID != nil)
+}

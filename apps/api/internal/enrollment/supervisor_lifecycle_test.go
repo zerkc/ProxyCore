@@ -219,3 +219,99 @@ func TestEnrollmentTLSSupervisorSerializesConcurrentReconciles(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// F1: a standalone primary must start serving once its identity becomes
+// eligible at runtime, with no restart, and stop again when it stops being.
+func TestEnrollmentTLSSupervisorFollowsIdentityEligibilityWithoutRestart(t *testing.T) {
+	fixture := newProviderFixture(t)
+	id := &supervisorIdentity{value: supervisorIdentityValue(domain.TopologyRoleStandalone), loaded: true}
+	materials := make([]configuration.EnrollmentTLSMaterial, 0, 64)
+	for i := 0; i < 64; i++ {
+		materials = append(materials, supervisorMaterial(fixture.first, fixture.ca.CertificatePEM))
+	}
+	cfg := &supervisorConfiguration{
+		hostnames: configuration.EnrollmentHostnameConfig{Configured: true, Hostnames: []string{"primary.example"}},
+		materials: materials,
+	}
+	factory := &supervisorFactory{created: make(chan *supervisorListener, 16)}
+	clock := newSupervisorFakeClock()
+	opts := supervisorOptions(id, cfg, factory, new(supervisorPublisher))
+	opts.Clock = clock
+	supervisor, err := enrollment.NewEnrollmentTLSSupervisor(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	setRole := func(role domain.TopologyRole) {
+		id.mu.Lock()
+		id.value.Role = role
+		id.mu.Unlock()
+		supervisor.Trigger()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	runDone := make(chan error, 1)
+	go func() { runDone <- supervisor.Run(ctx) }()
+	go func() { // the fake clock blocks once its request buffer is full
+		for {
+			select {
+			case <-clock.requests:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	// The wake-ups of the supervisor are not 1:1 with test steps (a listener
+	// that stops wakes it too), so observe the state instead of the clock.
+	eventually := func(what string, ok func(enrollment.EnrollmentTLSSupervisorStatus) bool) {
+		t.Helper()
+		deadline := time.Now().Add(time.Second)
+		for !ok(supervisor.Status()) {
+			if time.Now().After(deadline) {
+				t.Fatalf("%s: status=%#v", what, supervisor.Status())
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+
+	// Ineligible: nothing listens, and a wake-up does not change that.
+	supervisor.Trigger()
+	eventually("ineligible", func(s enrollment.EnrollmentTLSSupervisorStatus) bool {
+		return s.State == enrollment.EnrollmentTLSStateIneligible
+	})
+	if factory.calls() != 0 || supervisor.Status().Running {
+		t.Fatalf("ineligible identity started a listener: calls=%d status=%#v", factory.calls(), supervisor.Status())
+	}
+
+	var previous *supervisorListener
+	for cycle := 0; cycle < 5; cycle++ {
+		setRole(domain.TopologyRolePrimary)
+		listener := awaitSupervisor(t, factory.created)
+		awaitSupervisor(t, listener.started)
+		eventually("running after eligibility", func(s enrollment.EnrollmentTLSSupervisorStatus) bool {
+			return s.Running && s.State == enrollment.EnrollmentTLSStateRunning
+		})
+		setRole(domain.TopologyRoleNode)
+		awaitSupervisor(t, listener.done)
+		eventually("ineligible after demotion", func(s enrollment.EnrollmentTLSSupervisorStatus) bool {
+			return !s.Running && s.State == enrollment.EnrollmentTLSStateIneligible
+		})
+		if listener.stopCount() != 1 {
+			t.Fatalf("cycle %d: stop count=%d", cycle, listener.stopCount())
+		}
+		if previous != nil && previous.stopCount() != 1 {
+			t.Fatalf("cycle %d: previous listener stopped %d times", cycle, previous.stopCount())
+		}
+		previous = listener
+	}
+	if factory.calls() != 5 {
+		t.Fatalf("listeners created = %d, want 5 (one per eligibility window, no leaks)", factory.calls())
+	}
+	cancel()
+	if err := awaitSupervisor(t, runDone); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	for i, listener := range factory.listeners {
+		if listener.stopCount() != 1 {
+			t.Fatalf("listener %d stop count = %d, want 1", i, listener.stopCount())
+		}
+	}
+}

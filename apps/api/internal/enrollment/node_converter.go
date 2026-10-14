@@ -83,6 +83,10 @@ type NodeConversionInput struct {
 	LocalInstallId   domain.InstallationID
 	ArchiveTTL       time.Duration
 	ApplyWaitTimeout time.Duration
+	// ClusterKeyID is the cluster KEK delivered by the accepted grant. It is
+	// recorded on the identity at the commit point so LocalKEKLoader resolves
+	// it after conversion. Nil only moves the role.
+	ClusterKeyID *uuid.UUID
 }
 
 type NodeLineage struct {
@@ -144,6 +148,12 @@ func (c *NodeConverter) Convert(ctx context.Context, in NodeConversionInput) (No
 		return NodeConversionResult{}, err
 	}
 
+	// Defence in depth behind the confirm handler's per-request gate: refuse
+	// an ineligible identity before archiving or applying anything.
+	if !c.identity.Current().CanEnrollAsNode() {
+		return NodeConversionResult{}, &NodeConversionDeniedError{Cause: identity.ErrEnrollmentIneligible}
+	}
+
 	imported, err := c.importer.Import(ctx, in.Envelope, replicationsnapshot.ImporterInput{
 		LocalInstallationID: in.LocalInstallId,
 		LocalNodeID:         in.LocalNodeID,
@@ -171,7 +181,7 @@ func (c *NodeConverter) Convert(ctx context.Context, in NodeConversionInput) (No
 		}
 	}
 
-	postTransition, err := c.identity.TransitionTo(ctx, domain.TopologyRoleNode)
+	postTransition, err := c.identity.CommitNodeEnrollment(ctx, in.ClusterKeyID, in.Envelope.Transient.LeadershipGeneration)
 	if err != nil {
 		c.logger("node conversion identity transition denied archive=%s job=%s", imported.ArchiveID, imported.ApplyJobID)
 		return NodeConversionResult{}, &NodeConversionDeniedError{Cause: err}
@@ -192,4 +202,76 @@ func (c *NodeConverter) Convert(ctx context.Context, in NodeConversionInput) (No
 		Identity:    postTransition,
 		NodeLineage: lineage,
 	}, nil
+}
+
+// NodeResyncInput is one continuous-sync import for an installation that is
+// already a NODE of the primary that produced the envelope.
+type NodeResyncInput struct {
+	Envelope         *replicationsnapshot.Envelope
+	LocalNodeID      domain.NodeID
+	LocalIngress     domain.Ingress
+	LocalInstallId   domain.InstallationID
+	ArchiveTTL       time.Duration
+	ApplyWaitTimeout time.Duration
+}
+
+// NodeResyncResult identifies the archive and apply job of one resync.
+type NodeResyncResult struct {
+	ArchiveID  uuid.UUID
+	ApplyJobID uuid.UUID
+}
+
+// nodeSyncArchiveReason labels archives written by continuous sync.
+const nodeSyncArchiveReason = "node-sync"
+
+// nodeSyncArchiveTTL keeps routine sync archives short-lived; the enrollment
+// archive (the pre-enrollment standalone configuration) keeps its own TTL.
+const nodeSyncArchiveTTL = 7 * 24 * time.Hour
+
+// Resync runs the same archive/import/materialize/apply path as Convert for an
+// installation that is already a NODE, and returns only when the apply reached
+// a terminal success. It never touches the identity: role, generation and
+// cluster key were fixed at enrollment, and a primary that changed generation
+// needs a fresh enrollment, not a silent re-anchor.
+func (c *NodeConverter) Resync(ctx context.Context, in NodeResyncInput) (NodeResyncResult, error) {
+	if c == nil || c.importer == nil || c.identity == nil || c.applyWaiter == nil || in.Envelope == nil {
+		return NodeResyncResult{}, errNodeConversionUnavailable
+	}
+	if ctx == nil {
+		return NodeResyncResult{}, context.Canceled
+	}
+	if err := ctx.Err(); err != nil {
+		return NodeResyncResult{}, err
+	}
+	current := c.identity.Current()
+	if current.Role != domain.TopologyRoleNode || current.ClusterKeyID == nil {
+		return NodeResyncResult{}, &NodeConversionDeniedError{Cause: identity.ErrEnrollmentIneligible}
+	}
+	if in.ArchiveTTL <= 0 {
+		in.ArchiveTTL = nodeSyncArchiveTTL
+	}
+	imported, err := c.importer.Import(ctx, in.Envelope, replicationsnapshot.ImporterInput{
+		LocalInstallationID: in.LocalInstallId,
+		LocalNodeID:         in.LocalNodeID,
+		LocalIngress:        in.LocalIngress,
+		ArchiveTTL:          in.ArchiveTTL,
+		ArchiveReason:       nodeSyncArchiveReason,
+	})
+	if err != nil {
+		return NodeResyncResult{}, fmt.Errorf("node resync import: %w", err)
+	}
+	terminal, err := configuration.WaitForTerminalApply(ctx, c.applyWaiter, imported.ApplyJobID, configuration.ApplyWaitOptions{
+		Timeout: in.ApplyWaitTimeout,
+		Clock:   c.now,
+	})
+	if err != nil {
+		return NodeResyncResult{}, err
+	}
+	if terminal.Status != configuration.ApplyTerminalStatusApplied {
+		c.logger("node resync apply terminal status=%s job=%s", terminal.Status, imported.ApplyJobID)
+		return NodeResyncResult{}, &NodeConversionAbortedError{
+			Status: terminal.Status, ArchiveID: imported.ArchiveID, ApplyJobID: imported.ApplyJobID,
+		}
+	}
+	return NodeResyncResult{ArchiveID: imported.ArchiveID, ApplyJobID: imported.ApplyJobID}, nil
 }

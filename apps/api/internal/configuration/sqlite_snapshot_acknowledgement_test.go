@@ -70,7 +70,6 @@ func newAckWriteFixture(t *testing.T) *ackWriteFixture {
 	settingsExec(t, db, `insert into installation_identity(id,installation_id,node_id,role,leadership_generation,latest_known_generation,cluster_key_id,updated_at) values (?,?,?,'primary',11,11,?,'0')`, installationIDSingleton, ackReadRevision, candidateID(20), id.String())
 	settingsExec(t, db, `insert into users(id,username,password_hash,role,created_at,updated_at) values (?,'ack@example.test','synthetic','owner','0','0')`, candidateID(11))
 	settingsExec(t, db, `insert into enrollment_tokens(id,token_selector,token_hash,hash_version,created_by_user_id,created_at,expires_at,consumed_at) values (?,'synthetic','synthetic','synthetic',?,'0','2','0')`, candidateID(12), candidateID(11))
-	settingsExec(t, db, `insert into enrollment_attempts(id,state,primary_url,local_node_ip,ephemeral_private_key_wrapped,cluster_key_id,created_at,updated_at) values (?,'committed','https://primary.example','192.0.2.1','synthetic',?,'0','0')`, ackReadNode, id.String())
 	settingsExec(t, db, `insert into enrollment_grants(attempt_id,token_id,installation_id,node_id,primary_id,primary_generation,node_ephemeral_public_key,sealed_bootstrap_payload,payload_hash,created_at,expires_at) values (?,?,?,?,?,11,'synthetic','synthetic','synthetic','0','2')`, ackReadNode, candidateID(12), ackReadNode, ackReadNode, ackReadRevision)
 	ack := SnapshotAcknowledgement{NodeID: ackReadNode, ContentHash: ackReadHash, SnapshotVersion: 7, ReplicationVersion: 9, RevisionID: ackReadRevision, LeadershipGeneration: 11, AppliedAt: time.Unix(100, 123456789), ReceivedAt: time.Unix(101, 987654321)}
 	stamp, err := sqliteEnrollmentTokenTime(ack.AppliedAt)
@@ -199,7 +198,7 @@ func TestSQLiteSnapshotAcknowledgementWriteCredentialJoin(t *testing.T) {
 		{"grant attempt mismatch", `update enrollment_grants set attempt_id='00000000-0000-0000-0000-000000000099'`, ErrSnapshotAcknowledgementDenied},
 		{"grant installation mismatch", `update enrollment_grants set installation_id='00000000-0000-0000-0000-000000000099'`, ErrSnapshotAcknowledgementDenied},
 		{"grant primary mismatch", `update enrollment_grants set primary_id='00000000-0000-0000-0000-000000000099'`, ErrSnapshotAcknowledgementDenied},
-		{"attempt missing", `update enrollment_attempts set id='00000000-0000-0000-0000-000000000099'`, ErrSnapshotAcknowledgementDenied},
+		{"attempt row absent is accepted (grant exchange never writes it)", `delete from enrollment_attempts`, nil},
 		{"token revoked", `update enrollment_tokens set revoked_at='2'`, ErrSnapshotAcknowledgementRevoked},
 		{"node revoked", `update enrolled_nodes set revoked_at='0'`, ErrSnapshotAcknowledgementRevoked},
 		{"consumed accepted", `update enrollment_tokens set consumed_at='2'`, nil},
@@ -241,9 +240,9 @@ func TestSQLiteSnapshotAcknowledgementWriteIdentityAndActiveKey(t *testing.T) {
 		{"primary mismatch", `update installation_identity set installation_id='00000000-0000-0000-0000-000000000099'`, ErrSnapshotAcknowledgementDenied},
 		{"generation mismatch", `update enrollment_grants set primary_generation=12`, ErrSnapshotAcknowledgementDenied},
 		{"key null", `update installation_identity set cluster_key_id=null`, ErrSnapshotAcknowledgementDenied},
-		{"lineage null", `update enrollment_attempts set cluster_key_id=null`, ErrSnapshotAcknowledgementDenied},
+		{"key rotated after the credential", `insert into cluster_keys(id,purpose,wrapped_kek,wrapping_key_version,created_at) values ('00000000-0000-0000-0000-000000000098','synthetic','synthetic',1,'2'); update cluster_keys set retired_at='2' where id<>'00000000-0000-0000-0000-000000000098'; update installation_identity set cluster_key_id='00000000-0000-0000-0000-000000000098'`, ErrSnapshotAcknowledgementDenied},
 		{"lineage mismatch", `update installation_identity set cluster_key_id='00000000-0000-0000-0000-000000000099'`, ErrSnapshotAcknowledgementDenied},
-		{"missing active row", `update installation_identity set cluster_key_id='00000000-0000-0000-0000-000000000099'; update enrollment_attempts set cluster_key_id=null`, ErrSnapshotAcknowledgementDenied},
+		{"missing active row", `update installation_identity set cluster_key_id='00000000-0000-0000-0000-000000000099'`, ErrSnapshotAcknowledgementDenied},
 		{"retired key", `update cluster_keys set retired_at='0'`, ErrSnapshotAcknowledgementDenied},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -263,7 +262,7 @@ func TestSQLiteSnapshotAcknowledgementWriteIdentityAndActiveKey(t *testing.T) {
 	t.Run("missing row never creates", func(t *testing.T) {
 		f := newAckWriteFixture(t)
 		// Identity has no FK; remove the attempt FK before removing its synthetic key.
-		settingsExec(t, f.db, `update enrollment_attempts set cluster_key_id=null; update cluster_keys set id='00000000-0000-0000-0000-000000000099'`)
+		settingsExec(t, f.db, `update cluster_keys set id='00000000-0000-0000-0000-000000000099'`)
 		// A narrow malformed-data fixture is not needed: add an FK-valid different
 		// lineage row and use a trigger to hide active existence only in fault tests.
 		ackWriteWant(t, f, f.ack, ErrSnapshotAcknowledgementDenied)
@@ -883,7 +882,6 @@ func TestSQLiteSnapshotAcknowledgementWriteRealKeyStore(t *testing.T) {
 		t.Fatal(err)
 	}
 	settingsExec(t, f.db, `update installation_identity set cluster_key_id=?`, id.String())
-	settingsExec(t, f.db, `update enrollment_attempts set cluster_key_id=?`, id.String())
 	f.store.keys = keys
 	ackWriteWant(t, f, f.ack, nil)
 	ackWriteReadback(t, f, f.ack)

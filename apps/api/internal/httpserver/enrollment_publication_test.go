@@ -257,3 +257,99 @@ func (f *publicationFixture) request(handler http.Handler, bearer string) *httpt
 func publicationCertificate(context.Context) (*x509.Certificate, error) {
 	return &x509.Certificate{DNSNames: []string{"primary.example"}}, nil
 }
+
+// conditionalStore wraps a fixture store with the SQLite store's AfterContentHash
+// short-circuit so the HTTP handler's conditional contract can be exercised.
+func conditionalPublicationStore(inner configuration.SnapshotPublicationStore) configuration.SnapshotPublicationStore {
+	return publicationStoreFunc(func(ctx context.Context, request configuration.SnapshotPublicationRequest) (configuration.SnapshotPublicationResult, error) {
+		result, err := inner.ReadSnapshotPublication(ctx, request)
+		if err == nil && request.AfterContentHash != "" && request.AfterContentHash == result.Snapshot.ContentHash {
+			result.Current = true
+			result.Snapshot.Bytes = nil
+		}
+		return result, err
+	})
+}
+
+func (f *publicationFixture) requestWithQuery(handler http.Handler, bearer, rawQuery string) *httptest.ResponseRecorder {
+	request := httptest.NewRequest(http.MethodGet, httpserver.EnrollmentSnapshotPublicationPath+"?"+rawQuery, nil)
+	request.Host = "primary.example:3443"
+	request.Header.Set("Authorization", "Bearer "+bearer)
+	request.TLS = &tls.ConnectionState{Version: tls.VersionTLS13, HandshakeComplete: true, ServerName: "primary.example"}
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	return response
+}
+
+func TestSnapshotPublicationAfterHashAnswersNotModifiedWithMetadata(t *testing.T) {
+	fixture := newPublicationFixture(t, false)
+	handler := httpserver.NewEnrollmentSnapshotPublicationHandler(httpserver.EnrollmentSnapshotPublicationHandlerOptions{
+		Store: conditionalPublicationStore(fixture.store), Identity: fixture.identity, Certificate: publicationCertificate,
+	})
+	full := fixture.request(handler, fixture.credential.BearerCopy())
+	hash := full.Header().Get(syncpublication.SnapshotContentHashHeader)
+	if full.Code != http.StatusOK || len(hash) != 64 || full.Header().Get(syncpublication.SnapshotAppliedAtHeader) == "" {
+		t.Fatalf("full response status=%d headers=%v", full.Code, full.Header())
+	}
+
+	current := fixture.requestWithQuery(handler, fixture.credential.BearerCopy(), "after="+hash)
+	if current.Code != http.StatusNotModified || current.Body.Len() != 0 {
+		t.Fatalf("status=%d body=%d bytes", current.Code, current.Body.Len())
+	}
+	if current.Header().Get(syncpublication.SnapshotContentHashHeader) != hash ||
+		current.Header().Get(syncpublication.SnapshotAppliedAtHeader) != full.Header().Get(syncpublication.SnapshotAppliedAtHeader) {
+		t.Fatalf("304 metadata headers = %v", current.Header())
+	}
+
+	stale := fixture.requestWithQuery(handler, fixture.credential.BearerCopy(), "after="+strings.Repeat("0", 64))
+	if stale.Code != http.StatusOK || !bytes.Equal(stale.Body.Bytes(), fixture.body) {
+		t.Fatalf("stale after must receive the full snapshot: status=%d", stale.Code)
+	}
+}
+
+func TestSnapshotPublicationRejectsUnknownOrMalformedQuery(t *testing.T) {
+	fixture := newPublicationFixture(t, false)
+	handler := httpserver.NewEnrollmentSnapshotPublicationHandler(httpserver.EnrollmentSnapshotPublicationHandlerOptions{
+		Store: fixture.store, Identity: fixture.identity, Certificate: publicationCertificate,
+	})
+	for _, query := range []string{"x=1", "after=short", "after=" + strings.Repeat("A", 64), "after=" + strings.Repeat("a", 64) + "&x=1"} {
+		if rec := fixture.requestWithQuery(handler, fixture.credential.BearerCopy(), query); rec.Code != http.StatusNotFound {
+			t.Fatalf("query %q: status=%d", query, rec.Code)
+		}
+	}
+}
+
+type handlerRoundTripper struct{ handler http.Handler }
+
+func (rt handlerRoundTripper) RoundTrip(request *http.Request) (*http.Response, error) {
+	request.TLS = &tls.ConnectionState{Version: tls.VersionTLS13, HandshakeComplete: true, ServerName: "primary.example"}
+	request.Host = "primary.example:3443"
+	recorder := httptest.NewRecorder()
+	rt.handler.ServeHTTP(recorder, request)
+	response := recorder.Result()
+	response.ProtoMajor, response.ProtoMinor = 2, 0
+	return response, nil
+}
+
+// The node-side client and the primary-side handler agree on the conditional
+// contract: full snapshot with metadata first, then 304 with the same metadata.
+func TestSnapshotClientAndPublicationHandlerAgreeOnConditionalFetch(t *testing.T) {
+	fixture := newPublicationFixture(t, false)
+	handler := httpserver.NewEnrollmentSnapshotPublicationHandler(httpserver.EnrollmentSnapshotPublicationHandlerOptions{
+		Store: conditionalPublicationStore(fixture.store), Identity: fixture.identity, Certificate: publicationCertificate,
+	})
+	client := syncpublication.NewSnapshotClient(syncpublication.SnapshotClientOptions{
+		HTTPClient:      &http.Client{Transport: handlerRoundTripper{handler}},
+		CanonicalizeURL: func(raw string) (string, error) { return raw, nil },
+	})
+	bearer := []byte(fixture.credential.BearerCopy())
+
+	first, err := client.FetchSnapshotIfChanged(context.Background(), "https://primary.example:3443", bearer, "")
+	if err != nil || first.NotModified || !bytes.Equal(first.Body, fixture.body) || len(first.ContentHash) != 64 || first.AppliedAt.IsZero() {
+		t.Fatalf("first=%+v err=%v", first, err)
+	}
+	second, err := client.FetchSnapshotIfChanged(context.Background(), "https://primary.example:3443", bearer, first.ContentHash)
+	if err != nil || !second.NotModified || second.ContentHash != first.ContentHash || !second.AppliedAt.Equal(first.AppliedAt) {
+		t.Fatalf("second=%+v err=%v", second, err)
+	}
+}

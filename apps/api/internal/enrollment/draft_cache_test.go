@@ -105,3 +105,67 @@ func draftCacheTestEnvelope(t *testing.T) *replicationsnapshot.Envelope {
 	envelope.ContentHash = hash
 	return envelope
 }
+
+func TestDraftCacheRetainsTokenAndRecipientInMemoryAndZeroesThemOnRemoval(t *testing.T) {
+	now := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
+	cache := NewDraftCache(DraftCacheOptions{Capacity: 2, TTL: time.Minute, Now: func() time.Time { return now }})
+	overlay := NodeLocalOverlay{NodeID: domain.NewNodeID()}
+	const selector = "0123456789abcdef0123456789abcdef"
+	draft, err := cache.PutWithPrimaryURLAndToken(selector, "https://primary.example:3443/", draftCacheTestEnvelope(t), overlay, "pcenr1_secret-token")
+	if err != nil {
+		t.Fatalf("PutWithPrimaryURLAndToken: %v", err)
+	}
+	token, recipient, ok := cache.AttemptSecrets(draft.DraftID)
+	if !ok || token != "pcenr1_secret-token" {
+		t.Fatalf("AttemptSecrets ok=%t token=%q", ok, token)
+	}
+	first, err := recipient.PublicKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstWire, _ := first.Wire()
+	recipient.Destroy()
+	_, again, ok := cache.AttemptSecrets(draft.DraftID)
+	if !ok {
+		t.Fatal("second AttemptSecrets must still succeed after the caller destroyed its clone")
+	}
+	secondPub, _ := again.PublicKey()
+	secondWire, _ := secondPub.Wire()
+	again.Destroy()
+	if string(firstWire) != string(secondWire) {
+		t.Fatal("the recipient key must be stable per draft so a retry re-requests the same grant")
+	}
+
+	cache.mu.Lock()
+	entry := cache.entries[selector]
+	retainedToken, retainedKey := entry.token, entry.recipient.private
+	cache.mu.Unlock()
+	now = now.Add(2 * time.Minute)
+	if _, ok := cache.GetByID(draft.DraftID); ok {
+		t.Fatal("expired draft must not be returned")
+	}
+	for _, b := range retainedToken {
+		if b != 0 {
+			t.Fatal("expired token bytes were not zeroed")
+		}
+	}
+	for _, b := range retainedKey {
+		if b != 0 {
+			t.Fatal("expired recipient key was not zeroed")
+		}
+	}
+	if _, _, ok := cache.AttemptSecrets(draft.DraftID); ok {
+		t.Fatal("secrets must be gone with the draft")
+	}
+}
+
+func TestDraftCacheDraftWithoutTokenHasNoAttemptSecrets(t *testing.T) {
+	cache := NewDraftCache(DraftCacheOptions{})
+	draft, err := cache.Put("0123456789abcdef0123456789abcdef", draftCacheTestEnvelope(t), NodeLocalOverlay{NodeID: domain.NewNodeID()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, ok := cache.AttemptSecrets(draft.DraftID); ok {
+		t.Fatal("a token-less draft must not expose attempt secrets")
+	}
+}

@@ -277,3 +277,99 @@ func TestPurgeExpiredArchives(t *testing.T) {
 		t.Errorf("expected 1 remaining, got %d", got)
 	}
 }
+
+func importHashEnvelope(t *testing.T) Envelope {
+	t.Helper()
+	env := Envelope{
+		Transient: TransientFields{
+			SnapshotVersion: domain.SnapshotVersionV1, ReplicationVersion: domain.ReplicationVersionV1,
+			SourcePrimaryID: uuid.New(), LeadershipGeneration: 3,
+			CapturedAt: time.Date(2026, 5, 10, 11, 12, 13, 0, time.UTC),
+		},
+		NodeLocal: NodeLocalFields{Ingress: domain.Ingress{IPv4: "192.0.2.10"}, NodeID: domain.NewNodeID(), Role: domain.TopologyRolePrimary},
+		Replicated: ReplicatedFields{
+			Configuration: domain.ConfigurationSnapshot{Settings: domain.Settings{Ingress: domain.Ingress{IPv4: "192.0.2.10"}}},
+			Secrets:       []ReplicatedSecret{},
+			Owners:        []ReplicatedOwner{},
+		},
+	}
+	hash, err := env.ExpectedHash()
+	if err != nil {
+		t.Fatal(err)
+	}
+	env.ContentHash = hash
+	return env
+}
+
+// D11: the importer keeps the primary's contentHash exactly as received and
+// never touches replicated content; only nodeLocal is rewritten.
+func TestImportKeepsPrimaryContentHashAndReplicatedContent(t *testing.T) {
+	enqueuer := &fakeEnqueuer{}
+	imp := NewImporter(&fakeArchive{}, enqueuer, nil)
+	env := importHashEnvelope(t)
+	received := env.ContentHash
+	replicatedBefore := domain.StableStringify(env.Replicated)
+
+	_, err := imp.Import(context.Background(), &env, ImporterInput{
+		LocalNodeID: domain.NewNodeID(), LocalIngress: domain.Ingress{IPv4: "203.0.113.7"},
+	})
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	if env.ContentHash != received {
+		t.Fatalf("content hash changed: %s != %s", env.ContentHash, received)
+	}
+	if got := domain.StableStringify(env.Replicated); got != replicatedBefore {
+		t.Fatal("importer must not alter replicated content")
+	}
+	if env.NodeLocal.Ingress.IPv4 != "203.0.113.7" {
+		t.Fatalf("nodeLocal ingress = %+v", env.NodeLocal.Ingress)
+	}
+	if len(enqueuer.jobs) != 1 {
+		t.Fatalf("jobs = %d", len(enqueuer.jobs))
+	}
+	stored, err := Unmarshal(enqueuer.jobs[0].snap)
+	if err != nil || stored.ContentHash != received || stored.VerifyHash() != nil {
+		t.Fatalf("stored envelope must keep a verifiable primary hash: %v %v", err, stored.VerifyHash())
+	}
+}
+
+func TestImportRejectsTamperedContentHash(t *testing.T) {
+	archive, enqueuer := &fakeArchive{}, &fakeEnqueuer{}
+	imp := NewImporter(archive, enqueuer, nil)
+	env := importHashEnvelope(t)
+	env.ContentHash = "deadbeef"
+	_, err := imp.Import(context.Background(), &env, ImporterInput{LocalNodeID: domain.NewNodeID()})
+	if err == nil {
+		t.Fatal("a mismatching content hash must be rejected, not re-anchored")
+	}
+	if len(archive.archives) != 0 || len(enqueuer.jobs) != 0 {
+		t.Fatal("nothing may be archived or enqueued for a rejected envelope")
+	}
+}
+
+// A v2 envelope (ingress excluded from the hash) imports with its hash
+// untouched, and a tampered non-ingress field is rejected.
+func TestImportAcceptsHashV2AndRejectsTamper(t *testing.T) {
+	env := importHashEnvelope(t)
+	env.HashVersion = HashVersionIngressExcluded
+	hash, err := env.ExpectedHash()
+	if err != nil {
+		t.Fatal(err)
+	}
+	env.ContentHash = hash
+	imp := NewImporter(&fakeArchive{}, &fakeEnqueuer{}, nil)
+	if _, err := imp.Import(context.Background(), &env, ImporterInput{LocalNodeID: domain.NewNodeID()}); err != nil {
+		t.Fatalf("v2 import: %v", err)
+	}
+	if env.ContentHash != hash {
+		t.Fatal("v2 hash must be kept as received")
+	}
+	tampered := importHashEnvelope(t)
+	tampered.HashVersion = HashVersionIngressExcluded
+	tampered.ContentHash = hash
+	tampered.Replicated.Owners = []ReplicatedOwner{{UserID: uuid.New(), Username: "x"}}
+	if _, err := imp.Import(context.Background(), &tampered, ImporterInput{LocalNodeID: domain.NewNodeID()}); err == nil {
+		t.Fatal("tampered v2 envelope must be rejected")
+	}
+}

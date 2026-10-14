@@ -93,8 +93,8 @@ type ImporterResult struct {
 // structural or secret checks because the validator is the gate.
 //
 // The envelope is taken by pointer so the caller can observe the
-// node-local rewrite and the re-anchored content hash that Import
-// performs before persisting.
+// node-local rewrite that Import performs before persisting. The
+// content hash is verified, never recomputed.
 func (i *Importer) Import(ctx context.Context, env *Envelope, in ImporterInput) (ImporterResult, error) {
 	if in.ArchiveTTL == 0 {
 		in.ArchiveTTL = ArchiveTTLDefault
@@ -138,14 +138,14 @@ func (i *Importer) replaceNodeLocalFields(env *Envelope, in ImporterInput) error
 	if !env.NodeLocal.Role.IsValid() {
 		env.NodeLocal.Role = domain.TopologyRoleNode
 	}
-	// Re-anchor the content hash because NodeLocal is excluded from the
-	// canonical serialization; this is defensive in case the importer is
-	// called without a prior Validate that already re-anchored.
-	hash, err := env.ExpectedHash()
-	if err != nil {
-		return err
+	// The content hash covers replicated content only, which this method never
+	// touches, so it stays exactly the primary's value (D11). Verify instead of
+	// re-anchoring: a tampered envelope is rejected rather than silently
+	// re-signed. Node-local overrides (ingress) are applied downstream without
+	// changing the hash.
+	if err := env.VerifyHash(); err != nil {
+		return fmt.Errorf("verify content hash: %w", err)
 	}
-	env.ContentHash = hash
 	return nil
 }
 

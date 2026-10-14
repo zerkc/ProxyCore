@@ -195,9 +195,8 @@ func TestSQLitePhase2PublishConflicts(t *testing.T) {
 			w.AppliedAt = time.Time{}
 			return w
 		}(),
-		"same hash other job": canonicalWriteFor(f, otherRevision, otherJob, hash, body),
-		"unknown revision":    canonicalWriteFor(f, uuid.NewString(), otherJob, hash+"y", body),
-		"unknown job":         canonicalWriteFor(f, otherRevision, uuid.NewString(), hash+"z", body),
+		"unknown revision": canonicalWriteFor(f, uuid.NewString(), otherJob, hash+"y", body),
+		"unknown job":      canonicalWriteFor(f, otherRevision, uuid.NewString(), hash+"z", body),
 	}
 	for name, write := range cases {
 		err := store.WithCanonicalSnapshot(ctx, func(tx CanonicalSnapshotTransaction) error {
@@ -213,6 +212,138 @@ func TestSQLitePhase2PublishConflicts(t *testing.T) {
 	// A failed publish leaves the sibling revision untouched.
 	if n := phase2Count(t, f, `select count(*) from config_revisions where id = ? and snapshot_content_hash is null`, otherRevision); n != 1 {
 		t.Fatal("conflicting publish mutated revision")
+	}
+}
+
+// A revert publishes an already-used content hash. The published snapshot is the
+// latest applied one by revision recency, never by hash uniqueness.
+func TestSQLitePhase2PublishRevertToEarlierHashBecomesLatest(t *testing.T) {
+	f, store := newSQLitePhase2Fixture(t)
+	ctx := context.Background()
+	body, hashA := publicationEnvelopeBody(t, f.primaryID)
+	hashB := strings.Repeat("b", 64)
+	publish := func(number int, hash string) (string, string) {
+		revisionID, jobID := insertCanonicalApply(t, f, number)
+		if err := store.WithCanonicalSnapshot(ctx, func(tx CanonicalSnapshotTransaction) error {
+			write := canonicalWriteFor(f, revisionID, jobID, hash, body)
+			write.AppliedAt = time.Date(2026, 3, 1, 2, 3, number, 0, time.UTC)
+			return tx.PublishCanonicalSnapshot(ctx, write)
+		}); err != nil {
+			t.Fatalf("publish %d: %v", number, err)
+		}
+		return revisionID, jobID
+	}
+	publish(1, hashA)
+	publish(2, hashB)
+	if got, ok, err := f.store.LatestPublishedContentHash(ctx); err != nil || !ok || got != hashB {
+		t.Fatalf("latest after B = %q, %v, %v", got, ok, err)
+	}
+	revertRevision, revertJob := publish(3, hashA)
+	if got, ok, err := f.store.LatestPublishedContentHash(ctx); err != nil || !ok || got != hashA {
+		t.Fatalf("latest after revert = %q, %v, %v", got, ok, err)
+	}
+	if n := phase2Count(t, f, `select count(*) from applied_snapshots where content_hash = ? and revision_id = ? and apply_job_id = ?`, hashA, revertRevision, revertJob); n != 1 {
+		t.Fatalf("revert row not bound to the new revision/job: %d", n)
+	}
+	// A node on B receives A; a node already on A short-circuits.
+	request := publicationRequest(f)
+	request.AfterContentHash = hashB
+	got, err := f.store.ReadSnapshotPublication(ctx, request)
+	if err != nil || got.Current || got.Snapshot.ContentHash != hashA || len(got.Snapshot.Bytes) == 0 {
+		t.Fatalf("node on B = %#v, %v", got, err)
+	}
+	request.AfterContentHash = hashA
+	got, err = f.store.ReadSnapshotPublication(ctx, request)
+	if err != nil || !got.Current || got.Snapshot.ContentHash != hashA {
+		t.Fatalf("node on A = %#v, %v", got, err)
+	}
+	// The producer must not re-offer the superseded job of the earlier A.
+	if candidates, err := store.ListCanonicalSnapshotCandidates(ctx); err != nil || len(candidates) != 0 {
+		t.Fatalf("candidates = %v, %v", candidates, err)
+	}
+}
+
+// X -> Y -> X: re-applying X reuses X's revision (checksum is unique), so its
+// revision number (5) is lower than Y's (6). The most recently applied
+// configuration is still the one published as latest.
+func TestSQLitePhase2PublishReapplyReusingRevisionNumberBecomesLatest(t *testing.T) {
+	f, store := newSQLitePhase2Fixture(t)
+	ctx := context.Background()
+	body, hashX := publicationEnvelopeBody(t, f.primaryID)
+	hashY := strings.Repeat("c", 64)
+	at := func(sec int) time.Time { return time.Date(2026, 3, 1, 2, 3, sec, 0, time.UTC) }
+	publish := func(revisionID, jobID, hash string, sec int) {
+		t.Helper()
+		if err := store.WithCanonicalSnapshot(ctx, func(tx CanonicalSnapshotTransaction) error {
+			write := canonicalWriteFor(f, revisionID, jobID, hash, body)
+			write.AppliedAt = at(sec)
+			return tx.PublishCanonicalSnapshot(ctx, write)
+		}); err != nil {
+			t.Fatalf("publish %s: %v", hash[:4], err)
+		}
+	}
+	revX, jobX1 := insertCanonicalApply(t, f, 5)
+	revY, jobY := insertCanonicalApply(t, f, 6)
+	publish(revX, jobX1, hashX, 10)
+	publish(revY, jobY, hashY, 20)
+	if got, ok, err := f.store.LatestPublishedContentHash(ctx); err != nil || !ok || got != hashY {
+		t.Fatalf("latest after Y = %q, %v, %v", got, ok, err)
+	}
+	// The re-apply of X: a new job on the SAME revision, finished later than Y.
+	jobX2 := uuid.NewString()
+	finished := tokenKey(t, at(30))
+	settingsExec(t, f.db, `insert into apply_jobs(id,revision_id,target,status,correlation_id,created_at,finished_at,source) values(?,?,'combined','applied',?,?,?,'ordinary')`,
+		jobX2, revX, uuid.NewString(), finished, finished)
+	if candidates, err := store.ListCanonicalSnapshotCandidates(ctx); err != nil || len(candidates) != 1 || candidates[0].JobID != jobX2 {
+		t.Fatalf("candidates = %v, %v", candidates, err)
+	}
+	publish(revX, jobX2, hashX, 30)
+	if got, ok, err := f.store.LatestPublishedContentHash(ctx); err != nil || !ok || got != hashX {
+		t.Fatalf("latest after re-apply of X = %q, %v, %v", got, ok, err)
+	}
+	// A node on Y receives X; a node already on X short-circuits.
+	request := publicationRequest(f)
+	request.AfterContentHash = hashY
+	got, err := f.store.ReadSnapshotPublication(ctx, request)
+	if err != nil || got.Current || got.Snapshot.ContentHash != hashX || len(got.Snapshot.Bytes) == 0 {
+		t.Fatalf("node on Y = %#v, %v", got, err)
+	}
+	request.AfterContentHash = hashX
+	if got, err = f.store.ReadSnapshotPublication(ctx, request); err != nil || !got.Current || got.Snapshot.ContentHash != hashX {
+		t.Fatalf("node on X = %#v, %v", got, err)
+	}
+	// Replaying the older apply of X (or Y) afterwards does not rewind latest,
+	// even though Y has the higher revision number.
+	publish(revX, jobX1, hashX, 10)
+	publish(revY, jobY, hashY, 20)
+	if got, ok, err := f.store.LatestPublishedContentHash(ctx); err != nil || !ok || got != hashX {
+		t.Fatalf("latest after stale replays = %q, %v, %v", got, ok, err)
+	}
+	if candidates, err := store.ListCanonicalSnapshotCandidates(ctx); err != nil || len(candidates) != 0 {
+		t.Fatalf("candidates after = %v, %v", candidates, err)
+	}
+}
+
+// Publishing an older revision for a hash that a newer revision already holds is
+// a stale replay and must not move the published snapshot backwards.
+func TestSQLitePhase2PublishStaleRevisionDoesNotRewindLatest(t *testing.T) {
+	f, store := newSQLitePhase2Fixture(t)
+	ctx := context.Background()
+	body, hash := publicationEnvelopeBody(t, f.primaryID)
+	oldRevision, oldJob := insertCanonicalApply(t, f, 1)
+	newRevision, newJob := insertCanonicalApply(t, f, 2)
+	for _, w := range []CanonicalSnapshotWrite{
+		canonicalWriteFor(f, newRevision, newJob, hash, body),
+		canonicalWriteFor(f, oldRevision, oldJob, hash, body),
+	} {
+		if err := store.WithCanonicalSnapshot(ctx, func(tx CanonicalSnapshotTransaction) error {
+			return tx.PublishCanonicalSnapshot(ctx, w)
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n := phase2Count(t, f, `select count(*) from applied_snapshots where revision_id = ? and apply_job_id = ?`, newRevision, newJob); n != 1 {
+		t.Fatalf("snapshot rewound: %d", n)
 	}
 }
 
@@ -339,6 +470,70 @@ func TestSQLitePhase2CreateApplyJobFromSnapshot(t *testing.T) {
 	}
 	if n := phase2Count(t, f, `select max(revision_number) from config_revisions`); n != 2 {
 		t.Fatalf("max revision = %d", n)
+	}
+}
+
+func TestSQLitePhase2CreateApplyJobFromSnapshotRetryReusesLatestImportJob(t *testing.T) {
+	f, store := newSQLitePhase2Fixture(t)
+	ctx := context.Background()
+	body, _ := publicationEnvelopeBody(t, f.primaryID)
+	first, err := store.CreateApplyJobFromSnapshot(ctx, "import", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// An interrupted conversion retries with the same snapshot: it must reuse the
+	// queued job instead of tripping the unique checksum index.
+	retry, err := store.CreateApplyJobFromSnapshot(ctx, "import", body)
+	if err != nil || retry != first {
+		t.Fatalf("retry = %s, %v; want %s", retry, err, first)
+	}
+	if n := phase2Count(t, f, `select count(*) from config_revisions`); n != 1 {
+		t.Fatalf("revisions = %d", n)
+	}
+	if n := phase2Count(t, f, `select count(*) from apply_jobs`); n != 1 {
+		t.Fatalf("jobs = %d", n)
+	}
+	settingsExec(t, f.db, `update apply_jobs set status = 'applied'`)
+	if again, err := store.CreateApplyJobFromSnapshot(ctx, "import", body); err != nil || again != first {
+		t.Fatalf("applied retry = %s, %v", again, err)
+	}
+	// A failed job is never silently reused: the next cycle imports again by
+	// refreshing the revision that owns the unique checksum.
+	settingsExec(t, f.db, `update apply_jobs set status = 'failed'`)
+	retried, err := store.CreateApplyJobFromSnapshot(ctx, "import", body)
+	if err != nil || retried == first {
+		t.Fatalf("failed retry = %s, %v; want a new job", retried, err)
+	}
+	if n := phase2Count(t, f, `select count(*) from config_revisions`); n != 1 {
+		t.Fatalf("revisions after failed retry = %d", n)
+	}
+	if n := phase2Count(t, f, `select count(*) from apply_jobs where id = ? and status = 'queued'`, retried.String()); n != 1 {
+		t.Fatal("retry job is not queued")
+	}
+	settingsExec(t, f.db, `update apply_jobs set status = 'applied'`)
+	// Once a newer revision exists the old content is no longer the latest, so
+	// importing it again (a revert) refreshes its revision to be the latest and
+	// re-materializes it instead of reusing the stale job.
+	other, _ := publicationEnvelopeBody(t, uuid.NewString())
+	otherJob, err := store.CreateApplyJobFromSnapshot(ctx, "import", other)
+	if err != nil {
+		t.Fatal(err)
+	}
+	settingsExec(t, f.db, `update apply_jobs set status = 'applied'`)
+	revert, err := store.CreateApplyJobFromSnapshot(ctx, "import", body)
+	if err != nil || revert == otherJob || revert == retried {
+		t.Fatalf("revert = %s, %v", revert, err)
+	}
+	if n := phase2Count(t, f, `select count(*) from config_revisions`); n != 2 {
+		t.Fatalf("revisions after revert = %d", n)
+	}
+	if n := phase2Count(t, f, `select count(*) from config_revisions r join apply_jobs j on j.revision_id = r.id
+		where j.id = ? and r.revision_number = (select max(revision_number) from config_revisions) and r.applied_at is null`, revert.String()); n != 1 {
+		t.Fatal("reverted revision is not the latest unapplied revision")
+	}
+	// Exactly one live job: the refreshed revision owns only its new queued job.
+	if n := phase2Count(t, f, `select count(*) from apply_jobs where status = 'queued'`); n != 1 {
+		t.Fatalf("queued jobs = %d", n)
 	}
 }
 

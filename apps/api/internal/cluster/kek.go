@@ -18,8 +18,11 @@ package cluster
 import (
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -60,6 +63,29 @@ func (k *KEK) Destroy() {
 		k.key[index] = 0
 	}
 	k.key = nil
+}
+
+// secretDigestLabel domain-separates the digest subkey from the AES key use.
+const secretDigestLabel = "proxycore/snapshot/secret-digest/v1"
+
+// SecretDigest returns a stable keyed digest (hex HMAC-SHA256) of a secret
+// identity and its plaintext. It is deterministic, unlike Wrap (random nonce),
+// so an unchanged secret yields the same value on every export. The HMAC key is
+// derived from the KEK so the AES key is never reused as a MAC key, and the id
+// and purpose are bound so equal plaintexts of different secrets do not collide.
+func (k *KEK) SecretDigest(id, purpose string, plaintext []byte) (string, error) {
+	if k == nil || len(k.key) != KEKLength {
+		return "", errors.New("cluster KEK is destroyed")
+	}
+	derive := hmac.New(sha256.New, k.key)
+	derive.Write([]byte(secretDigestLabel))
+	mac := hmac.New(sha256.New, derive.Sum(nil))
+	mac.Write([]byte(id))
+	mac.Write([]byte{0})
+	mac.Write([]byte(purpose))
+	mac.Write([]byte{0})
+	mac.Write(plaintext)
+	return hex.EncodeToString(mac.Sum(nil)), nil
 }
 
 // GenerateKEK generates a fresh 32-byte cluster KEK using a

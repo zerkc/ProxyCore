@@ -13,6 +13,7 @@ import (
 
 	"github.com/zerkc/ProxyCore/apps/api/internal/config"
 	"github.com/zerkc/ProxyCore/apps/api/internal/configuration"
+	"github.com/zerkc/ProxyCore/apps/api/internal/domain"
 	"github.com/zerkc/ProxyCore/apps/api/internal/enrollment"
 	"github.com/zerkc/ProxyCore/apps/api/internal/httpserver"
 	"github.com/zerkc/ProxyCore/apps/api/internal/identity"
@@ -115,6 +116,58 @@ func (a *enrollmentTLSIdentityAdapter) Current(ctx context.Context) (current ide
 	current = a.service.Current()
 	loaded = true
 	return current, loaded, nil
+}
+
+// enrollmentIdentityWatchInterval is how often the in-memory identity cache is
+// compared; it is cheap (no I/O), so a role change is observed within a second.
+const enrollmentIdentityWatchInterval = time.Second
+
+// enrollmentSupervisorReconcileInterval bounds how long a hostname or material
+// change can wait when no identity change wakes the supervisor.
+const enrollmentSupervisorReconcileInterval = 5 * time.Second
+
+// watchEnrollmentIdentity wakes the enrollment TLS supervisor as soon as the
+// identity facts that decide listener eligibility change (role, leadership
+// generation, cluster key), so a standalone primary starts serving the
+// enrollment listener right after its first token flips it to primary, and
+// stops when it is demoted, without an API restart. It only calls trigger; the
+// supervisor alone decides eligibility, so no listener can start for an
+// ineligible identity because of this watcher.
+func watchEnrollmentIdentity(ctx context.Context, source enrollment.EnrollmentTLSIdentityCurrent, trigger func(), interval time.Duration) {
+	if ctx == nil || source == nil || trigger == nil || interval <= 0 {
+		return
+	}
+	type observed struct {
+		role       domain.TopologyRole
+		generation domain.LeadershipGeneration
+		key        string
+		loaded     bool
+	}
+	read := func() observed {
+		current, loaded, err := source.Current(ctx)
+		if err != nil || !loaded {
+			return observed{}
+		}
+		out := observed{role: current.Role, generation: current.LeadershipGeneration, loaded: true}
+		if current.ClusterKeyID != nil {
+			out.key = current.ClusterKeyID.String()
+		}
+		return out
+	}
+	previous := read()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if next := read(); next != previous {
+				previous = next
+				trigger()
+			}
+		}
+	}
 }
 
 type enrollmentTLSConfigurationStore interface {

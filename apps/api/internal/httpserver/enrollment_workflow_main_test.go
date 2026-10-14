@@ -6,11 +6,15 @@ import (
 	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
+	"github.com/zerkc/ProxyCore/apps/api/internal/cluster"
 	"github.com/zerkc/ProxyCore/apps/api/internal/domain"
 	"github.com/zerkc/ProxyCore/apps/api/internal/enrollment"
 	"github.com/zerkc/ProxyCore/apps/api/internal/httpserver"
@@ -134,5 +138,64 @@ func TestDedicatedEnrollmentListenerStillRequiresTLS13(t *testing.T) {
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusBadRequest || called {
 		t.Fatalf("tls1.2 status=%d called=%t", rec.Code, called)
+	}
+}
+
+// The token is minted and owned by the primary. On the owner-session main API
+// the node must not consult its own token store: it validates the token format
+// and forwards it so the primary verifies and consumes it.
+func TestMainServerEnrollmentWorkflowDoesNotVerifyPrimaryTokenLocally(t *testing.T) {
+	called := false
+	forwarded, forwardedURL := "", ""
+	opts := mainWorkflowOptions(t, &called)
+	opts.VerifyToken = func(context.Context, string) error { return enrollment.ErrEnrollmentDenied }
+	envelope := workflowTestEnvelope(t)
+	opts.FetchSnapshot = func(_ context.Context, primaryURL, token string) (*replicationsnapshot.Envelope, error) {
+		called = true
+		forwarded, forwardedURL = token, primaryURL
+		return envelope, nil
+	}
+	env := newSQLiteHTTPTestServer(t, httpserver.WithEnrollmentWorkflow(opts))
+	owner := sqliteOwnerCookie(t, env.Handler)
+
+	body := mainWorkflowDraftBody()
+	rec := doJSON(t, env.Handler, http.MethodPost, httpserver.EnrollmentDraftPath, body, owner)
+	if rec.Code != http.StatusOK || !called || forwarded != body["token"] || forwardedURL != body["primaryURL"] {
+		t.Fatalf("draft status=%d called=%t tokenForwarded=%t urlForwarded=%t body=%s", rec.Code, called, forwarded == body["token"], forwardedURL == body["primaryURL"], rec.Body.String())
+	}
+	if rec := doJSON(t, env.Handler, http.MethodPost, httpserver.EnrollmentRecoverPath, map[string]string{"token": body["token"]}, owner); rec.Code != http.StatusOK {
+		t.Fatalf("recover status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	called = false
+	bad := map[string]string{"token": "pcenr1_not-a-token", "primaryURL": body["primaryURL"]}
+	if rec := doJSON(t, env.Handler, http.MethodPost, httpserver.EnrollmentDraftPath, bad, owner); rec.Code != http.StatusForbidden || called {
+		t.Fatalf("malformed token status=%d called=%t", rec.Code, called)
+	}
+}
+
+type noLocalKEKLoader struct{}
+
+func (noLocalKEKLoader) LoadLocalKEK(context.Context) (*cluster.KEK, uuid.UUID, error) {
+	return nil, uuid.Nil, errors.New("no local cluster key")
+}
+
+// A not-yet-enrolled node has no cluster KEK, so the draft validator must
+// still accept a structurally valid secret-free snapshot, and must keep
+// failing closed when the snapshot carries secrets it cannot decrypt.
+func TestLocalKEKValidatorWithoutLocalKEKValidatesStructureAndFailsClosedOnSecrets(t *testing.T) {
+	validator := httpserver.NewLocalKEKSnapshotValidator(noLocalKEKLoader{})
+	envelope := workflowTestEnvelope(t)
+	if result := validator.Validate(context.Background(), *envelope); !result.OK || len(result.Issues) != 0 {
+		t.Fatalf("secret-free envelope result=%+v", result)
+	}
+	envelope.Replicated.Secrets = []replicationsnapshot.ReplicatedSecret{{ID: uuid.New(), Purpose: "tls-key", Envelope: "v1.kek:AA:BB:CC"}}
+	hash, err := envelope.ExpectedHash()
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope.ContentHash = hash
+	if result := validator.Validate(context.Background(), *envelope); result.OK || len(result.Issues) == 0 {
+		t.Fatalf("envelope with undecryptable secrets accepted: %+v", result)
 	}
 }

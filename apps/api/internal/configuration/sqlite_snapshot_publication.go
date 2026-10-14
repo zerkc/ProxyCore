@@ -307,8 +307,11 @@ func sqlitePublicationIdentity(v sqlitedb.WriteValue) (SnapshotPublicationIdenti
 }
 
 // sqliteLatestSnapshotPublication selects the absolute newest candidate without
-// reading its body; the size comes from length() of the BLOB. Ordering matches
-// PG: revision number, then revision/applied clock, then snapshot id.
+// reading its body; the size comes from length() of the BLOB. Recency is the
+// apply clock (the job's finished_at, stored as applied_at), not the revision
+// number: re-applying an earlier configuration reuses its old revision number
+// (checksum is unique) but is still the most recently applied one. Revision
+// number and snapshot id only break ties.
 func sqliteLatestSnapshotPublication(v sqlitedb.WriteValue, primaryID string) (SnapshotPublicationRecord, int, error) {
 	var record SnapshotPublicationRecord
 	var size, proofComplete int
@@ -323,7 +326,7 @@ func sqliteLatestSnapshotPublication(v sqlitedb.WriteValue, primaryID string) (S
 		left join config_revisions r on r.id = a.revision_id
 		left join apply_jobs j on j.id = a.apply_job_id
 		where a.source_primary_id = ?
-		order by coalesce(r.revision_number, -1) desc, coalesce(r.created_at, a.applied_at) desc, a.id desc
+		order by a.applied_at desc, coalesce(r.revision_number, -1) desc, a.id desc
 		limit 1`, primaryID).Scan(&record.SnapshotID, &record.SourcePrimaryID, &record.LeadershipGeneration,
 		&record.SnapshotVersion, &record.ReplicationVersion, &record.ContentHash,
 		&record.RevisionID, &record.ApplyJobID, &applied, &discarded,
@@ -340,4 +343,37 @@ func sqliteLatestSnapshotPublication(v sqlitedb.WriteValue, primaryID string) (S
 	}
 	record.ProofComplete = proofComplete == 1
 	return record, size, nil
+}
+
+// LatestPublishedContentHash returns the content hash of the snapshot this
+// PRIMARY currently publishes to its nodes: the absolute newest candidate for
+// the local installation, and only when it is complete and not discarded.
+// ok is false when nothing publishable exists yet. It needs no credential and
+// returns no snapshot bytes.
+func (s *SQLiteSnapshotPublicationStore) LatestPublishedContentHash(ctx context.Context) (hash string, ok bool, err error) {
+	if ctx == nil || s == nil || s.writer == nil {
+		return "", false, ErrSnapshotPublicationStore
+	}
+	err = s.writer.Write(ctx, func(v sqlitedb.WriteValue) error {
+		identity, err := sqlitePublicationIdentity(v)
+		if err != nil {
+			return err
+		}
+		candidate, size, err := sqliteLatestSnapshotPublication(v, identity.InstallationID)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if candidate.ProofComplete && candidate.DiscardedAt == nil && size > 0 &&
+			candidate.LeadershipGeneration == identity.LeadershipGeneration {
+			hash, ok = candidate.ContentHash, true
+		}
+		return nil
+	})
+	if err != nil {
+		return "", false, ErrSnapshotPublicationStore
+	}
+	return hash, ok, nil
 }

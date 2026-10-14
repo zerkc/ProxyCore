@@ -113,7 +113,8 @@ function EntrySurface({ error, recoveryPrompt, token, primaryURL, onTokenChange,
         <textarea id="node-enrollment-token" className="pc-input min-h-24 resize-y font-mono" data-testid="node-enrollment-token" value={token} onInput={(event) => onTokenChange(event.currentTarget.value)} onChange={(event) => onTokenChange(event.currentTarget.value)} autoComplete="off" spellCheck={false} />
       </label>
       <label className="pc-label" htmlFor="node-primary-url">PRIMARY URL
-        <input id="node-primary-url" className="pc-input font-mono" data-testid="node-primary-url" value={primaryURL} onInput={(event) => onPrimaryURLChange(event.currentTarget.value)} onChange={(event) => onPrimaryURLChange(event.currentTarget.value)} placeholder="https://primary.example" autoComplete="off" spellCheck={false} />
+        <input id="node-primary-url" className="pc-input font-mono" data-testid="node-primary-url" value={primaryURL} onInput={(event) => onPrimaryURLChange(event.currentTarget.value)} onChange={(event) => onPrimaryURLChange(event.currentTarget.value)} placeholder="https://primary.example:3443/" aria-describedby="node-primary-url-help" autoComplete="off" spellCheck={false} />
+        <span id="node-primary-url-help" className="mt-1 block text-xs text-faint" data-testid="node-primary-url-help">Use the form https://&lt;host&gt;:&lt;port&gt;/ with an explicit port and a trailing slash.</span>
       </label>
       <button type="submit" className="pc-btn" data-testid="node-draft-submit">Preview enrollment</button>
     </form>
@@ -162,8 +163,10 @@ function sanitizeConfirmResult(result: ConfirmResult): ConfirmResult {
 }
 function formatIngress(ingress: DraftPreview["envelopePreview"]["ingress"]) { return [ingress.ipv4, ingress.ipv6].filter(Boolean).join(" / ") || "—"; }
 function formatDate(value: string) { const timestamp = Date.parse(value); return Number.isNaN(timestamp) ? "—" : new Date(timestamp).toISOString(); }
+const PRIMARY_URL_HINT = "The enrollment request was rejected. The PRIMARY URL must look like https://<host>:<port>/ with an explicit port and a trailing slash.";
 function draftError(caught: unknown) {
   if (caught instanceof ApiError && caught.status === 403) return "The enrollment token was rejected. Check the token and try again.";
+  if (caught instanceof EnrollmentApiError && caught.status === 400) return PRIMARY_URL_HINT;
   if (caught instanceof EnrollmentApiError && caught.status === 410) return "The enrollment token has expired or been revoked. Enter a current token.";
   if (caught instanceof EnrollmentApiError && caught.status >= 500) return "The enrollment preview is temporarily unavailable. Try again.";
   return "The enrollment preview could not be loaded. Check the URL and try again.";

@@ -2,19 +2,26 @@ package httpserver
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
+	gosync "sync"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/zerkc/ProxyCore/apps/api/internal/cluster"
+	"github.com/zerkc/ProxyCore/apps/api/internal/configuration"
 	"github.com/zerkc/ProxyCore/apps/api/internal/domain"
 	"github.com/zerkc/ProxyCore/apps/api/internal/enrollment"
+	"github.com/zerkc/ProxyCore/apps/api/internal/identity"
 	replicationsnapshot "github.com/zerkc/ProxyCore/apps/api/internal/snapshot"
+	syncpublication "github.com/zerkc/ProxyCore/apps/api/internal/sync"
 )
 
 const (
@@ -48,25 +55,90 @@ type localKEKSnapshotValidator struct {
 }
 
 func (v localKEKSnapshotValidator) Validate(ctx context.Context, envelope replicationsnapshot.Envelope) replicationsnapshot.ValidationResult {
-	if v.loader == nil {
-		return replicationsnapshot.ValidationResult{Issues: []replicationsnapshot.ValidationIssue{{Code: "NO_KEY", Field: "kek", Message: "local cluster KEK unavailable"}}}
+	result, _ := v.validate(ctx, envelope)
+	return result
+}
+
+// ValidatePreview validates structure, compatibility and owners for a read-only
+// preview. A not-yet-enrolled installation holds no cluster KEK (the primary's
+// KEK only arrives with the enrollment grant), so secrets that cannot be
+// decrypted yet are tolerated here and ONLY here. Validate, used before any
+// conversion, still fails closed on them.
+func (v localKEKSnapshotValidator) ValidatePreview(ctx context.Context, envelope replicationsnapshot.Envelope) replicationsnapshot.ValidationResult {
+	result, hasKEK := v.validate(ctx, envelope)
+	if hasKEK {
+		return result
 	}
-	kek, _, err := v.loader.LoadLocalKEK(ctx)
-	if err != nil || kek == nil {
-		return replicationsnapshot.ValidationResult{Issues: []replicationsnapshot.ValidationIssue{{Code: "NO_KEY", Field: "kek", Message: "local cluster KEK unavailable"}}}
+	filtered := replicationsnapshot.ValidationResult{OK: true}
+	for _, issue := range result.Issues {
+		if issue.Code == "NO_KEY" {
+			continue
+		}
+		filtered.Issues = append(filtered.Issues, issue)
+		filtered.OK = false
 	}
-	defer kek.Destroy()
+	return filtered
+}
+
+// ValidateWithKEK strictly validates with an explicit KEK (the one a grant just
+// delivered) instead of the local loader. The caller keeps ownership of kek.
+func (v localKEKSnapshotValidator) ValidateWithKEK(ctx context.Context, envelope replicationsnapshot.Envelope, kek *cluster.KEK) replicationsnapshot.ValidationResult {
+	if kek == nil {
+		return replicationsnapshot.ValidationResult{OK: false, Issues: []replicationsnapshot.ValidationIssue{{Code: "NO_KEY"}}}
+	}
 	return replicationsnapshot.NewValidator(kek).Validate(ctx, envelope)
+}
+
+func (v localKEKSnapshotValidator) validate(ctx context.Context, envelope replicationsnapshot.Envelope) (replicationsnapshot.ValidationResult, bool) {
+	var kek *cluster.KEK
+	if v.loader != nil {
+		if loaded, _, err := v.loader.LoadLocalKEK(ctx); err == nil && loaded != nil {
+			kek = loaded
+			defer kek.Destroy()
+		}
+	}
+	return replicationsnapshot.NewValidator(kek).Validate(ctx, envelope), kek != nil
 }
 
 // EnrollmentSnapshotFetcher is the transport boundary for the authenticated
 // PRIMARY exchange. Implementations receive the token only in memory and must
-// never place it in a URL, log line, or response.
+// never place it in a URL, log line, or response. Arguments are
+// (ctx, primaryURL, credential).
 type EnrollmentSnapshotFetcher func(context.Context, string, string) (*replicationsnapshot.Envelope, error)
 
 type EnrollmentSnapshotValidator interface {
 	Validate(context.Context, replicationsnapshot.Envelope) replicationsnapshot.ValidationResult
 }
+
+// EnrollmentNodeConverter is the conversion seam; *enrollment.NodeConverter
+// implements it.
+type EnrollmentNodeConverter interface {
+	Convert(context.Context, enrollment.NodeConversionInput) (enrollment.NodeConversionResult, error)
+}
+
+// EnrollmentGrantExchanger POSTs the grant exchange to the primary. The token
+// is passed in memory only.
+type EnrollmentGrantExchanger func(ctx context.Context, primaryURL, token string, request syncpublication.ExchangeRequest) (syncpublication.ExchangeResult, error)
+
+// EnrollmentGrantAcceptor opens the sealed bootstrap payload and persists the
+// cluster KEK and node credential atomically (enrollment.BootstrapAcceptor).
+type EnrollmentGrantAcceptor func(ctx context.Context, recipient *enrollment.BootstrapRecipient, binding enrollment.BootstrapBinding, sealed []byte, payloadHash string) (enrollment.AcceptedBootstrap, error)
+
+// EnrollmentClusterKEKLoader reads back the persisted KEK for keyID; the
+// caller owns and destroys the result.
+type EnrollmentClusterKEKLoader func(ctx context.Context, keyID uuid.UUID) (*cluster.KEK, error)
+
+// kekEnvelopeValidator is implemented by validators that can strictly validate
+// with an explicit KEK. Confirm needs it because the installation is not yet a
+// node, so the local loader cannot serve a KEK until after conversion.
+type kekEnvelopeValidator interface {
+	ValidateWithKEK(context.Context, replicationsnapshot.Envelope, *cluster.KEK) replicationsnapshot.ValidationResult
+}
+
+// EnrollmentSyncBindingRecorder stores the node's primary binding.
+type EnrollmentSyncBindingRecorder func(ctx context.Context, binding configuration.NodeSyncBinding, appliedHash string) error
+
+const previewDigestDomain = "proxycore/enrollment/confirm/preview-digest/v1"
 
 type enrollmentWorkflowHandler struct {
 	cache            *enrollment.DraftCache
@@ -75,7 +147,12 @@ type enrollmentWorkflowHandler struct {
 	validator        EnrollmentSnapshotValidator
 	identity         func(context.Context) (EnrollmentLocalIdentity, error)
 	localIngress     func(context.Context) (domain.Ingress, error)
-	converter        *enrollment.NodeConverter
+	converter        EnrollmentNodeConverter
+	exchangeGrant    EnrollmentGrantExchanger
+	acceptGrant      EnrollmentGrantAcceptor
+	loadClusterKEK   EnrollmentClusterKEKLoader
+	recordSync       EnrollmentSyncBindingRecorder
+	confirming       gosync.Map
 	archiveTTL       time.Duration
 	applyWaitTimeout time.Duration
 	certificate      IdentityProofCertificateProvider
@@ -97,7 +174,8 @@ func newEnrollmentWorkflowHandler(opts EnrollmentWorkflowHandlerOptions, certifi
 	return &enrollmentWorkflowHandler{
 		cache: opts.Cache, verifyToken: opts.VerifyToken, fetchSnapshot: opts.FetchSnapshot,
 		validator: opts.Validator, identity: opts.Identity, localIngress: opts.LocalIngress,
-		converter: opts.Converter, archiveTTL: archiveTTL, applyWaitTimeout: applyWaitTimeout,
+		converter: opts.Converter, exchangeGrant: opts.ExchangeGrant, acceptGrant: opts.AcceptGrant,
+		loadClusterKEK: opts.LoadClusterKEK, recordSync: opts.RecordSyncBinding, archiveTTL: archiveTTL, applyWaitTimeout: applyWaitTimeout,
 		certificate: certificate,
 	}
 }
@@ -143,9 +221,8 @@ func (h *enrollmentWorkflowHandler) handleDraft(w http.ResponseWriter, r *http.R
 	if !h.requireTLSAuthority(w, r, canonicalURL) {
 		return
 	}
-	selector, secret, valid := parseHTTPEnrollmentToken(request.Token)
-	zeroBytes(secret)
-	if !valid || h.verifyToken == nil || h.verifyToken(r.Context(), request.Token) != nil {
+	selector, valid := h.acceptToken(r.Context(), request.Token)
+	if !valid {
 		writeIdentityProofError(w, http.StatusForbidden, "Permission denied")
 		return
 	}
@@ -153,12 +230,12 @@ func (h *enrollmentWorkflowHandler) handleDraft(w http.ResponseWriter, r *http.R
 		writeIdentityProofError(w, http.StatusServiceUnavailable, "enrollment workflow unavailable")
 		return
 	}
-	envelope, err := h.fetchSnapshot(r.Context(), request.Token, canonicalURL)
+	envelope, err := h.fetchSnapshot(r.Context(), canonicalURL, request.Token)
 	if err != nil || envelope == nil {
 		writeIdentityProofError(w, http.StatusConflict, "primary snapshot unavailable")
 		return
 	}
-	if !h.validateEnvelope(r, envelope) {
+	if !h.validatePreviewEnvelope(r, envelope) {
 		writeIdentityProofError(w, http.StatusConflict, "primary snapshot denied")
 		return
 	}
@@ -167,7 +244,7 @@ func (h *enrollmentWorkflowHandler) handleDraft(w http.ResponseWriter, r *http.R
 		writeIdentityProofError(w, http.StatusConflict, "local identity unavailable")
 		return
 	}
-	draft, err := h.cache.PutWithPrimaryURL(selector, canonicalURL, envelope, overlay)
+	draft, err := h.cache.PutWithPrimaryURLAndToken(selector, canonicalURL, envelope, overlay, request.Token)
 	if err != nil {
 		writeIdentityProofError(w, http.StatusConflict, "enrollment draft unavailable")
 		return
@@ -202,7 +279,7 @@ func (h *enrollmentWorkflowHandler) handlePreview(w http.ResponseWriter, r *http
 		writeIdentityProofError(w, http.StatusConflict, "requested node values are not authoritative")
 		return
 	}
-	if !h.validateEnvelope(r, draft.Envelope) {
+	if !h.validatePreviewEnvelope(r, draft.Envelope) {
 		writeIdentityProofError(w, http.StatusConflict, "primary snapshot denied")
 		return
 	}
@@ -231,13 +308,39 @@ func (h *enrollmentWorkflowHandler) handleConfirm(w http.ResponseWriter, r *http
 		writeIdentityProofError(w, http.StatusConflict, "enrollment conversion denied")
 		return
 	}
-	if !h.validateEnvelope(r, draft.Envelope) {
-		writeIdentityProofError(w, http.StatusConflict, "primary snapshot denied")
+	if h.exchangeGrant == nil || h.acceptGrant == nil || h.loadClusterKEK == nil {
+		writeIdentityProofError(w, http.StatusServiceUnavailable, "enrollment workflow unavailable")
 		return
 	}
+	kekValidator, ok := h.validator.(kekEnvelopeValidator)
+	if !ok {
+		writeIdentityProofError(w, http.StatusServiceUnavailable, "enrollment workflow unavailable")
+		return
+	}
+	// One confirm per draft at a time: the grant is single-use and the retained
+	// recipient key must not be raced.
+	if _, busy := h.confirming.LoadOrStore(request.DraftID, struct{}{}); busy {
+		writeIdentityProofError(w, http.StatusConflict, "enrollment confirm already in progress")
+		return
+	}
+	defer h.confirming.Delete(request.DraftID)
+
+	token, recipient, ok := h.cache.AttemptSecrets(request.DraftID)
+	if !ok {
+		writeIdentityProofError(w, http.StatusGone, "enrollment draft expired; re-enter the token")
+		return
+	}
+	defer recipient.Destroy()
 	local, err := h.identity(r.Context())
-	if err != nil || !local.NodeID.IsValid() || !local.InstallationID.IsValid() {
+	if err != nil || !local.NodeID.IsValid() || !local.InstallationID.IsValid() || local.NodeID != draft.Overlay.NodeID {
 		writeIdentityProofError(w, http.StatusConflict, "identity transition denied")
+		return
+	}
+	// Eligibility is evaluated per request (never at boot) so a demoted
+	// installation can enroll without a restart, and before the exchange so a
+	// refused identity never consumes a token.
+	if !identity.RoleCanEnrollAsNode(local.Role, local.ClusterKeyID != "") {
+		writeIdentityProofError(w, http.StatusConflict, "enrollment conversion denied")
 		return
 	}
 	ingress, err := h.currentIngress(r.Context())
@@ -245,23 +348,144 @@ func (h *enrollmentWorkflowHandler) handleConfirm(w http.ResponseWriter, r *http
 		writeIdentityProofError(w, http.StatusConflict, "identity transition denied")
 		return
 	}
-	result, err := h.converter.Convert(r.Context(), enrollment.NodeConversionInput{
+	binding, exchangeRequest, ok := h.confirmBinding(request.DraftID, draft, local, &recipient)
+	if !ok {
+		writeIdentityProofError(w, http.StatusConflict, "enrollment grant denied")
+		return
+	}
+
+	// 1. exchange (the primary consumes the token and seals to our key)
+	exchanged, err := h.exchangeGrant(r.Context(), draft.PrimaryURL, token, exchangeRequest)
+	if err != nil {
+		h.writeExchangeFailure(w, request.DraftID, err)
+		return
+	}
+	// 2. open + persist KEK and credential atomically
+	accepted, err := h.acceptGrant(r.Context(), &recipient, binding, exchanged.SealedPayload, exchanged.PayloadHash)
+	if err != nil {
+		if errors.Is(err, enrollment.ErrBootstrapPersistence) {
+			writeIdentityProofError(w, http.StatusServiceUnavailable, "enrollment workflow unavailable")
+			return
+		}
+		writeIdentityProofError(w, http.StatusConflict, "enrollment grant denied")
+		return
+	}
+	// 3. strict validation with the KEK the grant just delivered
+	keyID, err := uuid.Parse(accepted.ClusterKeyID)
+	if err != nil {
+		writeIdentityProofError(w, http.StatusConflict, "enrollment grant denied")
+		return
+	}
+	kek, err := h.loadClusterKEK(r.Context(), keyID)
+	if err != nil || kek == nil {
+		writeIdentityProofError(w, http.StatusServiceUnavailable, "enrollment workflow unavailable")
+		return
+	}
+	result := kekValidator.ValidateWithKEK(r.Context(), *draft.Envelope, kek)
+	kek.Destroy()
+	if !result.OK || len(result.Issues) != 0 {
+		writeIdentityProofError(w, http.StatusConflict, "primary snapshot denied")
+		return
+	}
+	// 3b. remember the primary before the role commit point, so a node can
+	// never exist without the binding continuous sync needs. A failed convert
+	// leaves a binding on a non-node, which the sync loop ignores.
+	if h.recordSync != nil {
+		binding := configuration.NodeSyncBinding{
+			PrimaryURL:            draft.PrimaryURL,
+			CredentialID:          accepted.CredentialID,
+			PrimaryInstallationID: draft.Envelope.Transient.SourcePrimaryID.String(),
+		}
+		if err := h.recordSync(r.Context(), binding, draft.Envelope.ContentHash); err != nil {
+			writeIdentityProofError(w, http.StatusServiceUnavailable, "enrollment workflow unavailable")
+			return
+		}
+	}
+	// 4. archive/import/apply, then the role commit point
+	converted, err := h.converter.Convert(r.Context(), enrollment.NodeConversionInput{
 		Envelope: draft.Envelope, LocalNodeID: local.NodeID, LocalIngress: ingress,
 		LocalInstallId: local.InstallationID, ArchiveTTL: h.archiveTTL, ApplyWaitTimeout: h.applyWaitTimeout,
+		ClusterKeyID: &keyID,
 	})
 	if err != nil {
 		writeIdentityProofError(w, http.StatusConflict, genericConversionReason(err))
 		return
 	}
+	result2 := converted
 	h.cache.DeleteByID(request.DraftID)
 	response := enrollmentConfirmResponse{
-		Role: result.Identity.Role, Generation: uint64(result.Identity.LeadershipGeneration),
-		NodeID: result.Identity.NodeID.String(), ArchiveID: result.ArchiveID.String(), ApplyJobID: result.ApplyJobID.String(),
+		Role: result2.Identity.Role, Generation: uint64(result2.Identity.LeadershipGeneration),
+		NodeID: result2.Identity.NodeID.String(), ArchiveID: result2.ArchiveID.String(), ApplyJobID: result2.ApplyJobID.String(),
 	}
-	if result.Identity.ClusterKeyID != nil {
-		response.ClusterKeyID = result.Identity.ClusterKeyID.String()
+	if result2.Identity.ClusterKeyID != nil {
+		response.ClusterKeyID = result2.Identity.ClusterKeyID.String()
 	}
 	writeWorkflowJSON(w, http.StatusOK, response)
+}
+
+// confirmBinding derives the grant binding deterministically from the draft so
+// a retry after a transient failure re-requests the exact same grant:
+//   - attemptId is the draft id (a canonical UUID minted once per draft);
+//   - previewDigest is SHA-256 over a domain tag, the envelope content hash,
+//     the canonical primary URL, the local node id and the local installation
+//     id, i.e. exactly what the owner previewed and nothing time-varying;
+//   - the recipient key is the draft's retained ephemeral key.
+func (h *enrollmentWorkflowHandler) confirmBinding(draftID string, draft enrollment.Draft, local EnrollmentLocalIdentity, recipient *enrollment.BootstrapRecipient) (enrollment.BootstrapBinding, syncpublication.ExchangeRequest, bool) {
+	envelope := draft.Envelope
+	if envelope == nil || envelope.Transient.SourcePrimaryID == uuid.Nil || envelope.Transient.LeadershipGeneration == 0 || envelope.ContentHash == "" {
+		return enrollment.BootstrapBinding{}, syncpublication.ExchangeRequest{}, false
+	}
+	if parsed, err := uuid.Parse(draftID); err != nil || parsed.String() != draftID {
+		return enrollment.BootstrapBinding{}, syncpublication.ExchangeRequest{}, false
+	}
+	publicKey, err := recipient.PublicKey()
+	if err != nil {
+		return enrollment.BootstrapBinding{}, syncpublication.ExchangeRequest{}, false
+	}
+	wire, err := publicKey.Wire()
+	if err != nil {
+		return enrollment.BootstrapBinding{}, syncpublication.ExchangeRequest{}, false
+	}
+	hasher := sha256.New()
+	for _, part := range []string{previewDigestDomain, envelope.ContentHash, draft.PrimaryURL, local.NodeID.String(), local.InstallationID.String()} {
+		var length [4]byte
+		length[0], length[1], length[2], length[3] = byte(len(part)>>24), byte(len(part)>>16), byte(len(part)>>8), byte(len(part))
+		hasher.Write(length[:])
+		hasher.Write([]byte(part))
+	}
+	digest := hasher.Sum(nil)
+	binding := enrollment.BootstrapBinding{
+		ProtocolVersion: enrollment.BootstrapProtocolVersion, AttemptID: draftID,
+		SourcePrimaryInstallationID: envelope.Transient.SourcePrimaryID.String(),
+		TargetInstallationID:        local.InstallationID.String(), TargetNodeID: local.NodeID.String(),
+		LeadershipGeneration: uint64(envelope.Transient.LeadershipGeneration), VerifiedPreviewDigest: digest,
+	}
+	return binding, syncpublication.ExchangeRequest{
+		AttemptID: binding.AttemptID, InstallationID: binding.TargetInstallationID, NodeID: binding.TargetNodeID,
+		RecipientPublicKey: json.RawMessage(wire), PreviewDigest: hex.EncodeToString(digest),
+		PrimaryInstallationID: binding.SourcePrimaryInstallationID, LeadershipGeneration: binding.LeadershipGeneration,
+	}, true
+}
+
+// writeExchangeFailure maps a transport outcome to a generic response. The
+// error text is never forwarded: it may be attacker-influenced. A definitive
+// denial means the token is dead, so it is dropped from memory immediately.
+func (h *enrollmentWorkflowHandler) writeExchangeFailure(w http.ResponseWriter, draftID string, err error) {
+	var limited *syncpublication.ExchangeRateLimitedError
+	switch {
+	case errors.As(err, &limited):
+		if seconds := int64(limited.RetryAfter / time.Second); seconds > 0 {
+			w.Header().Set("Retry-After", strconv.FormatInt(seconds, 10))
+		}
+		writeIdentityProofError(w, http.StatusTooManyRequests, "enrollment rate limited")
+	case errors.Is(err, syncpublication.ErrExchangeRateLimited):
+		writeIdentityProofError(w, http.StatusTooManyRequests, "enrollment rate limited")
+	case errors.Is(err, syncpublication.ErrExchangeUnavailable):
+		writeIdentityProofError(w, http.StatusServiceUnavailable, "enrollment workflow unavailable")
+	default: // denied, invalid and anything unknown fail closed
+		h.cache.DeleteByID(draftID)
+		writeIdentityProofError(w, http.StatusConflict, "enrollment grant denied")
+	}
 }
 
 func (h *enrollmentWorkflowHandler) handleRecover(w http.ResponseWriter, r *http.Request) {
@@ -269,9 +493,8 @@ func (h *enrollmentWorkflowHandler) handleRecover(w http.ResponseWriter, r *http
 	if !ok {
 		return
 	}
-	selector, secret, valid := parseHTTPEnrollmentToken(request.Token)
-	zeroBytes(secret)
-	if !valid || h.verifyToken == nil || h.verifyToken(r.Context(), request.Token) != nil || h.cache == nil {
+	selector, valid := h.acceptToken(r.Context(), request.Token)
+	if !valid || h.cache == nil {
 		writeIdentityProofError(w, http.StatusGone, "enrollment draft expired; re-enter the token")
 		return
 	}
@@ -283,7 +506,7 @@ func (h *enrollmentWorkflowHandler) handleRecover(w http.ResponseWriter, r *http
 	if !h.requireTLSAuthority(w, r, draft.PrimaryURL) {
 		return
 	}
-	if h.validator == nil || h.identity == nil || !h.validateEnvelope(r, draft.Envelope) {
+	if h.validator == nil || h.identity == nil || !h.validatePreviewEnvelope(r, draft.Envelope) {
 		writeIdentityProofError(w, http.StatusConflict, "enrollment preview unavailable")
 		return
 	}
@@ -295,11 +518,30 @@ func (h *enrollmentWorkflowHandler) handleRecover(w http.ResponseWriter, r *http
 	h.writePreview(w, http.StatusOK, draft, overlay)
 }
 
+// previewEnvelopeValidator is implemented by validators that can check a
+// snapshot for a read-only preview before the cluster KEK is available.
+type previewEnvelopeValidator interface {
+	ValidatePreview(context.Context, replicationsnapshot.Envelope) replicationsnapshot.ValidationResult
+}
+
 func (h *enrollmentWorkflowHandler) validateEnvelope(r *http.Request, envelope *replicationsnapshot.Envelope) bool {
+	return h.validate(r, envelope, false)
+}
+
+func (h *enrollmentWorkflowHandler) validatePreviewEnvelope(r *http.Request, envelope *replicationsnapshot.Envelope) bool {
+	return h.validate(r, envelope, true)
+}
+
+func (h *enrollmentWorkflowHandler) validate(r *http.Request, envelope *replicationsnapshot.Envelope, preview bool) bool {
 	if envelope == nil || h.validator == nil {
 		return false
 	}
-	result := h.validator.Validate(r.Context(), *envelope)
+	var result replicationsnapshot.ValidationResult
+	if previewer, ok := h.validator.(previewEnvelopeValidator); ok && preview {
+		result = previewer.ValidatePreview(r.Context(), *envelope)
+	} else {
+		result = h.validator.Validate(r.Context(), *envelope)
+	}
 	return result.OK && len(result.Issues) == 0
 }
 
@@ -359,6 +601,26 @@ func newEnvelopePreview(envelope *replicationsnapshot.Envelope, overlay enrollme
 		preview.ClusterKeyID = envelope.NodeLocal.ClusterKeyRef.String()
 	}
 	return preview
+}
+
+// acceptToken validates the token shape and returns its selector. The token is
+// minted and owned by the primary, so on the owner-session main API (trusted
+// transport) the node never consults its own token store: it forwards the token
+// and the primary verifies and consumes it. The dedicated unauthenticated
+// listener keeps requiring a locally verifiable token as its only gate.
+func (h *enrollmentWorkflowHandler) acceptToken(ctx context.Context, token string) (string, bool) {
+	selector, secret, valid := parseHTTPEnrollmentToken(token)
+	zeroBytes(secret)
+	if !valid {
+		return "", false
+	}
+	if h.trustedTransport {
+		return selector, true
+	}
+	if h.verifyToken == nil || h.verifyToken(ctx, token) != nil {
+		return "", false
+	}
+	return selector, true
 }
 
 func (h *enrollmentWorkflowHandler) requireTLSAuthority(w http.ResponseWriter, r *http.Request, primaryURL string) bool {

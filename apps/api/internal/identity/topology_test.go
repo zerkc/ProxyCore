@@ -224,3 +224,43 @@ func TestStalePrimaryStillBlocksWritesAfterObservingNewerGeneration(t *testing.T
 		t.Fatalf("expected stale-primary write block, identity=%+v", svc.Current())
 	}
 }
+
+func TestPromoteMintsClusterKeyAfterCommit(t *testing.T) {
+	svc, store := newTopologyService(t, domain.TopologyRoleNode, 4)
+	minted := uuid.New()
+	calls := 0
+	svc.SetClusterKeyProvisioner(func(context.Context) (uuid.UUID, error) {
+		calls++
+		return minted, nil
+	})
+	result, err := svc.Promote(context.Background(), PromoteOptions{})
+	if err != nil {
+		t.Fatalf("Promote: %v", err)
+	}
+	if calls != 1 || result.ClusterKeyErr != nil {
+		t.Fatalf("provisioner calls=%d err=%v", calls, result.ClusterKeyErr)
+	}
+	if result.Identity.ClusterKeyID == nil || *result.Identity.ClusterKeyID != minted ||
+		svc.Current().ClusterKeyID == nil || *svc.Current().ClusterKeyID != minted {
+		t.Fatalf("cluster key not minted: result=%+v cache=%+v", result.Identity, svc.Current())
+	}
+	if store.current.ClusterKeyID == nil || *store.current.ClusterKeyID != minted {
+		t.Fatalf("cluster key not persisted: %+v", store.current)
+	}
+}
+
+func TestPromoteSurvivesClusterKeyProvisionFailure(t *testing.T) {
+	svc, _ := newTopologyService(t, domain.TopologyRoleNode, 4)
+	boom := errors.New("keystore unavailable")
+	svc.SetClusterKeyProvisioner(func(context.Context) (uuid.UUID, error) { return uuid.Nil, boom })
+	result, err := svc.Promote(context.Background(), PromoteOptions{})
+	if err != nil {
+		t.Fatalf("a key failure must not fail the promote: %v", err)
+	}
+	if !errors.Is(result.ClusterKeyErr, boom) {
+		t.Fatalf("ClusterKeyErr=%v, want %v", result.ClusterKeyErr, boom)
+	}
+	if got := svc.Current(); got.Role != domain.TopologyRolePrimary || got.LeadershipGeneration != 5 || got.ClusterKeyID != nil {
+		t.Fatalf("promote rolled back or key set: %+v", got)
+	}
+}

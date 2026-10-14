@@ -1,10 +1,12 @@
 package httpserver
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
+	"time"
 
 	"github.com/zerkc/ProxyCore/apps/api/internal/auth"
 	"github.com/zerkc/ProxyCore/apps/api/internal/domain"
@@ -16,6 +18,11 @@ const (
 	TopologyDemotePath  = "/api/topology/demote"
 
 	maxTopologyBody = 4 << 10
+
+	// promotePublicationAttempts bounds the best-effort enqueue of the apply
+	// that publishes the promoted node's configuration as a snapshot.
+	promotePublicationAttempts     = 3
+	promotePublicationRetryBackoff = 100 * time.Millisecond
 
 	splitBrainWarningCode    = "SPLIT_BRAIN_RISK"
 	splitBrainWarningMessage = "This installation is now PRIMARY at a higher leadership generation. " +
@@ -77,6 +84,8 @@ func (s *Server) handleTopologyPromote(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	// Read the sync state first: promotion clears the node's sync binding.
+	syncWarning := s.promoteSyncWarning(r.Context())
 	result, err := svc.Promote(r.Context(), identity.PromoteOptions{
 		ActorUserID:        user.ID,
 		ExpectedGeneration: request.expectedGeneration(),
@@ -85,7 +94,7 @@ func (s *Server) handleTopologyPromote(w http.ResponseWriter, r *http.Request) {
 		s.writeTopologyError(w, "promote", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	response := map[string]any{
 		"ok":                 true,
 		"identity":           s.publicIdentity(),
 		"previousRole":       string(result.PreviousRole),
@@ -96,7 +105,50 @@ func (s *Server) handleTopologyPromote(w http.ResponseWriter, r *http.Request) {
 			"code":    splitBrainWarningCode,
 			"message": splitBrainWarningMessage,
 		},
-	})
+	}
+	if syncWarning != nil {
+		response["syncWarning"] = syncWarning
+	}
+	if result.ClusterKeyErr != nil {
+		// The key is then minted on first use; publication below keeps retrying.
+		s.log.Printf("topology promote: cluster key deferred: %v", result.ClusterKeyErr)
+	}
+	response["publication"] = s.enqueuePromotePublication(r.Context(), user.ID)
+	writeJSON(w, http.StatusOK, response)
+}
+
+// enqueuePromotePublication enqueues an apply of the node's current
+// configuration so the canonical publication pipeline publishes it as the
+// snapshot of the new generation (the node's desired state equals what it last
+// applied). It is best effort with a short bounded retry: a failure never
+// undoes the promote, it is logged and reported in the response, and the next
+// ordinary apply publishes anyway.
+func (s *Server) enqueuePromotePublication(ctx context.Context, actorID string) map[string]any {
+	if s.config == nil {
+		return map[string]any{"status": "unavailable"}
+	}
+	var lastErr error
+	for attempt := 1; attempt <= promotePublicationAttempts; attempt++ {
+		apply, err := s.config.CreateApplyJob(ctx, actorID)
+		if err == nil {
+			return map[string]any{"status": "queued", "applyJobId": apply.Job.ID}
+		}
+		lastErr = err
+		if attempt == promotePublicationAttempts {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			attempt = promotePublicationAttempts
+		case <-time.After(time.Duration(attempt) * promotePublicationRetryBackoff):
+		}
+	}
+	s.log.Printf("topology promote: snapshot publication was not enqueued: %v", lastErr)
+	return map[string]any{
+		"status":  "failed",
+		"code":    "PUBLICATION_ENQUEUE_FAILED",
+		"message": "The promotion succeeded but the configuration snapshot was not queued for publication; apply the configuration to publish it.",
+	}
 }
 
 // handleTopologyDemote converts PRIMARY into NODE after revoking the

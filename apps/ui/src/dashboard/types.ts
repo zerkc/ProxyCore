@@ -101,3 +101,19 @@ export type UpdatePayload = {
   updateInProgress: boolean;
   targetVersion?: string;
 };
+
+export type TopologySyncStatus = {
+  role: string;
+  bound: boolean;
+  appliedHash?: string;
+  primaryHash?: string;
+  outdated: boolean;
+  lastSyncAt?: string;
+  lastAttemptAt?: string;
+  lastError?: string;
+  nextAttemptAt?: string;
+  consecutiveFailures: number;
+  acknowledged: boolean;
+};
+
+export type TopologySyncWarningCode = "NODE_OUTDATED" | "NODE_NEVER_SYNCED" | "NODE_SYNC_UNVERIFIED";

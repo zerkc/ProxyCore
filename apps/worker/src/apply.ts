@@ -263,6 +263,13 @@ export class ApplyOrchestrator {
   }
 }
 
+// desiredSnapshotForApply unwraps the replication envelope. A node renders a
+// near-exact copy of the primary with one exception: its own ingress. The
+// envelope's nodeLocal.ingress is authoritative on the receiving installation
+// (the API importer rewrites it with the node's own address), so it replaces
+// settings.ingress here, and proxied domains answer THIS installation's IP.
+// The substitution happens at render time, not in the stored envelope, so the
+// primary's contentHash and the revision checksum stay verifiable.
 function desiredSnapshotForApply(
   snapshot: ConfigurationSnapshot,
 ): ConfigurationSnapshot {
@@ -270,9 +277,26 @@ function desiredSnapshotForApply(
   const replicated = (snapshot as { replicated?: unknown }).replicated;
   if (!replicated || typeof replicated !== "object") return snapshot;
   const configuration = (replicated as { configuration?: unknown }).configuration;
-  return configuration && typeof configuration === "object"
-    ? (configuration as ConfigurationSnapshot)
-    : snapshot;
+  if (!configuration || typeof configuration !== "object") return snapshot;
+  const desired = configuration as ConfigurationSnapshot;
+  const local = (snapshot as { nodeLocal?: { ingress?: unknown } }).nodeLocal
+    ?.ingress as { ipv4?: unknown; ipv6?: unknown } | undefined;
+  const ipv4 = typeof local?.ipv4 === "string" && local.ipv4 ? local.ipv4 : undefined;
+  const ipv6 = typeof local?.ipv6 === "string" && local.ipv6 ? local.ipv6 : undefined;
+  const settings = (desired as { settings?: unknown }).settings;
+  if ((!ipv4 && !ipv6) || !settings || typeof settings !== "object") {
+    return desired;
+  }
+  return {
+    ...desired,
+    settings: {
+      ...(settings as object),
+      ingress: {
+        ...(ipv4 ? { ipv4 } : {}),
+        ...(ipv6 ? { ipv6 } : {}),
+      },
+    },
+  } as ConfigurationSnapshot;
 }
 
 function hasNginxDrift(response: ControlResponse): boolean {

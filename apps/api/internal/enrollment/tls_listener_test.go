@@ -2,6 +2,7 @@ package enrollment_test
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"net"
 	"net/http"
@@ -129,4 +130,41 @@ func mustListen(t *testing.T) net.Listener {
 		t.Fatal(err)
 	}
 	return listener
+}
+
+// The node's snapshot client is HTTP/2-only (ALPN "h2"), so the dedicated
+// listener must negotiate h2 while keeping TLS 1.3 as the floor.
+func TestEnrollmentTLSServerNegotiatesHTTP2OverTLS13(t *testing.T) {
+	fixture := newProviderFixture(t)
+	provider, err := enrollment.NewTLSCertificateProvider(fixture.material(fixture.first, fixture.ca.CertificatePEM))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln := mustListen(t)
+	server, err := enrollment.NewEnrollmentTLSServer(ln, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}), provider)
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = server.Serve() }()
+	t.Cleanup(func() { _ = server.Shutdown(context.Background()) })
+
+	transport := &http.Transport{
+		ForceAttemptHTTP2: true,
+		TLSClientConfig: &tls.Config{
+			MinVersion:         tls.VersionTLS13,
+			NextProtos:         []string{"h2"},
+			InsecureSkipVerify: true, // protocol negotiation only; trust is covered elsewhere
+		},
+	}
+	defer transport.CloseIdleConnections()
+	resp, err := (&http.Client{Transport: transport}).Get("https://" + ln.Addr().String() + "/")
+	if err != nil {
+		t.Fatalf("h2-only client request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.ProtoMajor != 2 || resp.TLS == nil || resp.TLS.Version != tls.VersionTLS13 {
+		t.Fatalf("proto=%d tls=%v, want HTTP/2 over TLS 1.3", resp.ProtoMajor, resp.TLS)
+	}
 }

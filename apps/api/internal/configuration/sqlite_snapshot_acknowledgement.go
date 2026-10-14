@@ -130,6 +130,12 @@ func sqliteAckKeysNil(keys sqliteSnapshotAcknowledgementKeys) bool {
 	return false
 }
 
+// The grant exchange never writes enrollment_attempts (that table belongs to the
+// node-side enrollment), so the credential's cluster key lineage is the key that
+// live when the credential was minted. That is the active key, provided no key
+// was retired after the credential was created (a rotation since enrollment
+// invalidates the lineage). Ordering by retirement, not by creation, keeps the
+// check independent of clock skew between the service and the writer.
 type sqliteAckCredentialRecord struct {
 	primary    string
 	generation int64
@@ -141,12 +147,13 @@ func sqliteAckCredential(v sqlitedb.WriteValue, node string) (sqliteAckCredentia
 	var id, nodeID, hash, version string
 	var credentialRevoked, nodeRevoked, tokenRevoked, consumed sql.NullString
 	err := v.Conn().QueryRowContext(v.Context(), `select c.id,c.node_id,c.credential_hash,c.hash_version,
-  c.revoked_at,n.revoked_at,t.revoked_at,t.consumed_at,n.primary_id,g.primary_generation,a.cluster_key_id
+  c.revoked_at,n.revoked_at,t.revoked_at,t.consumed_at,n.primary_id,g.primary_generation,
+  case when exists(select 1 from cluster_keys r where r.retired_at is not null and r.retired_at>c.created_at) then null
+   else (select k.id from cluster_keys k where k.retired_at is null order by k.created_at desc,k.id limit 1) end
   from node_credentials c
   join enrolled_nodes n on n.credential_id=c.id and n.node_id=c.node_id
   join enrollment_grants g on g.attempt_id=n.created_by_attempt_id and
    g.node_id=n.node_id and g.installation_id=n.installation_id and g.primary_id=n.primary_id
-  join enrollment_attempts a on a.id=g.attempt_id
   join enrollment_tokens t on t.id=g.token_id
   where c.node_id=?`, node).Scan(&id, &nodeID, &hash, &version,
 		&credentialRevoked, &nodeRevoked, &tokenRevoked, &consumed, &record.primary, &record.generation, &record.lineage)

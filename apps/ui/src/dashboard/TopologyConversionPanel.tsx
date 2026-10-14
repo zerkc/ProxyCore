@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { ApiError, demoteTopology, promoteTopology, TopologyApiError } from "../api";
+import { getTopologySync, promoteSyncWarning } from "./topologySync";
 import type { TopologyIdentity } from "./types";
 
 type Direction = "promote" | "demote";
@@ -24,6 +25,8 @@ export function TopologyConversionPanel({
   const [confirming, setConfirming] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [syncWarning, setSyncWarning] = useState<string | undefined>();
+  const [syncAcknowledged, setSyncAcknowledged] = useState(false);
   const direction = conversionDirection(identity);
 
   useEffect(() => {
@@ -34,6 +37,18 @@ export function TopologyConversionPanel({
     setConfirming(false);
     setError("");
   }, [direction]);
+
+  useEffect(() => {
+    setSyncWarning(undefined);
+    setSyncAcknowledged(false);
+    if (!confirming || direction !== "promote") return undefined;
+    const controller = new AbortController();
+    void getTopologySync(controller.signal)
+      .then((status) => promoteSyncWarning(status))
+      .catch(() => promoteSyncWarning("unverified"))
+      .then((warning) => { if (!controller.signal.aborted) setSyncWarning(warning); });
+    return () => controller.abort();
+  }, [confirming, direction]);
 
   if (!direction || !identity) return null;
   const promote = direction === "promote";
@@ -98,8 +113,16 @@ export function TopologyConversionPanel({
               <li>You will be asked for an enrollment token and PRIMARY URL next.</li>
             </ul>
           )}
+          {promote && syncWarning ? (
+            <div className="space-y-3 border-l-2 border-signal/70 pl-3" data-testid="topology-sync-warning">
+              <p className="text-sm leading-6 text-mist" role="alert">{syncWarning}</p>
+              <button type="button" className="pc-btn-ghost" data-testid="topology-sync-ack" aria-pressed={syncAcknowledged} onClick={() => setSyncAcknowledged((value) => !value)}>
+                {syncAcknowledged ? "Acknowledged: promote without a verified sync" : "I understand, promote without a verified sync"}
+              </button>
+            </div>
+          ) : null}
           <div className="flex flex-wrap gap-2">
-            <button type="button" className="pc-btn" data-testid="topology-confirm" disabled={busy} onClick={() => void submit()}>
+            <button type="button" className="pc-btn" data-testid="topology-confirm" disabled={busy || (promote && Boolean(syncWarning) && !syncAcknowledged)} onClick={() => void submit()}>
               {busy ? "Converting…" : promote ? "Confirm promotion to PRIMARY" : "Confirm conversion to NODE"}
             </button>
             <button type="button" className="pc-btn-ghost" data-testid="topology-cancel" disabled={busy} onClick={() => setConfirming(false)}>

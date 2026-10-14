@@ -11,14 +11,10 @@ import (
 )
 
 func TestTypedNilStoresKeepNilSemantics(t *testing.T) {
-	// A bootstrapped standalone identity is role-eligible, so buildNodeConverter
-	// only returns nil here because of the store guard.
+	// buildNodeConverter only returns nil here because of the store guard.
 	identitySvc := identity.NewService(&startupIdentityStore{})
 	if _, _, err := identitySvc.EnsureBootstrapped(context.Background()); err != nil {
 		t.Fatalf("bootstrap identity: %v", err)
-	}
-	if !nodeConverterRoleEligible(identitySvc) {
-		t.Fatal("test identity must be role-eligible to reach the store check")
 	}
 	if got := buildNodeConverter(true, (*configuration.SQLitePhase2Store)(nil), identitySvc, nil); got != nil {
 		t.Fatal("buildNodeConverter built a converter from a typed-nil store")

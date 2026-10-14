@@ -8,6 +8,7 @@ import { VersionStatus } from "./VersionStatus";
 import { deriveBarState } from "./patch-bar-state";
 import { EnrollmentTokenPanel } from "./EnrollmentTokenPanel";
 import { NodeContinuityView } from "./NodeContinuityView";
+import { NodeSyncStatus } from "./NodeSyncStatus";
 import { TopologyConversionPanel } from "./TopologyConversionPanel";
 import type { TopologyIdentity } from "./types";
 
@@ -330,6 +331,7 @@ export default function DashboardShell({ children }: { children: ReactNode }) {
                 {surface === "error" ? null : nodeOnly ? (
                   <>
                     <NodeContinuityView key={identityTuple} />
+                    <NodeSyncStatus role={identity?.role} />
                     <TopologyConversionPanel identity={identity} onConverted={refresh} />
                   </>
                 ) : (
@@ -337,6 +339,9 @@ export default function DashboardShell({ children }: { children: ReactNode }) {
                     {children}
                     {current.id === "continuity" && identity ? (
                       <EnrollmentTokenPanel identity={identity} />
+                    ) : null}
+                    {current.id === "continuity" && identity ? (
+                      <NodeSyncStatus role={identity.role} />
                     ) : null}
                     {current.id === "continuity" && identity ? (
                       <TopologyConversionPanel identity={identity} onConverted={refresh} />

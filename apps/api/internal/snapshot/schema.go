@@ -19,6 +19,7 @@ package snapshot
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -36,6 +37,10 @@ type ReplicatedSecret struct {
 	ID       uuid.UUID `json:"id"`
 	Purpose  string    `json:"purpose"`
 	Envelope string    `json:"envelope"`
+	// Digest is a keyed HMAC of the plaintext (see cluster.KEK.SecretDigest).
+	// Hash definition v3 covers it instead of Envelope, whose random nonce
+	// changes on every export. Absent on legacy (v1/v2) envelopes.
+	Digest string `json:"digest,omitempty"`
 }
 
 // ReplicatedOwner carries the durable admin identity that all nodes must
@@ -86,7 +91,24 @@ type Envelope struct {
 	NodeLocal   NodeLocalFields `json:"nodeLocal"`
 	Replicated  ReplicatedFields `json:"replicated"`
 	ContentHash string         `json:"contentHash"`
+	// HashVersion selects the content-hash definition. Absent (0) or 1 is the
+	// legacy definition that covers settings.ingress; 2 excludes the ingress
+	// so installations with identical configuration but different ingress
+	// addresses share a hash. The marker itself is never hashed.
+	HashVersion int `json:"hashVersion,omitempty"`
 }
+
+const (
+	// HashVersionLegacy is the original definition (ingress included).
+	HashVersionLegacy = 1
+	// HashVersionIngressExcluded excludes settings.ingress from the hash.
+	HashVersionIngressExcluded = 2
+	// HashVersionStableSecrets additionally replaces each secret's envelope by
+	// its stable digest, so re-wrapping a secret does not change the hash.
+	HashVersionStableSecrets = 3
+	// HashVersionCurrent is stamped on every newly built envelope.
+	HashVersionCurrent = HashVersionStableSecrets
+)
 
 // ClassificationError is returned when a snapshot places an
 // authoritative-local field inside the replicated payload or vice versa.
@@ -127,7 +149,22 @@ func (e *Envelope) ExpectedHash() (string, error) {
 	if err := e.validateClassification(); err != nil {
 		return "", err
 	}
-	canonical := canonicalizeReplicated(e.Replicated)
+	var canonical []byte
+	switch e.HashVersion {
+	case 0, HashVersionLegacy:
+		canonical = canonicalizeReplicated(e.Replicated)
+	case HashVersionIngressExcluded:
+		canonical = canonicalizeReplicatedWithoutIngress(e.Replicated)
+	case HashVersionStableSecrets:
+		for _, secret := range e.Replicated.Secrets {
+			if secret.Digest == "" {
+				return "", fmt.Errorf("hashVersion %d requires a digest on secret %s", HashVersionStableSecrets, secret.ID)
+			}
+		}
+		canonical = canonicalizeReplicatedStableSecrets(e.Replicated)
+	default:
+		return "", fmt.Errorf("unsupported snapshot hashVersion %d", e.HashVersion)
+	}
 	sum := sha256.Sum256(canonical)
 	return hex.EncodeToString(sum[:]), nil
 }
@@ -172,4 +209,45 @@ func (e *Envelope) Validate() error {
 // bytes are then ready to be hashed.
 func canonicalizeReplicated(r ReplicatedFields) []byte {
 	return []byte(domain.StableStringify(r))
+}
+
+// canonicalizeReplicatedWithoutIngress is the v2 definition: identical to the
+// legacy one except configuration.settings.ingress is removed before hashing.
+func canonicalizeReplicatedWithoutIngress(r ReplicatedFields) []byte {
+	return canonicalizeReplicatedTree(r, false)
+}
+
+// canonicalizeReplicatedStableSecrets is the v3 definition: v2 with every
+// secret's random-nonce envelope removed (id, purpose and digest remain). The
+// digest is mandatory in v3 (ExpectedHash rejects a secret without one) and the
+// importer verifies it against the unwrapped plaintext, which is what binds
+// the value to the hash.
+func canonicalizeReplicatedStableSecrets(r ReplicatedFields) []byte {
+	return canonicalizeReplicatedTree(r, true)
+}
+
+func canonicalizeReplicatedTree(r ReplicatedFields, stableSecrets bool) []byte {
+	raw, err := json.Marshal(r)
+	if err != nil {
+		return []byte(domain.StableStringify(r))
+	}
+	var tree map[string]any
+	if err := json.Unmarshal(raw, &tree); err != nil {
+		return []byte(domain.StableStringify(r))
+	}
+	if cfg, ok := tree["configuration"].(map[string]any); ok {
+		if settings, ok := cfg["settings"].(map[string]any); ok {
+			delete(settings, "ingress")
+		}
+	}
+	if stableSecrets {
+		if list, ok := tree["secrets"].([]any); ok {
+			for _, item := range list {
+				if secret, ok := item.(map[string]any); ok {
+					delete(secret, "envelope")
+				}
+			}
+		}
+	}
+	return []byte(domain.StableStringify(tree))
 }

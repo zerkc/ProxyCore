@@ -62,6 +62,26 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+describe("NodeContinuityView PRIMARY URL guidance", () => {
+  it("documents the URL format and maps a 400 draft error to the format hint", async () => {
+    queueFetch(jsonResponse({ error: "token-missing" }, 410), jsonResponse({ error: "invalid enrollment draft request" }, 400));
+    const container = await mount(view());
+
+    expect(element(container, "node-primary-url").getAttribute("placeholder")).toContain(":3443/");
+    expect(element(container, "node-primary-url-help").textContent).toContain("https://<host>:<port>/");
+
+    setValue(element(container, "node-enrollment-token"), plaintext);
+    setValue(element(container, "node-primary-url"), "https://primary.example");
+    await settle();
+    await act(async () => {
+      element(container, "node-enrollment-form").dispatchEvent(new TestEvent("submit", { bubbles: true, cancelable: true }));
+      await settle();
+    });
+
+    expect(byRole(container, "alert")[0]!.textContent).toContain("https://<host>:<port>/");
+  });
+});
+
 describe("NodeContinuityView", () => {
   it("renders a recoverable token-missing prompt after reload recovery", async () => {
     queueFetch(jsonResponse({ error: "token detail must not be shown" }, 410));

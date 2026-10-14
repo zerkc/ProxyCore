@@ -9,10 +9,13 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/google/uuid"
 
 	"github.com/zerkc/ProxyCore/apps/api/internal/cluster"
 	"github.com/zerkc/ProxyCore/apps/api/internal/config"
@@ -138,9 +141,42 @@ func runServerWithNodeConverter(ctx context.Context, cfg config.Config, logger *
 	})
 	nodeConverter = buildNodeConverter(enableNodeConverter, stack.phase2, identitySvc, logger)
 	if nodeConverter != nil {
-		logger.Printf("node converter ready for role=%s", identityResult.Role)
+		logger.Printf("node converter ready (role eligibility is checked per confirm); current role=%s", identityResult.Role)
 	}
 	options = append(options, stack.backupOptions(cfg)...)
+
+	// Continuous sync: a NODE keeps pulling its primary's snapshots. The loop
+	// is inert on every other role and when the installation has no binding.
+	nodeSyncStore := configuration.NewSQLiteNodeSyncStore(stack.writer)
+	nodeSyncInterval := nodeSyncIntervalFromEnv()
+	var nodeSyncer *syncpublication.NodeSyncer
+	if localKEKLoader != nil && stack.keys != nil && stack.db != nil && cfg.MasterKeyBase64 != "" {
+		credentialReader := enrollment.NewBootstrapAcceptor(enrollment.BootstrapAcceptorOptions{
+			DB: stack.db, Writer: stack.writer, Keys: stack.keys, MasterKeyBase64: cfg.MasterKeyBase64,
+		})
+		nodeSyncer = newNodeSyncer(nodeSyncDependencies{
+			Store:          nodeSyncStore,
+			Identity:       identitySvc,
+			Client:         snapshotClient,
+			Converter:      buildNodeConverter(true, stack.phase2, identitySvc, logger),
+			Validator:      httpserver.NewLocalKEKSnapshotValidator(localKEKLoader),
+			LoadCredential: credentialReader.LoadNodeCredentialSecret,
+			Ingress: func() domain.Ingress {
+				return domain.Ingress{IPv4: cfg.ProxyIngressIPv4, IPv6: cfg.ProxyIngressIPv6}
+			},
+			Interval: nodeSyncInterval,
+			Logger:   logger,
+		})
+	}
+	topologySync := httpserver.TopologySyncOptions{
+		LoadState:     nodeSyncStore.LoadNodeSyncState,
+		PublishedHash: stack.phase2.LatestPublishedContentHash,
+		Interval:      nodeSyncInterval,
+	}
+	if nodeSyncer != nil {
+		topologySync.Retry = nodeSyncer.Retry
+	}
+	options = append(options, httpserver.WithTopologySync(topologySync))
 
 	draftCache := enrollment.NewDraftCache(enrollment.DraftCacheOptions{})
 	var supervisor *enrollment.EnrollmentTLSSupervisor
@@ -148,9 +184,8 @@ func runServerWithNodeConverter(ctx context.Context, cfg config.Config, logger *
 	workflowReady := tlsStore != nil && identitySvc != nil
 	if workflowReady {
 		workflow = httpserver.EnrollmentWorkflowHandlerOptions{
-			Cache:     draftCache,
-			Converter: nodeConverter,
-			Identity:  localEnrollmentIdentityProvider(identitySvc),
+			Cache:    draftCache,
+			Identity: localEnrollmentIdentityProvider(identitySvc),
 			LocalIngress: func(context.Context) (domain.Ingress, error) {
 				return domain.Ingress{IPv4: cfg.ProxyIngressIPv4, IPv6: cfg.ProxyIngressIPv6}, nil
 			},
@@ -158,7 +193,14 @@ func runServerWithNodeConverter(ctx context.Context, cfg config.Config, logger *
 		if tokenAuthority != nil {
 			workflow.VerifyToken = tokenAuthority.Verify
 		}
+		if nodeConverter != nil { // never store a typed-nil converter in the interface
+			workflow.Converter = nodeConverter
+		}
 		wireEnrollmentWorkflowDependencies(&workflow, snapshotClient, localKEKLoader)
+		wireEnrollmentGrantExchange(&workflow, stack, cfg.MasterKeyBase64)
+		workflow.RecordSyncBinding = func(ctx context.Context, binding configuration.NodeSyncBinding, appliedHash string) error {
+			return nodeSyncStore.BindNodeSync(ctx, binding, appliedHash, time.Now().UTC())
+		}
 		options = append(options, httpserver.WithEnrollmentWorkflow(workflow))
 	}
 
@@ -185,14 +227,30 @@ func runServerWithNodeConverter(ctx context.Context, cfg config.Config, logger *
 		acknowledgementOptions := httpserver.EnrollmentSnapshotAcknowledgementHandlerOptions{
 			Store: phase2Store, Identity: identitySvc,
 		}
-		supervisor, err = newEnrollmentWorkflowTLSSupervisorWithHandlersAndAcknowledgement(cfg, identitySvc, tlsStore, workflow, logger, &publicationOptions, &snapshotByTokenOptions, &acknowledgementOptions)
+		// A missing grant store or an unusable service makes the route answer
+		// the same uniform denial instead of revealing installation state.
+		grantStore, _ := any(phase2Store).(configuration.PrimaryGrantStore)
+		grantExchangeOptions := httpserver.EnrollmentGrantExchangeHandlerOptions{
+			Issuer: enrollment.NewPrimaryService(grantStore, enrollment.PrimaryServiceOptions{
+				CredentialIssuer: nodeCredentialIssuer{},
+				Identity:         identitySvc,
+			}),
+			Now: time.Now,
+		}
+		supervisor, err = newEnrollmentWorkflowTLSSupervisorWithGrantExchange(cfg, identitySvc, tlsStore, workflow, logger, &publicationOptions, &snapshotByTokenOptions, &acknowledgementOptions, &grantExchangeOptions)
 		if err != nil {
 			logEnrollmentTLSFailure(logger, "supervisor unavailable")
 			supervisor = nil
 		}
 	}
 
-	workers := make([]func(context.Context), 0, 3)
+	workers := make([]func(context.Context), 0, 5)
+	if supervisor != nil {
+		identityWatch := &enrollmentTLSIdentityAdapter{service: identitySvc, logger: logger}
+		workers = append(workers, func(workerCtx context.Context) {
+			watchEnrollmentIdentity(workerCtx, identityWatch, supervisor.Trigger, enrollmentIdentityWatchInterval)
+		})
+	}
 	if renewalStore != nil {
 		workers = append(workers, func(workerCtx context.Context) {
 			// Ordinary renewal is gated by the live identity on every cycle and
@@ -214,6 +272,11 @@ func runServerWithNodeConverter(ctx context.Context, cfg config.Config, logger *
 		})
 		workers = append(workers, func(workerCtx context.Context) {
 			publicationProducer.Run(workerCtx)
+		})
+	}
+	if nodeSyncer != nil {
+		workers = append(workers, func(workerCtx context.Context) {
+			nodeSyncer.Run(workerCtx)
 		})
 	}
 	// Start the standalone-archive retention worker. Phase 1 introduces
@@ -461,13 +524,53 @@ func wireEnrollmentWorkflowDependencies(workflow *httpserver.EnrollmentWorkflowH
 	}
 }
 
+// wireEnrollmentGrantExchange supplies confirm's grant exchange seams: the
+// node-side exchange client (same TLS 1.3 / h2-only transport constraints as
+// the snapshot client), the atomic KEK + credential acceptor and the KEK
+// read-back used for strict validation. Without a master key or key store the
+// seams stay nil and confirm answers 503.
+func wireEnrollmentGrantExchange(workflow *httpserver.EnrollmentWorkflowHandlerOptions, stack *sqliteStack, masterKeyBase64 string) {
+	if workflow == nil || stack == nil || stack.db == nil || stack.writer == nil || stack.keys == nil || masterKeyBase64 == "" {
+		return
+	}
+	client := syncpublication.NewExchangeClient(syncpublication.ExchangeClientOptions{})
+	acceptor := enrollment.NewBootstrapAcceptor(enrollment.BootstrapAcceptorOptions{
+		DB: stack.db, Writer: stack.writer, Keys: stack.keys, MasterKeyBase64: masterKeyBase64,
+	})
+	keys := stack.keys
+	workflow.ExchangeGrant = client.Exchange
+	workflow.AcceptGrant = acceptor.Accept
+	workflow.LoadClusterKEK = func(ctx context.Context, id uuid.UUID) (*cluster.KEK, error) {
+		material, err := keys.LoadActive(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		defer material.Destroy()
+		key := material.CopyBytes()
+		defer func() {
+			for i := range key {
+				key[i] = 0
+			}
+		}()
+		return cluster.NewKEK(key)
+	}
+}
+
+// nodeConverterEnabled reports whether NODE conversion is available. It is ON
+// by default; `--enable-node-converter=false` is the explicit opt-out. The last
+// occurrence wins, and an unparsable value fails closed to disabled.
 func nodeConverterEnabled(args []string) bool {
+	enabled := true
 	for _, arg := range args {
-		if arg == "--enable-node-converter" || arg == "--enable-node-converter=true" {
-			return true
+		switch {
+		case arg == "--enable-node-converter":
+			enabled = true
+		case strings.HasPrefix(arg, "--enable-node-converter="):
+			value, err := strconv.ParseBool(strings.TrimPrefix(arg, "--enable-node-converter="))
+			enabled = err == nil && value
 		}
 	}
-	return false
+	return enabled
 }
 
 func buildNodeConverter(enabled bool, configStore nodeConverterStore, identitySvc *identity.Service, logger *log.Logger) *enrollment.NodeConverter {
@@ -475,7 +578,7 @@ func buildNodeConverter(enabled bool, configStore nodeConverterStore, identitySv
 	if concrete, ok := configStore.(*configuration.SQLitePhase2Store); ok && concrete == nil {
 		configStore = nil
 	}
-	if !enabled || configStore == nil || identitySvc == nil || !nodeConverterRoleEligible(identitySvc) {
+	if !enabled || configStore == nil || identitySvc == nil {
 		return nil
 	}
 	logf := func(format string, args ...any) {}
@@ -491,16 +594,6 @@ func buildNodeConverter(enabled bool, configStore nodeConverterStore, identitySv
 		Logger:        logf,
 		Now:           time.Now,
 	})
-}
-
-func nodeConverterRoleEligible(service *identity.Service) (eligible bool) {
-	defer func() {
-		if recover() != nil {
-			eligible = false
-		}
-	}()
-	current := service.Current()
-	return current.Role == domain.TopologyRoleStandalone || current.Role == domain.TopologyRolePrimary
 }
 
 func localEnrollmentIdentityProvider(service *identity.Service) func(context.Context) (httpserver.EnrollmentLocalIdentity, error) {
@@ -625,6 +718,7 @@ type enrollmentWorkflowTLSListenerFactory struct {
 	publication     *httpserver.EnrollmentSnapshotPublicationHandlerOptions
 	snapshotByToken *httpserver.EnrollmentSnapshotByTokenHandlerOptions
 	acknowledgement *httpserver.EnrollmentSnapshotAcknowledgementHandlerOptions
+	grantExchange   *httpserver.EnrollmentGrantExchangeHandlerOptions
 }
 
 func newEnrollmentWorkflowTLSListenerFactory(identityCurrent enrollment.EnrollmentTLSIdentityCurrent, workflow httpserver.EnrollmentWorkflowHandlerOptions, logger *log.Logger) *enrollmentWorkflowTLSListenerFactory {
@@ -697,6 +791,11 @@ func (f *enrollmentWorkflowTLSListenerFactory) Listen(ctx context.Context, addre
 		acknowledgement := httpserver.NewEnrollmentSnapshotAcknowledgementHandler(acknowledgementOptions)
 		handler = httpserver.NewEnrollmentSnapshotAcknowledgementMux(acknowledgement, handler)
 	}
+	if f.grantExchange != nil {
+		exchangeOptions := *f.grantExchange
+		exchangeOptions.Certificate = certificate
+		handler = httpserver.NewEnrollmentGrantExchangeMux(httpserver.NewEnrollmentGrantExchangeHandler(exchangeOptions), handler)
+	}
 	server, err := f.newServer(listener, handler, provider)
 	if err != nil || server == nil {
 		_ = listener.Close()
@@ -720,16 +819,24 @@ func newEnrollmentWorkflowTLSSupervisorWithHandlers(cfg config.Config, identityS
 }
 
 func newEnrollmentWorkflowTLSSupervisorWithHandlersAndAcknowledgement(cfg config.Config, identityService *identity.Service, configStore enrollmentTLSConfigurationStore, workflow httpserver.EnrollmentWorkflowHandlerOptions, logger *log.Logger, publication *httpserver.EnrollmentSnapshotPublicationHandlerOptions, snapshotByToken *httpserver.EnrollmentSnapshotByTokenHandlerOptions, acknowledgement *httpserver.EnrollmentSnapshotAcknowledgementHandlerOptions) (*enrollment.EnrollmentTLSSupervisor, error) {
+	return newEnrollmentWorkflowTLSSupervisorWithGrantExchange(cfg, identityService, configStore, workflow, logger, publication, snapshotByToken, acknowledgement, nil)
+}
+
+func newEnrollmentWorkflowTLSSupervisorWithGrantExchange(cfg config.Config, identityService *identity.Service, configStore enrollmentTLSConfigurationStore, workflow httpserver.EnrollmentWorkflowHandlerOptions, logger *log.Logger, publication *httpserver.EnrollmentSnapshotPublicationHandlerOptions, snapshotByToken *httpserver.EnrollmentSnapshotByTokenHandlerOptions, acknowledgement *httpserver.EnrollmentSnapshotAcknowledgementHandlerOptions, grantExchange *httpserver.EnrollmentGrantExchangeHandlerOptions) (*enrollment.EnrollmentTLSSupervisor, error) {
 	identityCurrent := &enrollmentTLSIdentityAdapter{service: identityService, logger: logger}
 	configurationStore := &enrollmentTLSConfigurationAdapter{store: configStore, logger: logger}
 	factory := newEnrollmentWorkflowTLSListenerFactory(identityCurrent, workflow, logger)
 	factory.publication = publication
 	factory.snapshotByToken = snapshotByToken
 	factory.acknowledgement = acknowledgement
+	factory.grantExchange = grantExchange
 	return enrollment.NewEnrollmentTLSSupervisor(enrollment.EnrollmentTLSSupervisorOptions{
 		Identity:        identityCurrent,
 		Configuration:   configurationStore,
 		ListenerFactory: factory,
 		Address:         cfg.EnrollmentTLSAddr,
+		// Hostname or material changes are not identity changes, so poll them
+		// faster than the 30s default; identity flips wake the supervisor at once.
+		ReconcileInterval: enrollmentSupervisorReconcileInterval,
 	})
 }

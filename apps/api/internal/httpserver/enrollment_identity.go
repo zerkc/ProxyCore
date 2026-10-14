@@ -35,15 +35,25 @@ type EnrollmentLocalIdentity struct {
 }
 
 type EnrollmentWorkflowHandlerOptions struct {
-	Cache            *enrollment.DraftCache
-	VerifyToken      func(context.Context, string) error
-	FetchSnapshot    EnrollmentSnapshotFetcher
-	Validator        EnrollmentSnapshotValidator
-	Identity         func(context.Context) (EnrollmentLocalIdentity, error)
-	LocalIngress     func(context.Context) (domain.Ingress, error)
-	Converter        *enrollment.NodeConverter
-	ArchiveTTL       time.Duration
-	ApplyWaitTimeout time.Duration
+	Cache         *enrollment.DraftCache
+	VerifyToken   func(context.Context, string) error
+	FetchSnapshot EnrollmentSnapshotFetcher
+	Validator     EnrollmentSnapshotValidator
+	Identity      func(context.Context) (EnrollmentLocalIdentity, error)
+	LocalIngress  func(context.Context) (domain.Ingress, error)
+	Converter     EnrollmentNodeConverter
+	// ExchangeGrant, AcceptGrant and LoadClusterKEK are the confirm-time grant
+	// seams; confirm answers 503 when any is missing.
+	ExchangeGrant  EnrollmentGrantExchanger
+	AcceptGrant    EnrollmentGrantAcceptor
+	LoadClusterKEK EnrollmentClusterKEKLoader
+	// RecordSyncBinding persists where the primary is and which credential
+	// authenticates this node, so continuous sync can resume after a restart.
+	// appliedHash is the primary snapshot hash imported by this enrollment.
+	// Optional: when nil the node enrolls but never syncs.
+	RecordSyncBinding EnrollmentSyncBindingRecorder
+	ArchiveTTL        time.Duration
+	ApplyWaitTimeout  time.Duration
 }
 
 type enrollmentDraftRequest struct {

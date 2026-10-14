@@ -194,12 +194,12 @@ func TestRenewalIdentityProviderTracksLiveServiceRole(t *testing.T) {
 	}
 }
 
-func TestNodeConverterFlagIsExplicitAndOffByDefault(t *testing.T) {
-	if nodeConverterEnabled(nil) {
-		t.Fatal("node converter should be disabled without an explicit flag")
+func TestNodeConverterFlagIsOnByDefaultWithExplicitOptOut(t *testing.T) {
+	if !nodeConverterEnabled(nil) {
+		t.Fatal("node converter should be enabled by default")
 	}
-	if nodeConverterEnabled([]string{"--other"}) {
-		t.Fatal("unrelated flag enabled node converter")
+	if !nodeConverterEnabled([]string{"--other"}) {
+		t.Fatal("unrelated flag disabled node converter")
 	}
 	if !nodeConverterEnabled([]string{"--enable-node-converter"}) || !nodeConverterEnabled([]string{"--enable-node-converter=true"}) {
 		t.Fatal("explicit node converter flag was not recognized")
@@ -437,7 +437,7 @@ func TestEnrollmentWorkflowTLSListenerFactoryMountsAcknowledgementRoute(t *testi
 	}
 }
 
-func TestBuildNodeConverterRequiresFlagAndEligibleIdentity(t *testing.T) {
+func TestBuildNodeConverterRequiresFlagAndDependenciesOnly(t *testing.T) {
 	for _, test := range []struct {
 		name    string
 		role    domain.TopologyRole
@@ -447,8 +447,11 @@ func TestBuildNodeConverterRequiresFlagAndEligibleIdentity(t *testing.T) {
 		{name: "disabled standalone", role: domain.TopologyRoleStandalone, enabled: false, want: false},
 		{name: "enabled standalone", role: domain.TopologyRoleStandalone, enabled: true, want: true},
 		{name: "enabled primary", role: domain.TopologyRolePrimary, enabled: true, want: true},
-		{name: "node is not eligible", role: domain.TopologyRoleNode, enabled: true, want: false},
-		{name: "primary with nodes is not eligible", role: domain.TopologyRolePrimaryWithNodes, enabled: true, want: false},
+		// Role eligibility is a per-request confirm check, so a demoted
+		// installation can enroll without a restart; the converter itself is
+		// built regardless of the boot-time role when the flag is on.
+		{name: "node", role: domain.TopologyRoleNode, enabled: true, want: true},
+		{name: "primary with nodes", role: domain.TopologyRolePrimaryWithNodes, enabled: true, want: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			service, _, _, err := bootstrapIdentity(context.Background(), &startupIdentityStore{

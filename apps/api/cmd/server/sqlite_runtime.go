@@ -11,6 +11,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/zerkc/ProxyCore/apps/api/internal/auth"
 	"github.com/zerkc/ProxyCore/apps/api/internal/backupcore/dbimport"
 	"github.com/zerkc/ProxyCore/apps/api/internal/backupcore/httpexport"
@@ -109,6 +111,16 @@ func openSQLiteStack(ctx context.Context, cfg config.Config, logger *log.Logger)
 			stack.identityResult.LeadershipGeneration,
 		)
 	}
+	// A PRIMARY must own a cluster KEK before it can publish a snapshot or
+	// answer snapshot-by-token; mint it when enrollment is first activated.
+	stack.identity.SetClusterKeyProvisioner(func(provisionCtx context.Context) (uuid.UUID, error) {
+		material, err := keys.LoadOrCreate(provisionCtx, nil)
+		if err != nil {
+			return uuid.Nil, err
+		}
+		defer material.Destroy()
+		return material.ID, nil
+	})
 	stack.localKEKLoader = cluster.NewLocalKEKLoader(cluster.LocalKEKLoaderOptions{Keys: keys, Identity: stack.identity})
 	stack.tokenAuthority = httpserver.NewEnrollmentTokenAuthority(stack.phase2, stack.identity, httpserver.EnrollmentTokenAuthorityOptions{
 		List: sqliteEnrollmentTokenLister(stack.phase2),

@@ -443,3 +443,22 @@ func TestSQLiteSnapshotPublicationReadUnavailable(t *testing.T) {
 		t.Fatalf("closed database error=%v", err)
 	}
 }
+
+func TestSQLiteLatestPublishedContentHash(t *testing.T) {
+	f := newSQLitePublicationFixture(t)
+	if hash, ok, err := f.store.LatestPublishedContentHash(context.Background()); err != nil || ok || hash != "" {
+		t.Fatalf("empty store: hash=%q ok=%v err=%v", hash, ok, err)
+	}
+	body, hash := publicationEnvelopeBody(t, f.primaryID)
+	f.insertSnapshot(t, body, hash, true)
+	got, ok, err := f.store.LatestPublishedContentHash(context.Background())
+	if err != nil || !ok || got != hash {
+		t.Fatalf("hash=%q ok=%v err=%v, want %q", got, ok, err, hash)
+	}
+	// A newer candidate whose apply is not terminal is not publishable, and the
+	// publication never falls back to an older one (matches ReadSnapshotPublication).
+	f.insertRawBody(t, []byte(`{"pending":true}`), false)
+	if got, ok, err := f.store.LatestPublishedContentHash(context.Background()); err != nil || ok {
+		t.Fatalf("incomplete newest: hash=%q ok=%v err=%v", got, ok, err)
+	}
+}

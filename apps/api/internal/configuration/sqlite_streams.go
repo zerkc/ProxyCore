@@ -97,22 +97,8 @@ func (s *SQLiteStreamStore) AddStream(ctx context.Context, input domain.StreamRo
 				saved = item
 			}
 		}
-		upstream, err := json.Marshal(saved.Upstream)
-		if err != nil {
+		if err := sqliteUpsertStream(v, saved); err != nil {
 			return err
-		}
-		enabled := 0
-		if saved.Enabled {
-			enabled = 1
-		}
-		_, err = v.Conn().ExecContext(v.Context(), `insert into stream_routes
-			(id,enabled,protocol,listen_address,listen_port,upstream,created_at,updated_at)
-			values (?,?,?,?,?,?,?,?) on conflict(id) do update set
-			enabled=excluded.enabled,protocol=excluded.protocol,listen_address=excluded.listen_address,
-			listen_port=excluded.listen_port,upstream=excluded.upstream,updated_at=excluded.updated_at`,
-			saved.ID, enabled, saved.Protocol, saved.ListenAddress, saved.ListenPort, string(upstream), v.Timestamp(), v.Timestamp())
-		if err != nil {
-			return fmt.Errorf("add stream: %w", err)
 		}
 		return nil
 	})
@@ -120,6 +106,29 @@ func (s *SQLiteStreamStore) AddStream(ctx context.Context, input domain.StreamRo
 		return domain.StreamRoute{}, err
 	}
 	return saved, nil
+}
+
+// sqliteUpsertStream persists one already-validated route inside the caller's
+// writer transaction. Shared by AddStream and the snapshot import materializer.
+func sqliteUpsertStream(v sqlitedb.WriteValue, route domain.StreamRoute) error {
+	upstream, err := json.Marshal(route.Upstream)
+	if err != nil {
+		return err
+	}
+	enabled := 0
+	if route.Enabled {
+		enabled = 1
+	}
+	_, err = v.Conn().ExecContext(v.Context(), `insert into stream_routes
+		(id,enabled,protocol,listen_address,listen_port,upstream,created_at,updated_at)
+		values (?,?,?,?,?,?,?,?) on conflict(id) do update set
+		enabled=excluded.enabled,protocol=excluded.protocol,listen_address=excluded.listen_address,
+		listen_port=excluded.listen_port,upstream=excluded.upstream,updated_at=excluded.updated_at`,
+		route.ID, enabled, route.Protocol, route.ListenAddress, route.ListenPort, string(upstream), v.Timestamp(), v.Timestamp())
+	if err != nil {
+		return fmt.Errorf("add stream: %w", err)
+	}
+	return nil
 }
 
 func (s *SQLiteStreamStore) DeleteStream(ctx context.Context, id string) error {
