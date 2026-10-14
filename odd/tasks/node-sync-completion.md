@@ -1,0 +1,49 @@
+# Feature: node-sync-completion
+
+## Objective
+Close the gaps between the PRIMARY/NODE sync behavior and the product spec: NODE is read-only except update and promote, the join token is self-contained, a primary can unlink a node (and the node learns it safely), and the primary shows its nodes with their gateway IP and last report time.
+
+## Problem (audit evidence)
+- Update apply is blocked on NODE: `handleUpdateApply` uses `requireUser` (`apps/api/internal/httpserver/update_handlers.go:155`), which 403s any non-GET when not writable (`server.go:342-356`). The guard is per-handler (no middleware), so a new mutating route is writable by default. `backup/export` is also blocked though it is a read. `requireUser` runs an ingress side effect on every call including GETs (`server.go:357-362`).
+- Enrollment token `pcenr1_<selector>_<secret>` carries no primary URL or CA pin; join needs `primaryUrl` + `caPem` separately (`enrollment_workflow.go:217-275`).
+- No unlink: revoking only sets `revoked_at` on the token row (`sqlite_enrollment_tokens.go:157`); nothing revokes the node credential. A node sees only a generic `credential_rejected` string, no persisted state, no UI. `CanEnrollAsNode` (`identity/types.go:56-82`) blocks an unlinked NODE from re-enrolling.
+- Node liveness: `last_seen_at` columns exist but are never written; no node list API/UI.
+- SPKI pin on the exchange is optional (`exchange_client.go:93-112`).
+
+## Decisions (user-approved)
+- Unlink lives in a NEW primary-side Nodes view (nodes with gateway/ingress IP, last seen, unlink action). The earlier "token-bound unlink" idea is DISCARDED.
+- An unlinked node keeps its last config and keeps serving; it shows a banner offering re-link or convert to PRIMARY.
+- The unlink signal must be an explicit authoritative response from the primary; DB/startup errors never mark a node unlinked.
+- Defaults: heartbeat on every authenticated pull/ack; "down" threshold configurable; CA embedded in the token as SPKI hash; SPKI pin mandatory on join/sync.
+
+## Out of scope
+- mTLS / per-request signature+nonce (tracked as follow-up question; pin mandatory only).
+- Split-brain notification of the old primary on promote.
+
+## Constraints
+- English for code, UI copy, comments, tests. Conventional commits, no AI attribution lines in commits (user rule). One writer at a time.
+- Advisory ~400 authored changed lines per task. Test-first when a runnable deterministic test exists (Go `go test -short`, UI vitest from repo root).
+
+## Tasks
+- [x] T1 NODE read-only guard: allow update apply + backup export on NODE; remove ingress side effect on GET for NODE; central allowlist middleware (or equivalent) so new mutating routes default to blocked; route tests for NODE. Commit `4cb2bde` (+155/-11). Verified: go build, go vet, `go test -short ./internal/httpserver/` green (parent re-ran). RED observed on update apply; ingress-on-GET claim had no observable RED (fixture already initialized). Route: delegated direct (writer). Tier: not assessed (RDD review pending check).
+- [ ] T2 Unlink backend (primary): `POST` unlink node revokes its credential, sets node revoked/unlinked; sync endpoints answer explicitly (`410` + `NODE_UNLINKED`) for an unlinked node.
+- [ ] T3 Unlink node side: persisted `unlinked` state set ONLY on the explicit signal (never on DB/startup/network errors); allow re-enroll of an unlinked NODE (`CanEnrollAsNode`); status API exposes it.
+- [ ] T4 Heartbeat + nodes API: write `last_seen_at` on authenticated pull/ack; `GET` nodes list (id, status, ingress/gateway IP, last seen, linked-at).
+- [ ] T5 UI: primary Nodes view (list, gateway IP, last seen, offline badge, unlink with confirm) + node banner (re-link / convert to PRIMARY).
+- [ ] T6 Self-contained token: encode primary URL + SPKI pin + secret; join API/UI accept token only; backward-compatible decode of `pcenr1`; pin mandatory.
+- [ ] T7 Cleanup: delete revoked/expired tokens (`DELETE /api/enrollment/tokens/{id}`, owner-only) + UI button.
+
+## Authorized scope
+apps/api (httpserver, identity, enrollment, configuration, sync), apps/ui (dashboard, api client), docs/runbooks, tests. No dependency additions without asking.
+
+## Acceptance
+Each task: tests observed RED then GREEN where applicable, full affected package tests green, one work-unit commit on this branch.
+
+## Progress
+Branch `feat/node-sync-completion` created from `main` (0751555). No tasks done yet.
+
+## Route declaration
+Per task: delegated direct (one writer; 2+ non-trivial files each). Exploration for T1 from the audit (26 tool uses, path:line above).
+
+## Delivery
+Strategy: ask-on-risk. Forecast likely exceeds ~400 lines in total; will ask for chain strategy before the commit that crosses it.
