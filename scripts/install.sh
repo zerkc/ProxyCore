@@ -12,12 +12,28 @@
 #   ENROLLMENT_PORT    Published direct TLS enrollment port (default: 3443;
 #                      not Nginx proxy ingress)
 #   DNS_PORT           Published CoreDNS port (default: 53)
-#   SKIP_BUILD=1       Skip image rebuild (update config only)
+#   PROXYCORE_INSTALL_MODE
+#                      pull (default): download the prebuilt multi-arch images
+#                      from GHCR; nothing is compiled on the host.
+#                      build: build every image on this host (slow on small
+#                      hosts). Install-only: updates always pull images.
+#   PROXYCORE_VERSION  Image tag to pull (default: latest)
+#   PROXYCORE_IMAGE_REPO
+#                      Image registry/owner (default: ghcr.io/zerkc)
+#   SKIP_BUILD=1       Skip image pull/build entirely (update config only; the
+#                      name is kept for compatibility and applies to both modes)
+#   PROXYCORE_ALLOW_UNSUPPORTED_ARCH=1
+#                      Continue on a 32-bit ARM host although the bun-based
+#                      worker has no image for it (the install will not work)
 #   PROXYCORE_SKIP_MEMORY_CHECK=1
 #                      Silence the low-memory/swap warning shown before builds
 #   BUILDX_NO_DEFAULT_ATTESTATIONS
-#                      Defaults to 1 for the build phase (no provenance/SBOM
-#                      attestations); set it to 0 to keep them
+#                      Build mode only. Defaults to 1 for the build phase (no
+#                      provenance/SBOM attestations); set it to 0 to keep them
+#
+# Supported hosts: linux/amd64 and linux/arm64 (Raspberry Pi 3/4/5 with a 64-bit
+# OS). 32-bit ARM (armv7l/armv6l) and 32-bit x86 are refused: Bun, which the
+# worker/control runtime needs, publishes no 32-bit images.
 #
 # The script is idempotent: first run installs, later runs pull + recreate. The
 # api applies SQLite schema migrations on start. Installs that still hold a
@@ -36,6 +52,8 @@ ENROLLMENT_PORT="${ENROLLMENT_PORT-3443}"
 DNS_PORT="${DNS_PORT-53}"
 # Precedence is explicit process environment, then safe .env data, then defaults.
 SKIP_BUILD="${SKIP_BUILD:-0}"
+# pull (default) downloads prebuilt images; build compiles them on this host.
+INSTALL_MODE="${PROXYCORE_INSTALL_MODE:-pull}"
 # Images are built one at a time (never concurrently) so peak memory stays at a
 # single image build, which matters on 1 GB hosts. These are the services with
 # a build section in compose.yaml, excluding the profile-gated `migrate`. The
@@ -44,6 +62,10 @@ SKIP_BUILD="${SKIP_BUILD:-0}"
 # worker runtime images last. scripts/install.test.sh fails when this list
 # drifts from compose.yaml.
 BUILD_SERVICES="coredns nginx updater-bootstrap updater api worker"
+# Services pulled in pull mode (all images published to GHCR except the
+# profile-gated `migrate`, which compose pulls on first use). `control` shares
+# the worker's runtime image, so it is listed for clarity only.
+PULL_SERVICES="coredns nginx updater-bootstrap updater api worker control"
 # Low-memory guard thresholds, in kB (as reported by /proc/meminfo).
 LOW_MEMORY_KB=1572864
 LOW_SWAP_KB=1048576
@@ -450,6 +472,36 @@ verify_coredns_published() {
   die "CoreDNS is running but host port ${DNS_PORT} is not published (ports=${ports:-none})"
 }
 
+validate_install_mode() {
+  case "$INSTALL_MODE" in
+    pull|build) ;;
+    *) die "PROXYCORE_INSTALL_MODE must be 'pull' or 'build' (got '${INSTALL_MODE}')" ;;
+  esac
+}
+
+# Refuse hosts that have no usable image set. PROXYCORE_UNAME_M overrides
+# `uname -m` (used by tests).
+check_arch() {
+  host_arch="${PROXYCORE_UNAME_M:-$(uname -m)}"
+  case "$host_arch" in
+    x86_64|amd64|aarch64|arm64) return 0 ;;
+    armv7l|armv7|armv6l|armv6|armhf|arm)
+      if [ "${PROXYCORE_ALLOW_UNSUPPORTED_ARCH:-0}" = "1" ]; then
+        warn "32-bit ARM host (${host_arch}): the bun-based worker/control image is not published for it, so the stack will not start. Continuing because PROXYCORE_ALLOW_UNSUPPORTED_ARCH=1"
+        return 0
+      fi
+      die "32-bit ARM host (${host_arch}) is not supported: the bun-based worker is not available on 32-bit ARM. Reinstall a 64-bit OS (Raspberry Pi 3/4/5 support arm64) and run this installer again. Set PROXYCORE_ALLOW_UNSUPPORTED_ARCH=1 to continue anyway"
+      ;;
+    i386|i486|i586|i686)
+      die "32-bit x86 host (${host_arch}) is not supported; use a linux/amd64 or linux/arm64 host"
+      ;;
+    *)
+      warn "unrecognized architecture '${host_arch}'; published images cover linux/amd64 and linux/arm64 only"
+      return 0
+      ;;
+  esac
+}
+
 # Warn (never fail, never change the system) when the host is likely to be slow
 # or OOM-killed while building. Silent where /proc/meminfo does not exist.
 check_build_memory() {
@@ -487,9 +539,22 @@ build_services() {
   done
 }
 
+# Pull every published image. Nothing is compiled on the host.
+pull_services() {
+  # shellcheck disable=SC2086
+  if ! docker compose pull $PULL_SERVICES; then
+    die "image pull failed; nothing was started. Check network access to ghcr.io and PROXYCORE_VERSION/PROXYCORE_IMAGE_REPO, or build locally with PROXYCORE_INSTALL_MODE=build"
+  fi
+}
+
 deploy_stack() {
   if [ "$SKIP_BUILD" = "1" ]; then
-    log "Recreating services (no rebuild)"
+    log "Recreating services (no pull, no rebuild)"
+    docker compose up -d --remove-orphans
+  elif [ "$INSTALL_MODE" = "pull" ]; then
+    log "Pulling prebuilt images (${PROXYCORE_VERSION:-latest})"
+    pull_services
+    log "Starting services (nginx host network)"
     docker compose up -d --remove-orphans
   else
     check_build_memory
@@ -502,6 +567,8 @@ deploy_stack() {
 
 main() {
   validate_runtime_values
+  validate_install_mode
+  check_arch
 
   if [ -z "${PROXYCORE_HOME:-}" ]; then
     if [ "$(id -u)" -eq 0 ]; then

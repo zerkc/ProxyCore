@@ -22,38 +22,68 @@ Optional environment variables before `| sh`:
 | `PROXYCORE_BRANCH` | `main`                            | Git branch                          |
 | `WEB_PORT`         | `3000`                            | Control-plane port                  |
 | `DNS_PORT`         | `53`                              | CoreDNS publish port                |
-| `SKIP_BUILD`       | `0`                               | Set `1` to recreate without rebuild |
+| `PROXYCORE_INSTALL_MODE` | `pull`                      | `pull` downloads prebuilt images; `build` compiles them on the host |
+| `PROXYCORE_VERSION`      | `latest`                    | Image tag to pull (for example `0.5.4`) |
+| `PROXYCORE_IMAGE_REPO`   | `ghcr.io/zerkc`             | Registry/owner the images are pulled from |
+| `SKIP_BUILD`             | `0`                         | Set `1` to recreate without pulling or building |
 
-Re-run the same command to update: pull, rebuild/recreate. `.env` is
+Re-run the same command to update: pull images, recreate. `.env` is
 preserved. If the installer finds a legacy PostgreSQL volume and no SQLite
 database it stops without changing anything; follow
 [upgrade-from-postgres.md](upgrade-from-postgres.md).
 
+### Supported platforms
+
+Release images are multi-arch manifests on GHCR
+(`ghcr.io/zerkc/proxycore-<name>`), so Docker pulls the right variant itself.
+
+| Host architecture            | Status                                                                 |
+| ---------------------------- | ---------------------------------------------------------------------- |
+| linux/amd64 (x86_64)         | Fully supported                                                        |
+| linux/arm64 (aarch64)        | Fully supported (Raspberry Pi 3/4/5 with a 64-bit OS)                  |
+| linux/arm/v7 (armv7l, armv6l)| Not supported: api, nginx, coredns, updater and migrate images exist, but the bun-based worker/control runtime does not (Bun has no 32-bit ARM build). The installer refuses to run; use a 64-bit OS. |
+| linux/386 (i386, i686)       | Not supported; the installer refuses to run                            |
+
+`PROXYCORE_ALLOW_UNSUPPORTED_ARCH=1` lets the installer continue on 32-bit ARM,
+but the worker will not start there; it exists only for experiments.
+
+### Install modes
+
+- **pull (default)**: `docker compose pull` then `docker compose up -d`. No
+  compiler or build cache is needed on the host, and the install takes minutes
+  even on a Raspberry Pi. Pin a release with `PROXYCORE_VERSION=0.5.4`.
+- **build (opt-in)**: `PROXYCORE_INSTALL_MODE=build` builds every image on the
+  host, one at a time. It is install-only: dashboard updates always pull
+  images. Use it for local development or forks that do not publish images (set
+  `PROXYCORE_IMAGE_REPO` accordingly).
+
 ### Low-memory hosts (Raspberry Pi 3 B+ / 1 GB)
 
-The installer builds the images one at a time (`[n/N] building <service>` with the
-elapsed seconds after each one), then starts the stack. Peak memory stays at one
-image build, but the first build can still take a long time on a small host.
+In pull mode nothing is compiled on the device, so a small host needs no swap
+tuning for the install itself; this is the recommended path. The notes below only
+apply to `PROXYCORE_INSTALL_MODE=build`.
 
-- Add at least 1 GB of swap before installing. The installer only warns when RAM
+In build mode the installer builds the images one at a time (`[n/N] building <service>`
+with the elapsed seconds after each one), then starts the stack. Peak memory stays
+at one image build, but the first build can still take a long time on a small host.
+
+- Add at least 1 GB of swap before building. The installer only warns when RAM
   is below about 1.5 GB and swap below 1 GB; it never creates swap or uses sudo.
   Example: `sudo fallocate -l 1G /swapfile && sudo chmod 600 /swapfile && sudo mkswap /swapfile && sudo swapon /swapfile`
   (add the file to `/etc/fstab` to keep it after a reboot).
 - Prefer a USB SSD over an SD card for the Docker data directory and the swap file.
 - Set `PROXYCORE_SKIP_MEMORY_CHECK=1` to silence the warning.
-- `SKIP_BUILD=1` recreates the services without building anything.
-- Prebuilt multi-arch images are not published yet, so every install builds locally.
+- `SKIP_BUILD=1` recreates the services without pulling or building anything.
 - A failed build stops the installer and names the service; retry it with
   `docker compose build <service>` and run the installer again.
 
 ### Dashboard self-updates
 
-The dashboard update action uses the default local build mode. Before building,
-the updater fetches and checks out the requested `v<version>` tag in the managed
-checkout, then rebuilds the API and worker images from that source.
-Keep the checkout clean and allow the host to reach GitHub; an update stops
-before restarting services when tracked files have local changes or the target
-tag cannot be fetched.
+The dashboard update action always pulls the published images referenced by
+`compose.yaml` (`PROXYCORE_VERSION`, default `latest`) and recreates the
+services; no source is compiled and no source checkout is modified. Building
+from source is only available at install time (`PROXYCORE_INSTALL_MODE=build`).
+A leftover `PROXYCORE_UPDATE_MODE` value in `.env` is ignored.
 
 During an update the dashboard locks the page and keeps a full-screen progress
 dialog open through the service restart. Refresh the page only after the dialog
@@ -78,8 +108,11 @@ reports that the new version is live.
 
 ```sh
 docker compose config
-docker compose up -d --build
+docker compose pull
+docker compose up -d
 ```
+
+To build from source instead, run `docker compose up -d --build`.
 
 Open `/bootstrap` once and create the first Owner. The bootstrap endpoint must
 reject every later attempt.

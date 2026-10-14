@@ -1,5 +1,12 @@
 name: proxycore
 
+# Images: pull mode is the default. Every service resolves to a multi-arch image
+# on GHCR (ghcr.io/zerkc/proxycore-<name>:<version>). Override the registry with
+# PROXYCORE_IMAGE_REPO, the tag with PROXYCORE_VERSION (default latest), or one
+# image with PROXYCORE_<NAME>_IMAGE. Build mode (PROXYCORE_INSTALL_MODE=build)
+# uses the `build:` blocks below and tags the result with the same references,
+# so `up` finds the local image and never needs a registry.
+
 services:
   # Go control plane: SPA + auth + all configuration routes + ACME challenge.
   # The UI (static SPA) is bundled into the api image.
@@ -7,6 +14,7 @@ services:
     build:
       context: .
       dockerfile: infra/compose/Dockerfile.api
+    image: ${PROXYCORE_API_IMAGE:-${PROXYCORE_IMAGE_REPO:-ghcr.io/zerkc}/proxycore-api:${PROXYCORE_VERSION:-latest}}
     environment:
       PROXYCORE_API_ADDR: ":3000"
       # Enrollment TLS is direct from the API container, not Nginx proxy ingress.
@@ -47,7 +55,7 @@ services:
     networks: [control, data]
 
   # Self-update orchestrator. Reaches the docker socket + the compose project
-  # so it can build (local mode) or pull (registry mode), run the legacy-data
+  # so it can pull (registry mode, the default) or build (local mode), run the legacy-data
   # preflight, and restart
   # the application and Nginx recovery owners. When the update succeeds
   # it writes a bootstrap request to the shared volume; the updater-bootstrap
@@ -58,13 +66,10 @@ services:
     build:
       context: .
       dockerfile: infra/compose/Dockerfile.updater
-    # Set PROXYCORE_UPDATER_IMAGE to a registry tag in real deployments.
-    image: ${PROXYCORE_UPDATER_IMAGE:-proxycore-updater:local}
+    image: ${PROXYCORE_UPDATER_IMAGE:-${PROXYCORE_IMAGE_REPO:-ghcr.io/zerkc}/proxycore-updater:${PROXYCORE_VERSION:-latest}}
     environment:
       PROXYCORE_UPDATER_ADDR: ":8080"
-      PROXYCORE_UPDATE_MODE: ${PROXYCORE_UPDATE_MODE:-build}
       PROXYCORE_HOST_HOME: ${PROXYCORE_HOST_HOME:-${PWD}}
-      PROXYCORE_SOURCE_DIR: ${PROXYCORE_HOST_HOME:-${PWD}}
       PROXYCORE_COMPOSE_FILE: ${PROXYCORE_HOST_HOME:-${PWD}}/compose.yaml
       PROXYCORE_ENV_FILE: ${PROXYCORE_HOST_HOME:-${PWD}}/.env
       PROXYCORE_COMPOSE_PROJECT: ${COMPOSE_PROJECT_NAME:-proxycore}
@@ -97,15 +102,13 @@ services:
     build:
       context: .
       dockerfile: infra/compose/Dockerfile.updater-bootstrap
-    image: proxycore-updater-bootstrap:local
+    image: ${PROXYCORE_UPDATER_BOOTSTRAP_IMAGE:-${PROXYCORE_IMAGE_REPO:-ghcr.io/zerkc}/proxycore-updater-bootstrap:${PROXYCORE_VERSION:-latest}}
     environment:
       PROXYCORE_HOST_HOME: ${PROXYCORE_HOST_HOME:-${PWD}}
-      PROXYCORE_UPDATE_MODE: ${PROXYCORE_UPDATE_MODE:-build}
       PROXYCORE_COMPOSE_FILE: ${PROXYCORE_HOST_HOME:-${PWD}}/compose.yaml
       PROXYCORE_COMPOSE_PROJECT: ${COMPOSE_PROJECT_NAME:-proxycore}
       PROXYCORE_COMPOSE_ENV_FILE: ${PROXYCORE_HOST_HOME:-${PWD}}/.env
-      PROXYCORE_BOOTSTRAP_MODE: ${PROXYCORE_UPDATE_MODE:-build}
-      PROXYCORE_BOOTSTRAP_UPDATER_IMAGE: ${PROXYCORE_UPDATER_IMAGE:-proxycore-updater:local}
+      PROXYCORE_BOOTSTRAP_UPDATER_IMAGE: ${PROXYCORE_UPDATER_IMAGE:-${PROXYCORE_IMAGE_REPO:-ghcr.io/zerkc}/proxycore-updater:${PROXYCORE_VERSION:-latest}}
       PROXYCORE_BOOTSTRAP_REQUEST_FILE: /bootstrap/request.json
       PROXYCORE_BOOTSTRAP_WORK_DIR: /bootstrap/work
       PROXYCORE_BOOTSTRAP_INTERVAL: ${PROXYCORE_BOOTSTRAP_INTERVAL:-5}
@@ -132,7 +135,7 @@ services:
     build:
       context: .
       dockerfile: infra/compose/Dockerfile.migrate
-    image: proxycore-migrate:local
+    image: ${PROXYCORE_MIGRATE_IMAGE:-${PROXYCORE_IMAGE_REPO:-ghcr.io/zerkc}/proxycore-migrate:${PROXYCORE_VERSION:-latest}}
     environment:
       # Empty default: a missing key is refused by the script, not by compose,
       # so every other compose command keeps working on a broken .env.
@@ -154,9 +157,7 @@ services:
     build:
       context: .
       dockerfile: infra/compose/Dockerfile.runtime
-    image: proxycore-runtime:local
-    # Built locally only; never pull it from a registry.
-    pull_policy: never
+    image: ${PROXYCORE_RUNTIME_IMAGE:-${PROXYCORE_IMAGE_REPO:-ghcr.io/zerkc}/proxycore-runtime:${PROXYCORE_VERSION:-latest}}
     command: ["bun", "run", "worker"]
     environment:
       NODE_ENV: production
@@ -193,11 +194,9 @@ services:
     networks: [control]
 
   control:
-    # No build section: reuses the image built by the worker service.
-    # pull_policy never: the image exists only locally, so compose must not try
-    # a registry pull (it only prints a misleading "pull access denied").
-    image: proxycore-runtime:local
-    pull_policy: never
+    # No build section: reuses the image the worker service builds (build mode)
+    # or pulls (pull mode); both services share one runtime image reference.
+    image: ${PROXYCORE_RUNTIME_IMAGE:-${PROXYCORE_IMAGE_REPO:-ghcr.io/zerkc}/proxycore-runtime:${PROXYCORE_VERSION:-latest}}
     command: ["bun", "run", "control"]
     environment:
       NODE_ENV: production
@@ -227,7 +226,7 @@ services:
     build:
       context: .
       dockerfile: infra/compose/Dockerfile.coredns
-    image: proxycore-coredns:local
+    image: ${PROXYCORE_COREDNS_IMAGE:-${PROXYCORE_IMAGE_REPO:-ghcr.io/zerkc}/proxycore-coredns:${PROXYCORE_VERSION:-latest}}
     # Corefile lives on coredns-config volume so recreate keeps applied zones.
     command: ["-conf", "/etc/coredns-config/Corefile"]
     volumes:
@@ -247,7 +246,7 @@ services:
       dockerfile: infra/compose/Dockerfile.nginx
       args:
         NGINX_IMAGE: ${NGINX_IMAGE:-nginx:1.30.4-alpine-slim}
-    image: proxycore-nginx:local
+    image: ${PROXYCORE_NGINX_IMAGE:-${PROXYCORE_IMAGE_REPO:-ghcr.io/zerkc}/proxycore-nginx:${PROXYCORE_VERSION:-latest}}
     # Host networking so HTTP/HTTPS and dynamic stream ports bind on the host
     # without republishing Compose ports after each stream change.
     network_mode: host

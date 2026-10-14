@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -218,426 +217,6 @@ func TestApplyRejectsInvalidTargetVersion(t *testing.T) {
 	}
 	if fc.CallCount() != 0 {
 		t.Fatalf("expected no commands for invalid target, got %d", fc.CallCount())
-	}
-}
-
-func TestApplyBuildModeFetchesSource(t *testing.T) {
-	tmp := t.TempDir()
-	requestFile := filepath.Join(tmp, "request.json")
-
-	gitCalls := 0
-	fc := &fakeCommander{
-		result: map[string]fakeResult{
-			"build": {Output: "built api worker"},
-			"run":   {Output: "preflight ok"},
-			"up":    {Output: "api worker up"},
-		},
-	}
-	origExec := fc.exec
-	fc.ExecOverride = func(ctx context.Context, name string, args ...string) (string, error) {
-		// gitArgs prepends [-C, dir] to subcommand args: args=[-C, dir, subcmd, ...]
-		if name == "git" && len(args) >= 3 && args[0] == "-C" {
-			gitCalls++
-			subcmd := args[2]
-			switch subcmd {
-			case "rev-parse":
-				return "abc123def456", nil
-			case "status":
-				return "", nil // clean
-			case "fetch":
-				return "", nil
-			case "checkout":
-				joined := strings.Join(args, " ")
-				if !strings.Contains(joined, "--detach") || !strings.Contains(joined, "--force") || !strings.Contains(joined, "refs/tags/v0.1.6") {
-					return "", fmt.Errorf("expected forced detached checkout of v0.1.6, got %s", joined)
-				}
-				return "", nil
-			default:
-				return "", fmt.Errorf("unexpected git subcommand: %s", subcmd)
-			}
-		}
-		return origExec(ctx, name, args...)
-	}
-
-	u := New(Options{
-		UpdateMode:           UpdateModeBuild,
-		SourceDir:            tmp,
-		ProjectName:          "proxycore",
-		Services:             []string{"api", "worker"},
-		BootstrapRequestFile: requestFile,
-		HealthURL:            "http://api:3000/api/health",
-		HealthTimeout:        2 * time.Second,
-		PollInterval:         50 * time.Millisecond,
-		Exec:                 fc.Exec,
-		HTTPGet:              func(ctx context.Context, url string) (int, error) { return 200, nil },
-		Logger:               &recordingLogger{},
-	})
-
-	status, err := u.Apply(context.Background(), "0.1.6")
-	if err != nil {
-		t.Fatalf("Apply returned error: %v", err)
-	}
-	if status.Status != "ok" {
-		t.Fatalf("status=%q want ok; steps=%+v", status.Status, status.Steps)
-	}
-	// fetch-source is now the first step.
-	if len(status.Steps) != 6 {
-		t.Fatalf("expected 6 steps (fetch-source, build, preflight, restart, verify, bootstrap), got %d: %+v",
-			len(status.Steps), stepNames(status.Steps))
-	}
-	if status.Steps[0].Name != "fetch-source" {
-		t.Errorf("first step=%q want fetch-source", status.Steps[0].Name)
-	}
-	if status.Steps[0].Status != "ok" {
-		t.Errorf("fetch-source status=%q want ok; err=%q", status.Steps[0].Status, status.Steps[0].Error)
-	}
-	if gitCalls < 4 {
-		t.Errorf("expected ≥4 git calls (rev-parse, status, fetch, checkout), got %d", gitCalls)
-	}
-}
-
-func TestApplyBuildModeSkipsFetchSourceWhenSourceDirEmpty(t *testing.T) {
-	tmp := t.TempDir()
-	requestFile := filepath.Join(tmp, "request.json")
-
-	gitCalls := 0
-	fc := &fakeCommander{
-		result: map[string]fakeResult{
-			"build": {Output: "built"},
-			"run":   {Output: "ok"},
-			"up":    {Output: "up"},
-		},
-	}
-	origExec := fc.exec
-	fc.ExecOverride = func(ctx context.Context, name string, args ...string) (string, error) {
-		if name == "git" && len(args) >= 3 && args[0] == "-C" {
-			gitCalls++
-		}
-		return origExec(ctx, name, args...)
-	}
-
-	u := New(Options{
-		UpdateMode:           UpdateModeBuild,
-		SourceDir:            "", // not configured
-		ProjectName:          "proxycore",
-		Services:             []string{"api"},
-		BootstrapRequestFile: requestFile,
-		HealthURL:            "http://api:3000/api/health",
-		HealthTimeout:        2 * time.Second,
-		PollInterval:         50 * time.Millisecond,
-		Exec:                 fc.Exec,
-		HTTPGet:              func(ctx context.Context, url string) (int, error) { return 200, nil },
-		Logger:               &recordingLogger{},
-	})
-
-	status, err := u.Apply(context.Background(), "0.1.6")
-	if err != nil {
-		t.Fatalf("Apply returned error: %v", err)
-	}
-	if status.Status != "ok" {
-		t.Fatalf("status=%q want ok", status.Status)
-	}
-	// No fetch-source step when SourceDir is empty.
-	if len(status.Steps) != 5 {
-		t.Fatalf("expected 5 steps (build, preflight, restart, verify, bootstrap), got %d: %+v",
-			len(status.Steps), stepNames(status.Steps))
-	}
-	if status.Steps[0].Name != UpdateModeBuild {
-		t.Errorf("first step=%q want %s", status.Steps[0].Name, UpdateModeBuild)
-	}
-	if gitCalls != 0 {
-		t.Errorf("expected 0 git calls when SourceDir is empty, got %d", gitCalls)
-	}
-}
-
-func TestApplyBuildModeRejectsDirtySource(t *testing.T) {
-	tmp := t.TempDir()
-	requestFile := filepath.Join(tmp, "request.json")
-
-	fc := &fakeCommander{
-		result: map[string]fakeResult{
-			"build": {Output: "built"},
-			"run":   {Output: "ok"},
-			"up":    {Output: "up"},
-		},
-	}
-	origExec := fc.exec
-	fc.ExecOverride = func(ctx context.Context, name string, args ...string) (string, error) {
-		// args = [-C, dir, subcmd, ...]
-		if name == "git" && len(args) >= 3 && args[0] == "-C" {
-			subcmd := args[2]
-			switch subcmd {
-			case "rev-parse":
-				return "abc123", nil
-			case "status":
-				return "M  some/file.go\n", nil // dirty
-			default:
-				return "", nil
-			}
-		}
-		return origExec(ctx, name, args...)
-	}
-
-	u := New(Options{
-		UpdateMode:           UpdateModeBuild,
-		SourceDir:            tmp,
-		ProjectName:          "proxycore",
-		Services:             []string{"api"},
-		BootstrapRequestFile: requestFile,
-		HealthURL:            "http://api:3000/api/health",
-		HealthTimeout:        2 * time.Second,
-		PollInterval:         50 * time.Millisecond,
-		Exec:                 fc.Exec,
-		HTTPGet:              func(ctx context.Context, url string) (int, error) { return 200, nil },
-		Logger:               &recordingLogger{},
-	})
-
-	_, err := u.Apply(context.Background(), "0.1.6")
-	if err == nil {
-		t.Fatal("expected error for dirty source")
-	}
-	last := u.Last()
-	if last == nil || last.Status != "failed" {
-		t.Fatalf("Last().Status=%v want failed", last)
-	}
-	if len(last.Steps) < 1 || last.Steps[0].Name != "fetch-source" {
-		t.Errorf("expected first step=fetch-source, got %+v", stepNames(last.Steps))
-	}
-	if !strings.Contains(last.Steps[0].Error, ErrSourceDirty.Error()) {
-		t.Errorf("expected error to mention ErrSourceDirty; got %q", last.Steps[0].Error)
-	}
-}
-
-func TestApplyBuildModeRejectsGitFailure(t *testing.T) {
-	tmp := t.TempDir()
-	requestFile := filepath.Join(tmp, "request.json")
-
-	fc := &fakeCommander{
-		result: map[string]fakeResult{
-			"build": {Output: "built"},
-			"run":   {Output: "ok"},
-			"up":    {Output: "up"},
-		},
-	}
-	origExec := fc.exec
-	fc.ExecOverride = func(ctx context.Context, name string, args ...string) (string, error) {
-		if name == "git" && len(args) >= 3 && args[0] == "-C" {
-			subcmd := args[2]
-			switch subcmd {
-			case "rev-parse":
-				return "abc123", nil
-			case "status":
-				return "", nil
-			case "fetch":
-				return "", fmt.Errorf("exit 1: repository not found")
-			default:
-				return "", nil
-			}
-		}
-		return origExec(ctx, name, args...)
-	}
-
-	u := New(Options{
-		UpdateMode:           UpdateModeBuild,
-		SourceDir:            tmp,
-		ProjectName:          "proxycore",
-		Services:             []string{"api"},
-		BootstrapRequestFile: requestFile,
-		HealthURL:            "http://api:3000/api/health",
-		HealthTimeout:        2 * time.Second,
-		PollInterval:         50 * time.Millisecond,
-		Exec:                 fc.Exec,
-		HTTPGet:              func(ctx context.Context, url string) (int, error) { return 200, nil },
-		Logger:               &recordingLogger{},
-	})
-
-	_, err := u.Apply(context.Background(), "0.1.6")
-	if err == nil {
-		t.Fatal("expected error after git fetch failure")
-	}
-	last := u.Last()
-	if last == nil || last.Status != "failed" {
-		t.Fatalf("Last().Status=%v want failed", last)
-	}
-	if !strings.Contains(last.Steps[0].Error, "git fetch") {
-		t.Errorf("expected error to mention git fetch; got %q", last.Steps[0].Error)
-	}
-}
-
-func TestApplyBuildModeRestoresSourceOnFailure(t *testing.T) {
-	tmp := t.TempDir()
-	requestFile := filepath.Join(tmp, "request.json")
-
-	originalHead := "abc000original"
-	restoredTo := ""
-
-	fc := &fakeCommander{
-		result: map[string]fakeResult{
-			"build": {Output: "built"},
-			"run":   {Output: "preflight ok"},
-			"up":    {Output: "no such image", Err: errFake("exit 1")},
-		},
-	}
-	origExec := fc.exec
-	fc.ExecOverride = func(ctx context.Context, name string, args ...string) (string, error) {
-		// args = [-C, dir, subcmd, ...]
-		if name == "git" && len(args) >= 3 && args[0] == "-C" {
-			subcmd := args[2]
-			switch subcmd {
-			case "rev-parse":
-				return originalHead, nil
-			case "status":
-				return "", nil
-			case "fetch":
-				return "", nil
-			case "checkout":
-				checkoutTarget := args[len(args)-1]
-				if checkoutTarget == originalHead {
-					// Restore call after restart failure.
-					restoredTo = originalHead
-					return "", nil
-				}
-				// Checkout the target tag.
-				return "checked out refs/tags/v0.1.6", nil
-			default:
-				return "", nil
-			}
-		}
-		return origExec(ctx, name, args...)
-	}
-
-	u := New(Options{
-		UpdateMode:           UpdateModeBuild,
-		SourceDir:            tmp,
-		ProjectName:          "proxycore",
-		Services:             []string{"api"},
-		BootstrapRequestFile: requestFile,
-		HealthURL:            "http://api:3000/api/health",
-		HealthTimeout:        2 * time.Second,
-		PollInterval:         50 * time.Millisecond,
-		Exec:                 fc.Exec,
-		HTTPGet:              func(ctx context.Context, url string) (int, error) { return 200, nil },
-		Logger:               &recordingLogger{},
-	})
-
-	_, err := u.Apply(context.Background(), "0.1.6")
-	if err == nil {
-		t.Fatal("expected error after restart failure")
-	}
-	if restoredTo != originalHead {
-		t.Errorf("expected restore to checkout %q, got %q", originalHead, restoredTo)
-	}
-}
-
-func TestApplyBuildMode(t *testing.T) {
-	tmp := t.TempDir()
-	requestFile := filepath.Join(tmp, "request.json")
-	fc := &fakeCommander{
-		result: map[string]fakeResult{
-			"build": {Output: "built api worker"},
-			"run":   {Output: "preflight ok"},
-			"up":    {Output: "api worker up"},
-		},
-	}
-	u := New(Options{
-		UpdateMode:           UpdateModeBuild,
-		ProjectName:          "proxycore",
-		Services:             []string{"api", "worker"},
-		BootstrapRequestFile: requestFile,
-		HealthURL:            "http://api:3000/api/health",
-		HealthTimeout:        2 * time.Second,
-		PollInterval:         50 * time.Millisecond,
-		Exec:                 fc.Exec,
-		HTTPGet:              func(ctx context.Context, url string) (int, error) { return 200, nil },
-		Logger:               &recordingLogger{},
-	})
-
-	status, err := u.Apply(context.Background(), "0.1.5")
-	if err != nil {
-		t.Fatalf("Apply returned error: %v", err)
-	}
-	if status.Steps[0].Name != UpdateModeBuild {
-		t.Fatalf("first step=%q want %q", status.Steps[0].Name, UpdateModeBuild)
-	}
-	builds := buildCalls(fc)
-	if len(builds) != 2 {
-		t.Fatalf("expected 2 sequential build calls, got %d: %v", len(builds), builds)
-	}
-	for i, svc := range []string{"api", "worker"} {
-		got := builds[i]
-		if len(got) != 1 || got[0] != svc {
-			t.Errorf("build call %d services=%v want [%s]", i, got, svc)
-		}
-	}
-	fc.mu.Lock()
-	joined := strings.Join(fc.calls[0].Args, " ")
-	fc.mu.Unlock()
-	for _, unwanted := range []string{"--profile", "tools", "migrate"} {
-		if strings.Contains(joined, unwanted) {
-			t.Errorf("build command %q must not contain %q", joined, unwanted)
-		}
-	}
-}
-
-// buildCalls returns, per recorded `docker compose ... build` call, the service
-// names that follow the build subcommand.
-func buildCalls(fc *fakeCommander) [][]string {
-	fc.mu.Lock()
-	defer fc.mu.Unlock()
-	var out [][]string
-	for _, c := range fc.calls {
-		for i, a := range c.Args {
-			if a == "build" {
-				out = append(out, append([]string(nil), c.Args[i+1:]...))
-				break
-			}
-		}
-	}
-	return out
-}
-
-func TestApplyBuildModeStopsAtFirstFailingService(t *testing.T) {
-	fc := &fakeCommander{}
-	fc.ExecOverride = func(ctx context.Context, name string, args ...string) (string, error) {
-		out, err := fc.exec(ctx, name, args...) // records the call
-		if strings.Contains(strings.Join(args, " "), "build worker") {
-			return "oom killed", errFake("exit 137")
-		}
-		return out, err
-	}
-	u := New(Options{
-		UpdateMode:           UpdateModeBuild,
-		ProjectName:          "proxycore",
-		Services:             []string{"api", "worker", "nginx"},
-		BootstrapRequestFile: filepath.Join(t.TempDir(), "request.json"),
-		HealthURL:            "http://api:3000/api/health",
-		HealthTimeout:        2 * time.Second,
-		PollInterval:         50 * time.Millisecond,
-		Exec:                 fc.Exec,
-		HTTPGet:              func(ctx context.Context, url string) (int, error) { return 200, nil },
-		Logger:               &recordingLogger{},
-	})
-
-	status, err := u.Apply(context.Background(), "0.1.5")
-	if !errors.Is(err, ErrStepFailed) {
-		t.Fatalf("err=%v want ErrStepFailed", err)
-	}
-	if status.Status != "failed" {
-		t.Fatalf("status=%q want failed", status.Status)
-	}
-	builds := buildCalls(fc)
-	if len(builds) != 2 {
-		t.Fatalf("expected build to stop after worker (2 calls), got %d: %v", len(builds), builds)
-	}
-	last := status.Steps[len(status.Steps)-1]
-	if last.Name != UpdateModeBuild || last.Status != "failed" {
-		t.Fatalf("last step=%+v want failed build", last)
-	}
-	if !strings.Contains(last.Error, "worker") {
-		t.Errorf("error %q must name the failing service", last.Error)
-	}
-	if len(status.Steps) != 1 {
-		t.Errorf("expected only the build step, got %v", stepNames(status.Steps))
 	}
 }
 
@@ -980,5 +559,42 @@ func TestPreflightProceedsWhenSQLiteAlreadyExists(t *testing.T) {
 	}
 	if !probed {
 		t.Errorf("expected sqlite probe via compose run; commands=%v", *cmds)
+	}
+}
+
+// Updates always pull: a build-looking PROXYCORE_UPDATE_MODE in the process
+// environment must not change the command sequence.
+func TestApplyAlwaysPullsIgnoringBuildModeEnv(t *testing.T) {
+	t.Setenv("PROXYCORE_UPDATE_MODE", "build")
+	fc := &fakeCommander{}
+	u := New(Options{
+		ProjectName:          "proxycore",
+		Services:             []string{"api", "worker"},
+		BootstrapRequestFile: filepath.Join(t.TempDir(), "request.json"),
+		HealthURL:            "http://api:3000/api/health",
+		HealthTimeout:        2 * time.Second,
+		PollInterval:         50 * time.Millisecond,
+		Exec:                 fc.Exec,
+		HTTPGet:              func(ctx context.Context, url string) (int, error) { return 200, nil },
+		Logger:               &recordingLogger{},
+	})
+	status, err := u.Apply(context.Background(), "0.1.5")
+	if err != nil {
+		t.Fatalf("Apply returned error: %v", err)
+	}
+	if status.Steps[0].Name != "pull" {
+		t.Fatalf("first step=%q want pull", status.Steps[0].Name)
+	}
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+	for _, c := range fc.calls {
+		if c.Name == "git" {
+			t.Errorf("unexpected git call: %v", c.Args)
+		}
+		for _, a := range c.Args {
+			if a == "build" {
+				t.Errorf("unexpected build call: %v", c.Args)
+			}
+		}
 	}
 }

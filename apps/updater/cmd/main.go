@@ -38,8 +38,6 @@ func main() {
 	}
 
 	u := updater.New(updater.Options{
-		UpdateMode:           cfg.UpdateMode,
-		SourceDir:            cfg.SourceDir,
 		ComposeFile:          cfg.ComposeFile,
 		ProjectName:          cfg.ProjectName,
 		Services:             cfg.Services,
@@ -118,8 +116,8 @@ func main() {
 		_ = srv.Shutdown(ctx)
 	}()
 
-	logger.Printf("listening on %s (project=%s mode=%s services=%v bootstrap=%q)",
-		cfg.Addr, cfg.ProjectName, cfg.UpdateMode, cfg.Services, cfg.BootstrapRequestFile)
+	logger.Printf("listening on %s (project=%s services=%v bootstrap=%q)",
+		cfg.Addr, cfg.ProjectName, cfg.Services, cfg.BootstrapRequestFile)
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		logger.Fatalf("listen: %v", err)
 	}
@@ -128,8 +126,6 @@ func main() {
 
 type config struct {
 	Addr                 string
-	UpdateMode           string
-	SourceDir            string
 	ComposeFile          string
 	ProjectName          string
 	Services             []string
@@ -141,7 +137,6 @@ type config struct {
 func loadConfig() (*config, error) {
 	cfg := &config{
 		Addr:        envOr("PROXYCORE_UPDATER_ADDR", ":8080"),
-		UpdateMode:  envOr("PROXYCORE_UPDATE_MODE", updater.UpdateModePull),
 		ComposeFile: envOr("PROXYCORE_COMPOSE_FILE", "/app/compose.yaml"),
 		ProjectName: envOr("PROXYCORE_COMPOSE_PROJECT", "proxycore"),
 		HealthURL:   envOr("PROXYCORE_HEALTH_URL", "http://api:3000/api/health"),
@@ -152,7 +147,6 @@ func loadConfig() (*config, error) {
 		cfg.Services = []string{"api", "worker", "control", "nginx"}
 	}
 	cfg.BootstrapRequestFile = os.Getenv("PROXYCORE_BOOTSTRAP_REQUEST_FILE")
-	cfg.SourceDir = strings.TrimSpace(os.Getenv("PROXYCORE_SOURCE_DIR"))
 	if d, err := time.ParseDuration(envOr("PROXYCORE_HEALTH_TIMEOUT", "90s")); err == nil {
 		cfg.HealthTimeout = d
 	} else {

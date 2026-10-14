@@ -2,7 +2,8 @@
 
 # UI build (Vite). Kept as a separate stage so the API runtime only inherits
 # the built dist. Cache mounts make repeat builds skip reinstall + transpile.
-FROM oven/bun:1.3.14-alpine AS ui
+# BUILDPLATFORM: the output is static assets, so it never runs under QEMU.
+FROM --platform=$BUILDPLATFORM oven/bun:1.3.14-alpine AS ui
 WORKDIR /ui
 
 # Install the UI's deps. No --frozen-lockfile here because the lockfile lives
@@ -22,7 +23,11 @@ RUN --mount=type=cache,id=vite,target=/ui/node_modules/.vite \
 
 # Go API. Split into two layers: deps (cached when go.mod/go.sum unchanged)
 # and build (cached when source unchanged thanks to the go-build cache mount).
-FROM golang:1.25-alpine AS api
+# Cross-compiles natively on BUILDPLATFORM for TARGETOS/TARGETARCH (no QEMU).
+FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS api
+ARG TARGETOS
+ARG TARGETARCH
+ARG TARGETVARIANT
 WORKDIR /src
 
 # Layer 1: dependencies only.
@@ -45,7 +50,8 @@ ENV GOMAXPROCS=2 GOGC=50
 RUN --mount=type=cache,id=go-mod,target=/go/pkg/mod \
     --mount=type=cache,id=go-build,target=/root/.cache/go-build \
     VERSION="$(tr -d '[:space:]' < VERSION)" \
-    && CGO_ENABLED=0 GOOS=linux go build -trimpath \
+    && if [ "${TARGETARCH}" = arm ]; then export GOARM="${TARGETVARIANT#v}"; fi \
+    && CGO_ENABLED=0 GOOS="${TARGETOS:-linux}" GOARCH="${TARGETARCH:-$(go env GOARCH)}" go build -trimpath \
        -ldflags="-s -w -X github.com/zerkc/ProxyCore/apps/api/internal/version.Version=${VERSION}" \
        -o /out/ ./cmd/server ./cmd/admin ./cmd/convert \
     && mv /out/server /out/proxycore-api \

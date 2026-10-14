@@ -96,6 +96,9 @@ jobs:
           cd ../../dist
           sha256sum proxycore-api_* > SHA256SUMS
 
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -106,18 +109,107 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # Every image is published as a multi-arch manifest. Go stages and the UI
+      # stage run on the build platform and cross-compile, so QEMU only executes
+      # the small alpine `apk add` steps. The bun runtime image has no arm/v7
+      # build upstream, so it is amd64 + arm64 only.
       - name: Build and push API image
         uses: docker/build-push-action@v6
         with:
           context: .
           file: infra/compose/Dockerfile.api
+          platforms: linux/amd64,linux/arm64,linux/arm/v7
           push: true
           tags: |
             ghcr.io/${{ github.repository_owner }}/proxycore-api:${{ steps.version.outputs.version }}
             ghcr.io/${{ github.repository_owner }}/proxycore-api:${{ steps.version.outputs.tag }}
             ghcr.io/${{ github.repository_owner }}/proxycore-api:latest
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=api
+          cache-to: type=gha,mode=max,scope=api
+
+      - name: Build and push runtime image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: infra/compose/Dockerfile.runtime
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/proxycore-runtime:${{ steps.version.outputs.version }}
+            ghcr.io/${{ github.repository_owner }}/proxycore-runtime:${{ steps.version.outputs.tag }}
+            ghcr.io/${{ github.repository_owner }}/proxycore-runtime:latest
+          cache-from: type=gha,scope=runtime
+          cache-to: type=gha,mode=max,scope=runtime
+
+      - name: Build and push updater image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: infra/compose/Dockerfile.updater
+          platforms: linux/amd64,linux/arm64,linux/arm/v7
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/proxycore-updater:${{ steps.version.outputs.version }}
+            ghcr.io/${{ github.repository_owner }}/proxycore-updater:${{ steps.version.outputs.tag }}
+            ghcr.io/${{ github.repository_owner }}/proxycore-updater:latest
+          cache-from: type=gha,scope=updater
+          cache-to: type=gha,mode=max,scope=updater
+
+      - name: Build and push updater-bootstrap image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: infra/compose/Dockerfile.updater-bootstrap
+          platforms: linux/amd64,linux/arm64,linux/arm/v7
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/proxycore-updater-bootstrap:${{ steps.version.outputs.version }}
+            ghcr.io/${{ github.repository_owner }}/proxycore-updater-bootstrap:${{ steps.version.outputs.tag }}
+            ghcr.io/${{ github.repository_owner }}/proxycore-updater-bootstrap:latest
+          cache-from: type=gha,scope=updater-bootstrap
+          cache-to: type=gha,mode=max,scope=updater-bootstrap
+
+      - name: Build and push migrate image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: infra/compose/Dockerfile.migrate
+          platforms: linux/amd64,linux/arm64,linux/arm/v7
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/proxycore-migrate:${{ steps.version.outputs.version }}
+            ghcr.io/${{ github.repository_owner }}/proxycore-migrate:${{ steps.version.outputs.tag }}
+            ghcr.io/${{ github.repository_owner }}/proxycore-migrate:latest
+          cache-from: type=gha,scope=migrate
+          cache-to: type=gha,mode=max,scope=migrate
+
+      - name: Build and push nginx image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: infra/compose/Dockerfile.nginx
+          platforms: linux/amd64,linux/arm64,linux/arm/v7
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/proxycore-nginx:${{ steps.version.outputs.version }}
+            ghcr.io/${{ github.repository_owner }}/proxycore-nginx:${{ steps.version.outputs.tag }}
+            ghcr.io/${{ github.repository_owner }}/proxycore-nginx:latest
+          cache-from: type=gha,scope=nginx
+          cache-to: type=gha,mode=max,scope=nginx
+
+      - name: Build and push coredns image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: infra/compose/Dockerfile.coredns
+          platforms: linux/amd64,linux/arm64,linux/arm/v7
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/proxycore-coredns:${{ steps.version.outputs.version }}
+            ghcr.io/${{ github.repository_owner }}/proxycore-coredns:${{ steps.version.outputs.tag }}
+            ghcr.io/${{ github.repository_owner }}/proxycore-coredns:latest
+          cache-from: type=gha,scope=coredns
+          cache-to: type=gha,mode=max,scope=coredns
 
       - name: Ensure release tag
         if: github.event_name == 'workflow_dispatch'
@@ -149,10 +241,13 @@ jobs:
             curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/scripts/install.sh | sh
             ```
 
-            ### Container image
+            ### Container images
+
+            Multi-arch manifests (linux/amd64, linux/arm64; linux/arm/v7 for every
+            image except `proxycore-runtime`, which needs Bun):
 
             ```
-            ghcr.io/${{ github.repository_owner }}/proxycore-api:${{ steps.version.outputs.version }}
+            ghcr.io/${{ github.repository_owner }}/proxycore-{api,runtime,updater,updater-bootstrap,migrate,nginx,coredns}:${{ steps.version.outputs.version }}
             ```
 
             ### Checksums

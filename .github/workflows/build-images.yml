@@ -1,0 +1,74 @@
+name: Build images
+
+# Build-only validation of every published image on all of its platforms.
+# Nothing is pushed, tagged or released: release.yml owns publishing. Keep the
+# image/platform matrix below in sync with release.yml.
+
+on:
+  pull_request:
+    paths:
+      - "infra/compose/**"
+      - "apps/**"
+      - "packages/**"
+      - "package.json"
+      - "bun.lock"
+      - "VERSION"
+      - ".github/workflows/build-images.yml"
+      - ".github/workflows/release.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-images-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: ${{ matrix.image }} (${{ matrix.platforms }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: api
+            file: infra/compose/Dockerfile.api
+            platforms: linux/amd64,linux/arm64,linux/arm/v7
+          - image: runtime
+            file: infra/compose/Dockerfile.runtime
+            platforms: linux/amd64,linux/arm64
+          - image: updater
+            file: infra/compose/Dockerfile.updater
+            platforms: linux/amd64,linux/arm64,linux/arm/v7
+          - image: updater-bootstrap
+            file: infra/compose/Dockerfile.updater-bootstrap
+            platforms: linux/amd64,linux/arm64,linux/arm/v7
+          - image: migrate
+            file: infra/compose/Dockerfile.migrate
+            platforms: linux/amd64,linux/arm64,linux/arm/v7
+          - image: nginx
+            file: infra/compose/Dockerfile.nginx
+            platforms: linux/amd64,linux/arm64,linux/arm/v7
+          - image: coredns
+            file: infra/compose/Dockerfile.coredns
+            platforms: linux/amd64,linux/arm64,linux/arm/v7
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build ${{ matrix.image }} (no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.file }}
+          platforms: ${{ matrix.platforms }}
+          push: false
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
