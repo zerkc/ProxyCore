@@ -1,5 +1,9 @@
 # syntax=docker/dockerfile:1.10
-FROM oven/bun:1.3.14-alpine
+# Supported platforms: linux/amd64 and linux/arm64 only (Bun publishes no
+# arm/v7 or 386 builds). Dependencies are installed on BUILDPLATFORM so the
+# arm64 image never runs `bun install` under QEMU; this relies on the runtime
+# dependencies being pure JavaScript (no per-platform native addons).
+FROM --platform=$BUILDPLATFORM oven/bun:1.3.14-alpine AS deps
 
 WORKDIR /app
 
@@ -13,6 +17,15 @@ COPY packages ./packages
 # Source is NOT copied yet, so source changes won't bust this layer.
 RUN --mount=type=cache,id=bun-runtime,target=/root/.bun/install/cache \
     bun install --frozen-lockfile --production --filter '!@proxycore/ui'
+
+FROM oven/bun:1.3.14-alpine
+
+WORKDIR /app
+
+COPY package.json bun.lock bunfig.toml tsconfig.json ./
+COPY apps/ui/package.json ./apps/ui/package.json
+COPY packages ./packages
+COPY --from=deps /app/node_modules ./node_modules
 
 # Source last — changes here only invalidate layers below this point.
 COPY apps/worker ./apps/worker

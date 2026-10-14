@@ -4,7 +4,10 @@
 # pulling registry images through the docker CLI + compose plugin. Requires
 # /var/run/docker.sock and the project's
 # compose.yaml to be mounted at runtime.
-FROM golang:1.25-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS builder
+ARG TARGETOS
+ARG TARGETARCH
+ARG TARGETVARIANT
 # Cap compiler CPU/heap so the build fits small (1 GB) nodes.
 ENV GOMAXPROCS=2 GOGC=50
 WORKDIR /src
@@ -17,7 +20,8 @@ RUN go mod download
 COPY apps/updater/ ./
 RUN --mount=type=cache,id=go-mod,target=/go/pkg/mod \
     --mount=type=cache,id=go-build,target=/root/.cache/go-build \
-    CGO_ENABLED=0 GOOS=linux go build -trimpath \
+    if [ "${TARGETARCH}" = arm ]; then export GOARM="${TARGETVARIANT#v}"; fi; \
+    CGO_ENABLED=0 GOOS="${TARGETOS:-linux}" GOARCH="${TARGETARCH:-$(go env GOARCH)}" go build -trimpath \
        -o /out/proxycore-updater ./cmd
 
 # Runtime: alpine + docker CLI + compose plugin + the static binary.
