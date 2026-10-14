@@ -33,6 +33,9 @@ type Server struct {
 	enrollmentTokens EnrollmentTokenAuthority
 	backupExporter   BackupExporter
 	backupImporter   BackupImporter
+	// enrollmentWorkflow serves the NODE enrollment workflow routes on the
+	// main API for owner sessions. Nil means the workflow is unavailable.
+	enrollmentWorkflow *enrollmentWorkflowHandler
 }
 
 type Option func(*Server)
@@ -91,6 +94,18 @@ func WithBackup(exporter BackupExporter, importer BackupImporter) Option {
 	return func(s *Server) {
 		s.backupExporter = exporter
 		s.backupImporter = importer
+	}
+}
+
+// WithEnrollmentWorkflow mounts the enrollment draft/preview/confirm/recover
+// routes on the main API. Requests are authorized by the owner session instead
+// of direct TLS 1.3, because the main API is plain HTTP behind a proxy; the
+// dedicated enrollment listener keeps its TLS requirements unchanged.
+func WithEnrollmentWorkflow(opts EnrollmentWorkflowHandlerOptions) Option {
+	return func(s *Server) {
+		handler := newEnrollmentWorkflowHandler(opts, nil)
+		handler.trustedTransport = true
+		s.enrollmentWorkflow = handler
 	}
 }
 
@@ -171,6 +186,10 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST "+EnrollmentTokensPath+"/{id}/revoke", s.handleRevokeEnrollmentToken)
 	s.mux.HandleFunc("POST "+TopologyPromotePath, s.handleTopologyPromote)
 	s.mux.HandleFunc("POST "+TopologyDemotePath, s.handleTopologyDemote)
+	for _, path := range []string{EnrollmentDraftPath, EnrollmentPreviewPath, EnrollmentConfirmPath, EnrollmentRecoverPath} {
+		// Method-less pattern so non-POST requests get 405 instead of the SPA fallback.
+		s.mux.HandleFunc(path, s.handleEnrollmentWorkflow)
+	}
 	s.mux.HandleFunc("POST /api/apply", s.handleApply)
 	s.mux.HandleFunc("GET /api/users", s.handleListUsers)
 	s.mux.HandleFunc("POST /api/users", s.handleCreateUser)

@@ -142,16 +142,12 @@ func runServerWithNodeConverter(ctx context.Context, cfg config.Config, logger *
 	}
 	options = append(options, stack.backupOptions(cfg)...)
 
-	server := &http.Server{
-		Addr:              cfg.Addr,
-		Handler:           httpserver.New(cfg, logger, options...).Handler(),
-		ReadHeaderTimeout: 5 * time.Second,
-	}
-
 	draftCache := enrollment.NewDraftCache(enrollment.DraftCacheOptions{})
 	var supervisor *enrollment.EnrollmentTLSSupervisor
-	if tlsStore != nil && identitySvc != nil {
-		workflow := httpserver.EnrollmentWorkflowHandlerOptions{
+	var workflow httpserver.EnrollmentWorkflowHandlerOptions
+	workflowReady := tlsStore != nil && identitySvc != nil
+	if workflowReady {
+		workflow = httpserver.EnrollmentWorkflowHandlerOptions{
 			Cache:     draftCache,
 			Converter: nodeConverter,
 			Identity:  localEnrollmentIdentityProvider(identitySvc),
@@ -163,6 +159,16 @@ func runServerWithNodeConverter(ctx context.Context, cfg config.Config, logger *
 			workflow.VerifyToken = tokenAuthority.Verify
 		}
 		wireEnrollmentWorkflowDependencies(&workflow, snapshotClient, localKEKLoader)
+		options = append(options, httpserver.WithEnrollmentWorkflow(workflow))
+	}
+
+	server := &http.Server{
+		Addr:              cfg.Addr,
+		Handler:           httpserver.New(cfg, logger, options...).Handler(),
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+
+	if workflowReady {
 		snapshotByTokenKeyLoader := &snapshotByTokenClusterKeyLoader{keys: clusterKeys, identity: snapshotByTokenIdentitySource{service: identitySvc}}
 		snapshotByTokenOptions := httpserver.EnrollmentSnapshotByTokenHandlerOptions{
 			Store:            productionSnapshotByTokenStore(phase2Store),

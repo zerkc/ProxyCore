@@ -23,6 +23,7 @@ Let an owner convert an installation PRIMARY -> NODE and NODE -> PRIMARY from th
 - [x] T1 Backend: allow primary/primary-with-nodes -> node in both matrices; extend PromoteToPrimary into a transactional workflow (D2, D4); owner-guarded routes `POST /api/topology/promote` and `POST /api/topology/demote` with confirmation + expected generation; audit; Go tests (RED first).
 - [x] T2 UI: Promote to PRIMARY control (warning dialog) on node surface; Convert to NODE entry on primary surface leading to the enrollment form; UI tests.
 - [x] T3 Docs: update PRD status/decisions and README topology section.
+- [x] T4 Backend: serve enrollment draft/preview/confirm/recover on the main API (:3000) behind owner session auth, reusing the existing workflow handler and its dependency wiring; the UI gets 404 today because these routes only exist on the TLS enrollment listener (:3443). Go tests (RED first).
 
 ## Acceptance
 - Promote NODE -> PRIMARY works offline and online, bumps generation, old nodes must re-enroll.
@@ -37,4 +38,4 @@ Let an owner convert an installation PRIMARY -> NODE and NODE -> PRIMARY from th
 - T1 done: commit ce6c78f (go build/vet/test green; RED observed for cluster and identity SQLite only).
 - T2 done (commit 28270ae): TopologyConversionPanel + promoteTopology/demoteTopology client; 13 new vitest tests; EnrollmentTrustPanel date test fails on base (pre-existing).
 - T3 done: README + PRD status updated.
-- Next: manual verification in a running install; push/PR is the owner decision.
+- Reopened: T4 (user report: POST /api/topology/enrollment/draft -> 404 on :3000; pre-existing wiring gap, confirmed by user choice 1 = mount routes on main API).

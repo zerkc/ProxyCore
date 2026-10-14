@@ -79,6 +79,10 @@ type enrollmentWorkflowHandler struct {
 	archiveTTL       time.Duration
 	applyWaitTimeout time.Duration
 	certificate      IdentityProofCertificateProvider
+	// trustedTransport is set only for the main API mount, where an owner
+	// session authenticates the caller and TLS terminates at a proxy. The
+	// dedicated enrollment listener never sets it.
+	trustedTransport bool
 }
 
 func newEnrollmentWorkflowHandler(opts EnrollmentWorkflowHandlerOptions, certificate IdentityProofCertificateProvider) *enrollmentWorkflowHandler {
@@ -108,7 +112,7 @@ func (h *enrollmentWorkflowHandler) ServeHTTP(w http.ResponseWriter, r *http.Req
 		writeIdentityProofError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	if r.TLS == nil || !r.TLS.HandshakeComplete || r.TLS.Version < tls.VersionTLS13 {
+	if !h.trustedTransport && (r.TLS == nil || !r.TLS.HandshakeComplete || r.TLS.Version < tls.VersionTLS13) {
 		writeIdentityProofError(w, http.StatusBadRequest, "secure transport required")
 		return
 	}
@@ -358,6 +362,9 @@ func newEnvelopePreview(envelope *replicationsnapshot.Envelope, overlay enrollme
 }
 
 func (h *enrollmentWorkflowHandler) requireTLSAuthority(w http.ResponseWriter, r *http.Request, primaryURL string) bool {
+	if h.trustedTransport {
+		return true
+	}
 	if r.TLS == nil || !r.TLS.HandshakeComplete || r.TLS.Version < tls.VersionTLS13 {
 		writeIdentityProofError(w, http.StatusBadRequest, "secure transport required")
 		return false
