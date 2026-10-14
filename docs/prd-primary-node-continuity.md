@@ -567,3 +567,11 @@ And A reports B as out of sync with the rejection reason
 - [ ] Secret replication supports offline promotion.
 - [ ] Former-primary return cannot silently create or overwrite state.
 - [ ] PostgreSQL replication and SQLite migration remain outside scope.
+
+## Implementation status: role conversion
+
+- Promote NODE -> PRIMARY and convert PRIMARY -> NODE are implemented in the API (`POST /api/topology/promote`, `/demote`) and exposed in the dashboard.
+- Decision: nodes of a former primary are not auto-repointed; they must be re-enrolled manually against the new primary.
+- Decision: the cluster key is retired on promotion and minted lazily on the next enrollment or publication.
+- Planned switchover (old primary reachable) and failover (old primary offline) are both allowed, with a split-brain warning and an optional expected-generation check.
+- Still open: archive retention for a converted primary and local owner/user handling after demotion.

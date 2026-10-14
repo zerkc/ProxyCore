@@ -54,3 +54,13 @@ export type ConfirmResult = {
 };
 
 export type RecoverableState = DraftPreview;
+
+export type TopologyConversionResult = {
+  ok: boolean;
+  previousRole?: string;
+  previousGeneration?: number;
+  revokedCredentials?: number;
+  nodesMustReenroll?: boolean;
+  nextStep?: string;
+  warning?: { code: string; message: string };
+};

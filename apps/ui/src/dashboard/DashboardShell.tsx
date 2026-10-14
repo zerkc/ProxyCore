@@ -8,6 +8,7 @@ import { VersionStatus } from "./VersionStatus";
 import { deriveBarState } from "./patch-bar-state";
 import { EnrollmentTokenPanel } from "./EnrollmentTokenPanel";
 import { NodeContinuityView } from "./NodeContinuityView";
+import { TopologyConversionPanel } from "./TopologyConversionPanel";
 import type { TopologyIdentity } from "./types";
 
 const NAVIGATION_STORAGE_KEY = "proxycore.navigation.collapsed";
@@ -202,6 +203,7 @@ export default function DashboardShell({ children }: { children: ReactNode }) {
     closeZoneDialog,
     createZone,
     apply,
+    refresh,
     logout,
     update,
     updateLoading,
@@ -326,12 +328,18 @@ export default function DashboardShell({ children }: { children: ReactNode }) {
 
               <div key={`${current.href}:${identityTuple}`} className="pc-enter">
                 {surface === "error" ? null : nodeOnly ? (
-                  <NodeContinuityView key={identityTuple} />
+                  <>
+                    <NodeContinuityView key={identityTuple} />
+                    <TopologyConversionPanel identity={identity} onConverted={refresh} />
+                  </>
                 ) : (
                   <>
                     {children}
                     {current.id === "continuity" && identity ? (
                       <EnrollmentTokenPanel identity={identity} />
+                    ) : null}
+                    {current.id === "continuity" && identity ? (
+                      <TopologyConversionPanel identity={identity} onConverted={refresh} />
                     ) : null}
                   </>
                 )}

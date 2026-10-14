@@ -210,7 +210,10 @@ func TestNodeConverterReturnsWaitTimeoutWithoutTransition(t *testing.T) {
 func TestNodeConverterWrapsIdentityTransitionRefusal(t *testing.T) {
 	archive := &converterArchiveFake{}
 	enqueuer := &converterEnqueuerFake{}
-	service := newConverterIdentityService(t, domain.TopologyRolePrimary)
+	// PRIMARY -> NODE is now a permitted transition, so the refusal is
+	// exercised with a role the state machine does not recognize.
+	unknownRole := domain.TopologyRole("unrecognized")
+	service := newConverterIdentityService(t, unknownRole)
 	converter := newTestNodeConverter(archive, enqueuer, service, &converterWaiterFake{
 		statuses: []syncapply.ApplyJobTerminal{{Status: syncapply.ApplyTerminalStatusApplied}},
 	})
@@ -218,8 +221,28 @@ func TestNodeConverterWrapsIdentityTransitionRefusal(t *testing.T) {
 	if err == nil || !errors.Is(err, ErrNodeConversionDenied) {
 		t.Fatalf("error=%v, want ErrNodeConversionDenied", err)
 	}
-	if service.Current().Role != domain.TopologyRolePrimary || len(archive.archives) != 1 || len(enqueuer.jobs) != 1 {
+	if service.Current().Role != unknownRole || len(archive.archives) != 1 || len(enqueuer.jobs) != 1 {
 		t.Fatalf("role=%s archives=%d jobs=%d", service.Current().Role, len(archive.archives), len(enqueuer.jobs))
+	}
+}
+
+func TestNodeConverterCommitsNodeRoleFromPrimaryAndFromDemotedNode(t *testing.T) {
+	for _, role := range []domain.TopologyRole{
+		domain.TopologyRolePrimary, domain.TopologyRolePrimaryWithNodes, domain.TopologyRoleNode,
+	} {
+		archive := &converterArchiveFake{}
+		enqueuer := &converterEnqueuerFake{}
+		service := newConverterIdentityService(t, role)
+		converter := newTestNodeConverter(archive, enqueuer, service, &converterWaiterFake{
+			statuses: []syncapply.ApplyJobTerminal{{Status: syncapply.ApplyTerminalStatusApplied}},
+		})
+		result, err := converter.Convert(context.Background(), NodeConversionInput{Envelope: converterEnvelope(t), LocalNodeID: service.Current().NodeID})
+		if err != nil {
+			t.Fatalf("role=%s: Convert: %v", role, err)
+		}
+		if result.Identity.Role != domain.TopologyRoleNode || service.Current().Role != domain.TopologyRoleNode {
+			t.Fatalf("role=%s: converted role=%s", role, service.Current().Role)
+		}
 	}
 }
 

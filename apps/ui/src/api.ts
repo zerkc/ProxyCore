@@ -9,6 +9,7 @@ import type {
   EnrollmentTokenCreation,
   EnrollmentTokenSummary,
   RecoverableState,
+  TopologyConversionResult,
 } from "./types";
 
 export type {
@@ -17,6 +18,7 @@ export type {
   EnrollmentTokenCreation,
   EnrollmentTokenSummary,
   RecoverableState,
+  TopologyConversionResult,
 } from "./types";
 
 export const SESSION_USERNAME_KEY = "proxycore_username";
@@ -461,6 +463,84 @@ function normalizeTokenCreation(value: unknown): EnrollmentTokenCreation {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
+}
+
+export type TopologyApiErrorKind =
+  | "unauthorized"
+  | "forbidden"
+  | "bad-request"
+  | "generation-mismatch"
+  | "invalid-transition"
+  | "unavailable"
+  | "network"
+  | "unknown";
+
+export class TopologyApiError extends ApiError {
+  constructor(
+    status: number,
+    public readonly kind: TopologyApiErrorKind,
+    message: string,
+  ) {
+    super(status, message);
+    this.name = "TopologyApiError";
+  }
+}
+
+export function promoteTopology(
+  expectedGeneration?: number,
+  signal?: AbortSignal,
+): Promise<TopologyConversionResult> {
+  return topologyRequest("/api/topology/promote", expectedGeneration, signal);
+}
+
+export function demoteTopology(
+  expectedGeneration?: number,
+  signal?: AbortSignal,
+): Promise<TopologyConversionResult> {
+  return topologyRequest("/api/topology/demote", expectedGeneration, signal);
+}
+
+async function topologyRequest(
+  path: string,
+  expectedGeneration: number | undefined,
+  signal?: AbortSignal,
+): Promise<TopologyConversionResult> {
+  let response: Response;
+  try {
+    response = await fetch(path, {
+      method: "POST",
+      credentials: "include",
+      cache: "no-store",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        confirm: true,
+        ...(expectedGeneration === undefined ? {} : { expectedGeneration }),
+      }),
+      ...(signal ? { signal } : {}),
+    });
+  } catch {
+    throw new TopologyApiError(0, "network", "Topology service could not be reached.");
+  }
+  if (!response.ok) {
+    const body = (await response.json().catch(() => ({}))) as { code?: unknown };
+    const status = response.status;
+    const kind: TopologyApiErrorKind =
+      status === 401
+        ? "unauthorized"
+        : status === 403
+          ? "forbidden"
+          : status === 400
+            ? "bad-request"
+            : status === 409 && body.code === "GENERATION_MISMATCH"
+              ? "generation-mismatch"
+              : status === 409
+                ? "invalid-transition"
+                : status >= 500
+                  ? "unavailable"
+                  : "unknown";
+    throw new TopologyApiError(status, kind, `Topology request failed (${status})`);
+  }
+  return (await response.json().catch(() => ({ ok: true }))) as TopologyConversionResult;
 }
 
 export type BackupApiErrorKind =

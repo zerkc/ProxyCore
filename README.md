@@ -69,6 +69,24 @@ The dashboard checks the latest stable GitHub release on demand and shows a
 link when a newer version is available. The result is cached by the API; this
 feature only informs you and never updates the installation automatically.
 
+## Converting between PRIMARY and NODE
+
+Owners can change an installation's role from the dashboard (Continuity):
+
+- **Convert to NODE** (on a PRIMARY): revokes the credentials of the nodes
+  enrolled to this primary, makes the installation a read-only NODE, and
+  continues into the enrollment form (enrollment token + PRIMARY URL, preview,
+  confirm).
+- **Promote to PRIMARY** (on a NODE): bumps the generation, retires the cluster
+  key (a new one is minted lazily on the next enrollment or publication) and
+  revokes the previous node credentials. Nodes of the former primary must be
+  re-enrolled manually against the new primary. If the former primary is still
+  running, it becomes a stale primary and must rejoin explicitly as a NODE.
+
+Both actions need an explicit confirmation and are available through
+`POST /api/topology/promote` and `POST /api/topology/demote` (owner only,
+optional `expectedGeneration`).
+
 ## Stack
 
 Docker Compose on one Linux host:
