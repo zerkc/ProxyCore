@@ -21,6 +21,8 @@ type EnrollmentSnapshotPublicationHandlerOptions struct {
 	Identity    syncpublication.SnapshotIdentityReader
 	Certificate IdentityProofCertificateProvider
 	MaxBytes    int
+	// Heartbeat, when set, records each successfully authenticated pull.
+	Heartbeat NodeHeartbeatSink
 }
 
 // EnrollmentSnapshotPublicationHandler serves the immutable latest applied
@@ -30,6 +32,7 @@ type EnrollmentSnapshotPublicationHandler struct {
 	identity    syncpublication.SnapshotIdentityReader
 	certificate IdentityProofCertificateProvider
 	maxBytes    int
+	heartbeat   NodeHeartbeatSink
 }
 
 func NewEnrollmentSnapshotPublicationHandler(opts EnrollmentSnapshotPublicationHandlerOptions) *EnrollmentSnapshotPublicationHandler {
@@ -39,6 +42,7 @@ func NewEnrollmentSnapshotPublicationHandler(opts EnrollmentSnapshotPublicationH
 	}
 	return &EnrollmentSnapshotPublicationHandler{
 		store: opts.Store, identity: opts.Identity, certificate: opts.Certificate, maxBytes: maxBytes,
+		heartbeat: opts.Heartbeat,
 	}
 }
 
@@ -129,6 +133,9 @@ func (h *EnrollmentSnapshotPublicationHandler) ServeHTTP(w http.ResponseWriter, 
 		MaxBytes: h.maxBytes,
 	})
 	result, err := publisher.Publish(r.Context(), syncpublication.SnapshotRequest{Credential: canonicalBearer, After: after})
+	if state.authenticated {
+		recordNodeHeartbeat(r.Context(), h.heartbeat, state.principalNodeID, r)
+	}
 	if err != nil {
 		switch {
 		case state.revoked && state.unlinked:
@@ -226,6 +233,8 @@ type snapshotPublicationAuthState struct {
 	unlinked       bool
 	authenticated  bool
 	resultReturned bool
+	// principalNodeID is the node proven by a successful authentication.
+	principalNodeID string
 }
 
 type observingSnapshotPublicationStore struct {
@@ -244,6 +253,7 @@ func (s *observingSnapshotPublicationStore) ReadSnapshotPublication(ctx context.
 		principal, err := original(presented, record)
 		if err == nil {
 			s.state.authenticated = true
+			s.state.principalNodeID = principal.NodeID
 		}
 		return principal, err
 	}

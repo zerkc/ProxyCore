@@ -3,6 +3,7 @@ package httpserver_test
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -86,5 +87,64 @@ func TestUnlinkNodeRouteRejectsNonPrimaryRoles(t *testing.T) {
 	var unlinked *string
 	if err := env.DB.QueryRow(`select unlinked_at from enrolled_nodes where node_id = ?`, node).Scan(&unlinked); err != nil || unlinked != nil {
 		t.Fatalf("rejected unlink mutated the node: %v err=%v", unlinked, err)
+	}
+}
+
+func TestListNodesRouteOnPrimary(t *testing.T) {
+	env := newSQLiteHTTPTestServer(t)
+	cookie := sqliteOwnerCookie(t, env.Handler)
+	if rec := doJSON(t, env.Handler, http.MethodPost, httpserver.EnrollmentTokensPath, map[string]any{}, cookie); rec.Code != http.StatusCreated {
+		t.Fatalf("promote via token status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	linked := enrollFixtureNode(t, env)
+	unlinked := enrollFixtureNode(t, env)
+	if rec := doJSON(t, env.Handler, http.MethodPost, httpserver.TopologyNodesPath+"/"+unlinked+"/unlink", nil, cookie); rec.Code != http.StatusOK {
+		t.Fatalf("unlink status=%d", rec.Code)
+	}
+
+	rec := doJSON(t, env.Handler, http.MethodGet, httpserver.TopologyNodesPath, nil, cookie)
+	if rec.Code != http.StatusOK || rec.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("list status=%d headers=%v body=%s", rec.Code, rec.Header(), rec.Body.String())
+	}
+	var body struct {
+		ServerTime string `json:"serverTime"`
+		Nodes      []struct {
+			NodeID     string  `json:"nodeId"`
+			Status     string  `json:"status"`
+			UnlinkedAt *string `json:"unlinkedAt"`
+			LastSeenAt *string `json:"lastSeenAt"`
+			EnrolledAt string  `json:"enrolledAt"`
+		} `json:"nodes"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil || body.ServerTime == "" || len(body.Nodes) != 2 {
+		t.Fatalf("body=%s err=%v", rec.Body.String(), err)
+	}
+	statuses := map[string]string{}
+	for _, n := range body.Nodes {
+		statuses[n.NodeID] = n.Status
+		if n.EnrolledAt == "" {
+			t.Fatalf("missing enrolledAt: %s", rec.Body.String())
+		}
+	}
+	if statuses[linked] != "linked" || statuses[unlinked] != "unlinked" {
+		t.Fatalf("statuses=%v", statuses)
+	}
+	if strings.Contains(rec.Body.String(), "credential") {
+		t.Fatalf("list must not expose credential data: %s", rec.Body.String())
+	}
+	if anonymous := doJSON(t, env.Handler, http.MethodGet, httpserver.TopologyNodesPath, nil, nil); anonymous.Code != http.StatusUnauthorized {
+		t.Fatalf("anonymous status=%d", anonymous.Code)
+	}
+}
+
+func TestListNodesRouteRejectsNonPrimaryRoles(t *testing.T) {
+	env := newSQLiteHTTPTestServer(t)
+	cookie := sqliteOwnerCookie(t, env.Handler)
+	if rec := doJSON(t, env.Handler, http.MethodGet, httpserver.TopologyNodesPath, nil, cookie); rec.Code != http.StatusConflict {
+		t.Fatalf("standalone status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	moveIdentityToRole(t, env, domain.TopologyRoleNode)
+	if rec := doJSON(t, env.Handler, http.MethodGet, httpserver.TopologyNodesPath, nil, cookie); rec.Code != http.StatusConflict {
+		t.Fatalf("node status=%d body=%s", rec.Code, rec.Body.String())
 	}
 }

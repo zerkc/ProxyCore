@@ -28,7 +28,7 @@ const snapshot = () => Object.keys(columns).map((table) => query(`SELECT * FROM 
 try {
   migrateSQLite(db);
   const ledger = query("SELECT * FROM proxycore_schema_migrations ORDER BY version");
-  assert.equal(ledger.length, 8);
+  assert.equal(ledger.length, 9);
   assert.equal(ledger[5]!.name, "enrollment_product");
   assert.equal(ledger[3]!.name, "operational_product");
   assert.equal(ledger[2]!.name, "certificate_product");

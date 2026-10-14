@@ -127,7 +127,7 @@ func TestMigrationProductionAuthority(t *testing.T) {
 				}
 			}
 			var count int
-			if err := db.QueryRow("SELECT count(*) FROM proxycore_schema_migrations").Scan(&count); err != nil || count != 8 {
+			if err := db.QueryRow("SELECT count(*) FROM proxycore_schema_migrations").Scan(&count); err != nil || count != 9 {
 				t.Fatalf("production registry ledger count=%d error=%v", count, err)
 			}
 			if _, err := db.Exec("CREATE TABLE unrelated(id INTEGER)"); err != nil {

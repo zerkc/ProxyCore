@@ -63,7 +63,7 @@ func authVerify(t *testing.T, db *sql.DB, count int) {
 	for _, table := range []string{"users", "sessions", "audit_events", "proxycore_schema_migrations"} {
 		want := count
 		if table == "proxycore_schema_migrations" {
-			want = 8
+			want = 9
 		}
 		var n int
 		writeOK(t, db.QueryRow("SELECT count(*) FROM "+table).Scan(&n))

@@ -52,6 +52,8 @@ type EnrollmentSnapshotAcknowledgementHandlerOptions struct {
 	Identity    syncpublication.SnapshotIdentityReader
 	Certificate IdentityProofCertificateProvider
 	Now         func() time.Time
+	// Heartbeat, when set, records each accepted acknowledgement.
+	Heartbeat NodeHeartbeatSink
 }
 
 // EnrollmentSnapshotAcknowledgementHandler records the exact latest applied
@@ -64,6 +66,7 @@ type EnrollmentSnapshotAcknowledgementHandler struct {
 	identity    syncpublication.SnapshotIdentityReader
 	certificate IdentityProofCertificateProvider
 	now         func() time.Time
+	heartbeat   NodeHeartbeatSink
 }
 
 // American-spelling aliases are intentionally additive; the persisted
@@ -91,6 +94,7 @@ func NewEnrollmentSnapshotAcknowledgementHandler(opts EnrollmentSnapshotAcknowle
 	return &EnrollmentSnapshotAcknowledgementHandler{
 		store: opts.Store, authorizer: authorizer, publication: publication,
 		identity: opts.Identity, certificate: opts.Certificate, now: now,
+		heartbeat: opts.Heartbeat,
 	}
 }
 
@@ -221,6 +225,7 @@ func (h *EnrollmentSnapshotAcknowledgementHandler) ServeHTTP(w http.ResponseWrit
 		writeSnapshotAcknowledgementError(w, http.StatusForbidden)
 		return
 	}
+	recordNodeHeartbeat(r.Context(), h.heartbeat, state.principalNodeID, r)
 	w.WriteHeader(http.StatusNoContent)
 }
 

@@ -64,9 +64,34 @@ type SnapshotClient struct {
 	backoff         time.Duration
 	now             func() time.Time
 	sleep           func(context.Context, time.Duration) error
+	ingress         func() (string, string)
 }
 
+func (c *SnapshotClient) setIngressHeaders(request *http.Request) {
+	if c == nil || c.ingress == nil {
+		return
+	}
+	v4, v6 := c.ingress()
+	if v4 != "" && len(v4) <= 15 {
+		request.Header.Set(IngressIPv4Header, v4)
+	}
+	if v6 != "" && len(v6) <= 45 {
+		request.Header.Set(IngressIPv6Header, v6)
+	}
+}
+
+// Request headers a NODE uses to report its own gateway (ingress) address on
+// authenticated pulls and acknowledgements. The values are advisory display
+// data; the primary validates them and never uses them for authentication.
+const (
+	IngressIPv4Header = "X-ProxyCore-Ingress-IPv4"
+	IngressIPv6Header = "X-ProxyCore-Ingress-IPv6"
+)
+
 type SnapshotClientOptions struct {
+	// Ingress returns the node's configured gateway addresses; empty values
+	// are not sent. Nil disables reporting.
+	Ingress         func() (ipv4, ipv6 string)
 	HTTPClient      *http.Client
 	MaxBodyBytes    int64
 	MaxAttempts     int
@@ -110,6 +135,7 @@ func NewSnapshotClient(opts SnapshotClientOptions) *SnapshotClient {
 		backoff:         backoff,
 		now:             now,
 		sleep:           snapshotClientWait,
+		ingress:         opts.Ingress,
 	}
 }
 
@@ -138,6 +164,7 @@ func (c *SnapshotClient) FetchSnapshot(ctx context.Context, primaryURL string, c
 		return nil, ErrSnapshotClientInvalid
 	}
 	request.Header.Set("Authorization", "Bearer "+bearer)
+	c.setIngressHeaders(request)
 	result, err := c.fetchWithRetries(request, false)
 	return result.Body, err
 }
@@ -183,6 +210,7 @@ func (c *SnapshotClient) FetchSnapshotIfChanged(ctx context.Context, primaryURL 
 		return SnapshotFetchResult{}, ErrSnapshotClientInvalid
 	}
 	request.Header.Set("Authorization", "Bearer "+bearer)
+	c.setIngressHeaders(request)
 	return c.fetchWithRetries(request, after != "")
 }
 
@@ -226,6 +254,7 @@ func (c *SnapshotClient) AcknowledgeSnapshot(ctx context.Context, primaryURL str
 	}
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Authorization", "Bearer "+bearer)
+	c.setIngressHeaders(request)
 	response, err := c.httpClient.Do(request)
 	if err != nil {
 		if snapshotTLSFailure(err) {

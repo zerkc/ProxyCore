@@ -139,6 +139,7 @@ func (s *sqliteStack) options(cfg config.Config) []httpserver.Option {
 		httpserver.WithIdentityService(s.identity),
 		httpserver.WithEnrollmentTokenAuthority(s.tokenAuthority),
 		httpserver.WithNodeUnlinker(s.phase2),
+		httpserver.WithNodeLister(s.phase2),
 	}
 }
 

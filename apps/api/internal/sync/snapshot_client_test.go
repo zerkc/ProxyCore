@@ -372,3 +372,30 @@ func TestSnapshotClientAcknowledgeMapsDenials(t *testing.T) {
 		}
 	}
 }
+
+func TestSnapshotClientReportsIngressOnlyWhenConfigured(t *testing.T) {
+	var got http.Header
+	transport := snapshotRoundTripper(func(request *http.Request) (*http.Response, error) {
+		got = request.Header.Clone()
+		return snapshotResponse(http.StatusOK, []byte("snapshot")), nil
+	})
+	secret := bytes.Repeat([]byte{0x42}, NodeCredentialSecretBytes)
+	for _, tc := range []struct{ name, v4, v6, wantV4, wantV6 string }{
+		{name: "both", v4: "203.0.113.7", v6: "2001:db8::1", wantV4: "203.0.113.7", wantV6: "2001:db8::1"},
+		{name: "ipv4 only", v4: "203.0.113.7", wantV4: "203.0.113.7"},
+		{name: "none"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := NewSnapshotClient(SnapshotClientOptions{
+				HTTPClient: &http.Client{Transport: transport},
+				Ingress:    func() (string, string) { return tc.v4, tc.v6 },
+			})
+			if _, err := client.FetchSnapshot(context.Background(), "https://primary.example:3443/", secret); err != nil {
+				t.Fatal(err)
+			}
+			if got.Get(IngressIPv4Header) != tc.wantV4 || got.Get(IngressIPv6Header) != tc.wantV6 {
+				t.Fatalf("headers=%v", got)
+			}
+		})
+	}
+}

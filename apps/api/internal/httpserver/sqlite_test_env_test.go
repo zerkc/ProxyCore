@@ -83,6 +83,7 @@ func newSQLiteHTTPTestServer(t *testing.T, extra ...httpserver.Option) *sqliteHT
 		httpserver.WithIdentityService(identitySvc),
 		httpserver.WithEnrollmentTokenAuthority(tokenAuthority),
 		httpserver.WithNodeUnlinker(phase2),
+		httpserver.WithNodeLister(phase2),
 	}
 	server := httpserver.New(config.Config{
 		UIDist:            t.TempDir(),

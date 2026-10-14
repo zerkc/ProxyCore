@@ -141,6 +141,7 @@ func runServerWithNodeConverter(ctx context.Context, cfg config.Config, logger *
 	snapshotClient = syncpublication.NewSnapshotClient(syncpublication.SnapshotClientOptions{
 		CanonicalizeURL: enrollment.CanonicalizePrimaryURL,
 		HTTPClient:      primaryTrustHTTPClient(primaryTrust),
+		Ingress:         func() (string, string) { return cfg.ProxyIngressIPv4, cfg.ProxyIngressIPv6 },
 	})
 	nodeConverter = buildNodeConverter(enableNodeConverter, stack.phase2, identitySvc, logger)
 	if nodeConverter != nil {
@@ -230,11 +231,17 @@ func runServerWithNodeConverter(ctx context.Context, cfg config.Config, logger *
 			Now:              time.Now,
 		}
 		var err error
+		// One throttled sink is shared so a pull and its acknowledgement
+		// collapse into a single heartbeat write.
+		var heartbeat httpserver.NodeHeartbeatSink
+		if sink, ok := any(phase2Store).(httpserver.NodeHeartbeatSink); ok && phase2Store != nil {
+			heartbeat = httpserver.NewThrottledNodeHeartbeat(sink, 0, nil)
+		}
 		publicationOptions := httpserver.EnrollmentSnapshotPublicationHandlerOptions{
-			Store: phase2Store, Identity: identitySvc,
+			Store: phase2Store, Identity: identitySvc, Heartbeat: heartbeat,
 		}
 		acknowledgementOptions := httpserver.EnrollmentSnapshotAcknowledgementHandlerOptions{
-			Store: phase2Store, Identity: identitySvc,
+			Store: phase2Store, Identity: identitySvc, Heartbeat: heartbeat,
 		}
 		// A missing grant store or an unusable service makes the route answer
 		// the same uniform denial instead of revealing installation state.
