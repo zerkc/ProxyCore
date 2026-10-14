@@ -43,3 +43,13 @@ func (s *SQLiteKeyStore) ImportInWrite(v sqlitedb.WriteValue, id uuid.UUID, key 
 	}
 	return nil
 }
+
+// LoadActiveInWrite reads the unretired KEK with the given id on the caller's
+// writer connection, so a KEK imported earlier in the same Write is visible.
+// Every failure maps to ErrClusterKeyDenied. The caller must Destroy the result.
+func (s *SQLiteKeyStore) LoadActiveInWrite(v sqlitedb.WriteValue, id uuid.UUID) (KeyMaterial, error) {
+	if v.Conn() == nil || !s.readable(v.Context()) || id == uuid.Nil {
+		return KeyMaterial{}, ErrClusterKeyDenied
+	}
+	return s.loadByID(v.Context(), v.Conn(), id)
+}

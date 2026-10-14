@@ -240,35 +240,6 @@ func TestSQLiteImportSecondSnapshotReplacesContent(t *testing.T) {
 	}
 }
 
-// T13 seam: secrets and owners are replicated by the envelope but are NOT
-// materialized yet. This test documents that boundary; T13 replaces it with
-// positive assertions once secret unwrap/re-wrap and owner import exist.
-func TestSQLiteImportLeavesSecretsAndOwnersUntouched(t *testing.T) {
-	f, store := newSQLitePhase2Fixture(t)
-	usersBefore := phase2Count(t, f, `select count(*) from users`)
-	secretsBefore := phase2Count(t, f, `select count(*) from secrets`)
-	cfg := materializeConfig()
-	cfg.Certificates[0].SecretID = uuid.NewString()
-	body, _ := materializeEnvelopeBody(t, f.primaryID, cfg, func(env *replicationsnapshot.Envelope) {
-		env.Replicated.Secrets = []replicationsnapshot.ReplicatedSecret{{ID: uuid.New(), Purpose: "basic-auth-password", Envelope: "sealed"}}
-		env.Replicated.Owners = []replicationsnapshot.ReplicatedOwner{{UserID: uuid.New(), Username: "primary-owner", PasswordHash: "scrypt$x", Role: "owner"}}
-	})
-	if _, err := store.CreateApplyJobFromSnapshot(context.Background(), "import", body); err != nil {
-		t.Fatal(err)
-	}
-	if n := phase2Count(t, f, `select count(*) from users`); n != usersBefore {
-		t.Fatalf("users changed: %d -> %d", usersBefore, n)
-	}
-	if n := phase2Count(t, f, `select count(*) from secrets`); n != secretsBefore {
-		t.Fatalf("secrets changed: %d -> %d", secretsBefore, n)
-	}
-	// A certificate whose key secret is not present locally yet is stored
-	// without the reference instead of failing the foreign key.
-	if n := phase2Count(t, f, `select count(*) from certificates where key_secret_id is null`); n != 1 {
-		t.Fatalf("certificates without key reference = %d", n)
-	}
-}
-
 func TestSQLiteImportArchivesTheReplacedLocalConfiguration(t *testing.T) {
 	f, store := newSQLitePhase2Fixture(t)
 	body, _ := materializeEnvelopeBody(t, f.primaryID, materializeConfig(), nil)

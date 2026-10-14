@@ -482,7 +482,7 @@ func (s *SQLitePhase2Store) CreateApplyJobFromSnapshot(ctx context.Context, sour
 		// The node becomes a near-exact copy of the primary: materialize the
 		// replicated configuration into the editable tables in this very
 		// transaction, so tables and import revision cannot diverge.
-		if err := sqliteMaterializeImportedConfiguration(v, snapshotBytes); err != nil {
+		if err := sqliteMaterializeImportedConfiguration(v, snapshotBytes, s.keys, s.master); err != nil {
 			return fmt.Errorf("materialize imported configuration: %w", err)
 		}
 		jobID = uuid.MustParse(jobText)

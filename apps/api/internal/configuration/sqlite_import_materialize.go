@@ -7,6 +7,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/zerkc/ProxyCore/apps/api/internal/cluster"
 	"github.com/zerkc/ProxyCore/apps/api/internal/domain"
 	replicationsnapshot "github.com/zerkc/ProxyCore/apps/api/internal/snapshot"
 	"github.com/zerkc/ProxyCore/apps/api/internal/sqlitedb"
@@ -29,11 +30,11 @@ const preImportArchiveReason = "pre-import-configuration"
 // and must stay exactly the primary's value (D11); the worker substitutes
 // nodeLocal.ingress when it renders.
 //
-// T13 SEAM: secrets and owners are NOT materialized here. When T13 imports
-// them it must do so in this same transaction BEFORE the certificate rows are
-// written, so key_secret_id references resolve; until then a certificate whose
-// key secret does not exist locally is stored without the reference.
-func sqliteMaterializeImportedConfiguration(v sqlitedb.WriteValue, snapshotBytes []byte) error {
+// Secrets and owners (T13) are imported in this same transaction, secrets
+// BEFORE the certificate rows so key_secret_id references resolve; see
+// sqliteImportReplicatedSecrets and sqliteImportReplicatedOwners. A snapshot
+// that carries a secret the node cannot unwrap fails the whole import.
+func sqliteMaterializeImportedConfiguration(v sqlitedb.WriteValue, snapshotBytes []byte, keys *cluster.SQLiteKeyStore, master string) error {
 	env, err := replicationsnapshot.Unmarshal(snapshotBytes)
 	if err != nil {
 		return err
@@ -56,6 +57,12 @@ func sqliteMaterializeImportedConfiguration(v sqlitedb.WriteValue, snapshotBytes
 	}
 
 	if err := sqliteArchiveLocalConfiguration(v); err != nil {
+		return err
+	}
+	if err := sqliteImportReplicatedSecrets(v, env, keys, master); err != nil {
+		return err
+	}
+	if err := sqliteImportReplicatedOwners(v, env.Replicated.Owners); err != nil {
 		return err
 	}
 	if err := sqliteReplaceSettings(v, cfg.Settings, ingress); err != nil {
