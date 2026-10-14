@@ -1,7 +1,11 @@
+import { mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { InMemoryJobStore, InMemoryRevisionStore } from "@proxycore/db";
 import type { ControlRequest, ControlResponse } from "../../control/src/protocol";
 import { ApplyOrchestrator, type ControlClient } from "./apply";
+import { renderJobCandidates } from "./render";
 
 class FakeControl implements ControlClient {
   readonly operations: string[] = [];
@@ -71,6 +75,90 @@ describe("apply orchestrator", () => {
     expect(result.status).toBe("applied");
     expect(renderedSnapshot).toEqual(desired);
     expect(control.operations).toEqual(["stage", "validate", "promote", "reload", "health"]);
+  });
+
+  it("renders a node's own ingress over the primary's settings.ingress", async () => {
+    const { worker, job } = await setup();
+    let renderedSnapshot: unknown;
+    const desired = {
+      settings: {
+        ingress: { ipv4: "203.0.113.1", ipv6: "2001:db8::1" },
+        defaultPool: { id: "pool-1" },
+      },
+      zones: [],
+    };
+    const envelope = {
+      nodeLocal: { ingress: { ipv4: "198.51.100.77" } },
+      replicated: { configuration: desired },
+    };
+    await worker.apply(job.id, envelope as never, (snapshot) => {
+      renderedSnapshot = snapshot;
+      return { service: "coredns", candidatePath: "/candidates/revision-1", checksum: "abc" };
+    });
+
+    expect(renderedSnapshot).toEqual({
+      settings: { ingress: { ipv4: "198.51.100.77" }, defaultPool: { id: "pool-1" } },
+      zones: [],
+    });
+    // The stored envelope (and so the primary's hash) is not mutated.
+    expect(desired.settings.ingress).toEqual({ ipv4: "203.0.113.1", ipv6: "2001:db8::1" });
+  });
+
+  it("answers a proxied record with the node's ingress, not the primary's", async () => {
+    const { jobs, revisions, job, control } = await setup();
+    const candidateRoot = await mkdtemp(join(tmpdir(), "proxycore-candidates-"));
+    const worker = new ApplyOrchestrator({ jobs, revisions, control, candidateRoot });
+    const desired = {
+      settings: {
+        ingress: { ipv4: "203.0.113.1" },
+        defaultPool: { id: "default", endpoints: [{ host: "1.1.1.1", port: 53 }] },
+        forwardingRules: [],
+        retentionMaxAgeDays: 7,
+        retentionMaxSizeMb: 50,
+      },
+      zones: [
+        {
+          id: "zone-1",
+          name: "example.test",
+          enabled: true,
+          records: [
+            {
+              id: "record-1",
+              name: "app.example.test",
+              type: "A",
+              value: "192.0.2.20",
+              ttl: 300,
+              enabled: true,
+              proxied: true,
+              proxy: { origin: { ip: "192.0.2.20", port: 8080, protocol: "http" }, tlsEnabled: false },
+            },
+          ],
+        },
+      ],
+      streams: [],
+      certificates: [],
+    };
+    let zoneFile = "";
+    const result = await worker.apply(
+      job.id,
+      {
+        nodeLocal: { ingress: { ipv4: "198.51.100.77" } },
+        replicated: { configuration: desired },
+      } as never,
+      async (snapshot) => {
+        const candidates = await renderJobCandidates(snapshot, job, { candidateRoot });
+        const candidate = (Array.isArray(candidates) ? candidates : [candidates]).find(
+          (item) => item.service === "coredns",
+        )!;
+        zoneFile = Object.values(candidate.files ?? {}).join("\n");
+        return candidate;
+      },
+    );
+
+    expect(result.errorMessage).toBeUndefined();
+    expect(result.status).toBe("applied");
+    expect(zoneFile).toContain("198.51.100.77");
+    expect(zoneFile).not.toContain("203.0.113.1");
   });
 
   it("leaves the active revision unchanged when validation fails", async () => {
