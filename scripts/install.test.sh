@@ -317,15 +317,19 @@ contains "$ROOT/docs/runbooks/primary-node.md" 'NODE trust entry/import is defer
 CALLS_DIR=$(mktemp -d "${TMPDIR:-/tmp}/proxycore-install-calls.XXXXXX")
 trap 'rm -rf "$CALLS_DIR"' EXIT HUP INT TERM
 
-# run_deploy <skip_build> [failing_service] [attestations: unset|<value>]
+# run_deploy <skip_build> [failing_service] [attestations: unset|<value>] [mode]
 # Prints the recorded docker calls and installer output; returns the exit code.
+# mode is build by default so the sequential-build tests below stay unchanged;
+# the pull-mode tests pass pull explicitly.
 run_deploy() {
   deploy_skip=$1
   deploy_fail=${2:-}
   deploy_att=${3:-unset}
+  deploy_mode=${4:-build}
   : > "$CALLS_DIR/calls"
   (
     PROXYCORE_INSTALL_NO_MAIN=1 . "$ROOT/scripts/install.sh"
+    INSTALL_MODE=$deploy_mode
     SKIP_BUILD=$deploy_skip
     PROXYCORE_SKIP_MEMORY_CHECK=1
     unset BUILDX_NO_DEFAULT_ATTESTATIONS
@@ -336,6 +340,9 @@ run_deploy() {
     docker() {
       printf 'docker %s att=%s\n' "$*" "${BUILDX_NO_DEFAULT_ATTESTATIONS:-unset}" >> "$CALLS_DIR/calls"
       if [ "$1 $2" = 'compose build' ] && [ "$3" = "$deploy_fail" ]; then
+        return 1
+      fi
+      if [ "$1 $2" = 'compose pull' ] && [ "$deploy_fail" = pull ]; then
         return 1
       fi
       return 0
@@ -468,3 +475,112 @@ output=$(
   check_build_memory
 ) 2>&1
 [ -z "$output" ] || { printf 'missing meminfo must be silent: %s\n' "$output" >&2; exit 1; }
+
+# Default mode is pull: the installer reads PROXYCORE_INSTALL_MODE, defaulting
+# to pull, and a fresh source of install.sh without it must not build.
+default_mode=$(
+  unset PROXYCORE_INSTALL_MODE
+  PROXYCORE_INSTALL_NO_MAIN=1 . "$ROOT/scripts/install.sh"
+  printf '%s' "$INSTALL_MODE"
+)
+[ "$default_mode" = pull ] || { printf 'default install mode is %s, want pull\n' "$default_mode" >&2; exit 1; }
+build_mode=$(
+  PROXYCORE_INSTALL_MODE=build
+  PROXYCORE_INSTALL_NO_MAIN=1 . "$ROOT/scripts/install.sh"
+  printf '%s' "$INSTALL_MODE"
+)
+[ "$build_mode" = build ] || { printf 'PROXYCORE_INSTALL_MODE=build was ignored\n' >&2; exit 1; }
+
+# Pull mode: one pull of every service, then one up, and never a build.
+output=$(run_deploy 0 '' unset pull) || { printf 'pull deploy failed: %s\n' "$output" >&2; exit 1; }
+if grep -Fq 'compose build' "$CALLS_DIR/calls"; then
+  printf 'pull mode must not build\n' >&2
+  exit 1
+fi
+[ "$(grep -c '^docker compose pull ' "$CALLS_DIR/calls")" -eq 1 ] || {
+  printf 'pull mode must pull exactly once\n' >&2
+  exit 1
+}
+for svc in api worker control nginx coredns updater updater-bootstrap; do
+  grep '^docker compose pull ' "$CALLS_DIR/calls" | grep -Fq -- " $svc" || {
+    printf 'pull mode did not pull %s\n' "$svc" >&2
+    exit 1
+  }
+done
+[ "$(sed -n '$p' "$CALLS_DIR/calls" | cut -c1-17)" = 'docker compose up' ] || {
+  printf 'up must run after the pull\n' >&2
+  exit 1
+}
+case "$output" in
+  *'low memory'*) printf 'pull mode must not show the build memory warning\n' >&2; exit 1 ;;
+esac
+
+# A failed pull stops before up.
+if output=$(run_deploy 0 pull unset pull); then
+  printf 'failed pull did not stop the install\n' >&2
+  exit 1
+fi
+if grep -Fq 'compose up' "$CALLS_DIR/calls"; then
+  printf 'up ran after a failed pull\n' >&2
+  exit 1
+fi
+
+# SKIP_BUILD=1 skips the pull as well.
+run_deploy 1 '' unset pull >/dev/null || { printf 'SKIP_BUILD pull deploy failed\n' >&2; exit 1; }
+if grep -Eq 'compose (pull|build)' "$CALLS_DIR/calls"; then
+  printf 'SKIP_BUILD=1 must not pull or build\n' >&2
+  exit 1
+fi
+
+# Mode validation.
+output=$(
+  (
+    PROXYCORE_INSTALL_MODE=bogus
+    PROXYCORE_INSTALL_NO_MAIN=1 . "$ROOT/scripts/install.sh"
+    validate_install_mode
+  ) 2>&1
+) && { printf 'invalid PROXYCORE_INSTALL_MODE was accepted\n' >&2; exit 1; }
+
+# Architecture handling. PROXYCORE_UNAME_M stands in for `uname -m`.
+run_arch() {
+  arch_value=$1
+  arch_allow=${2:-0}
+  (
+    PROXYCORE_INSTALL_NO_MAIN=1 . "$ROOT/scripts/install.sh"
+    PROXYCORE_UNAME_M=$arch_value
+    PROXYCORE_ALLOW_UNSUPPORTED_ARCH=$arch_allow
+    check_arch
+  ) 2>&1
+}
+for supported in x86_64 amd64 aarch64 arm64; do
+  output=$(run_arch "$supported") || { printf '%s was refused: %s\n' "$supported" "$output" >&2; exit 1; }
+  [ -z "$output" ] || { printf '%s printed output: %s\n' "$supported" "$output" >&2; exit 1; }
+done
+for arm32 in armv7l armv6l; do
+  output=$(run_arch "$arm32") && { printf '%s was accepted\n' "$arm32" >&2; exit 1; }
+  case "$output" in
+    *'bun-based worker'*'64-bit OS'*) ;;
+    *) printf '%s refusal is not actionable: %s\n' "$arm32" "$output" >&2; exit 1 ;;
+  esac
+  output=$(run_arch "$arm32" 1) || { printf '%s override was refused: %s\n' "$arm32" "$output" >&2; exit 1; }
+  case "$output" in
+    *warning*) ;;
+    *) printf '%s override did not warn: %s\n' "$arm32" "$output" >&2; exit 1 ;;
+  esac
+done
+for x86_32 in i386 i686; do
+  output=$(run_arch "$x86_32") && { printf '%s was accepted\n' "$x86_32" >&2; exit 1; }
+  output=$(run_arch "$x86_32" 1) && { printf '%s override must not apply to 32-bit x86\n' "$x86_32" >&2; exit 1; }
+done
+
+# Every compose image defaults to GHCR (never a :local tag) and stays overridable.
+contains "$ROOT/compose.yaml" 'PROXYCORE_IMAGE_REPO:-ghcr.io/zerkc'
+contains "$ROOT/compose.yaml" 'PROXYCORE_VERSION:-latest'
+if grep -Fq -- ':local' "$ROOT/compose.yaml"; then
+  printf 'compose.yaml still references a :local image\n' >&2
+  exit 1
+fi
+if grep -Fq -- 'pull_policy: never' "$ROOT/compose.yaml"; then
+  printf 'compose.yaml must not forbid pulling\n' >&2
+  exit 1
+fi
