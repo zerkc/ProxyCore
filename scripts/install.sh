@@ -16,7 +16,7 @@
 #                      pull (default): download the prebuilt multi-arch images
 #                      from GHCR; nothing is compiled on the host.
 #                      build: build every image on this host (slow on small
-#                      hosts; also makes the updater default to build mode).
+#                      hosts). Install-only: updates always pull images.
 #   PROXYCORE_VERSION  Image tag to pull (default: latest)
 #   PROXYCORE_IMAGE_REPO
 #                      Image registry/owner (default: ghcr.io/zerkc)
@@ -590,10 +590,6 @@ main() {
   source_env_helper ./scripts/install_env.sh
   validate_runtime_values
   ensure_env
-  # A host that builds its images also updates by building them.
-  if [ "$INSTALL_MODE" = "build" ]; then
-    ensure_env_key PROXYCORE_UPDATE_MODE build
-  fi
 
   # The updater sidecar invokes Docker Compose through the host socket. Give
   # it the real host project path so relative bind mounts resolve on the host,
