@@ -338,13 +338,34 @@ func (t *sqlitePhase2Transaction) PublishCanonicalSnapshot(ctx context.Context, 
 	if err != nil {
 		return err
 	}
-	if existing, err := t.findCanonicalSnapshotByHash(ctx, write.ContentHash); err != nil {
+	// A content hash may be published again (a revert returns to an earlier
+	// configuration). The unique content_hash index allows one row per hash, so
+	// that row is rebound to the newer revision below. Recency is the revision
+	// number: a replay or an older revision never moves the row backwards.
+	existing, err := t.findCanonicalSnapshotByHash(ctx, write.ContentHash)
+	if err != nil {
 		return err
-	} else if existing != nil {
+	}
+	if existing != nil {
 		if sqliteCanonicalSnapshotMatches(existing.AppliedSnapshotRecord, write) {
 			return nil
 		}
-		return ErrCanonicalSnapshotConflict
+		var newNumber int
+		if err := t.v.Conn().QueryRowContext(ctx, `select revision_number from config_revisions where id = ?`,
+			write.RevisionID).Scan(&newNumber); err != nil {
+			return ErrCanonicalSnapshotConflict
+		}
+		if existing.RevisionID != nil {
+			var oldNumber int
+			err := t.v.Conn().QueryRowContext(ctx, `select revision_number from config_revisions where id = ?`,
+				*existing.RevisionID).Scan(&oldNumber)
+			if err == nil && oldNumber >= newNumber {
+				return nil
+			}
+			if err != nil && !errors.Is(err, sql.ErrNoRows) {
+				return err
+			}
+		}
 	}
 	conn := t.v.Conn()
 	revision, err := conn.ExecContext(ctx, `update config_revisions
@@ -367,6 +388,18 @@ func (t *sqlitePhase2Transaction) PublishCanonicalSnapshot(ctx context.Context, 
 		write.LeadershipGeneration, write.ApplyJobID, write.RevisionID)
 	if err := sqliteSingleRow(job, err); err != nil {
 		return err
+	}
+	if existing != nil {
+		rebound, err := conn.ExecContext(ctx, `update applied_snapshots
+			set source_primary_id = ?, leadership_generation = ?, snapshot_version = ?,
+				replication_version = ?, snapshot_body = ?, revision_id = ?,
+				status = 'applied', apply_job_id = ?, failure_code = null,
+				applied_at = ?, discarded_at = null
+			where id = ? and content_hash = ?`,
+			write.SourcePrimaryID, write.LeadershipGeneration, write.SnapshotVersion,
+			write.ReplicationVersion, write.SnapshotBody, write.RevisionID,
+			write.ApplyJobID, appliedAt, existing.ID, write.ContentHash)
+		return sqliteSingleRow(rebound, err)
 	}
 	if _, err := conn.ExecContext(ctx, `insert into applied_snapshots (
 			id, source_primary_id, leadership_generation, snapshot_version,
@@ -431,11 +464,16 @@ func (s *SQLitePhase2Store) CreateApplyJobFromSnapshot(ctx context.Context, sour
 	var jobID uuid.UUID
 	err = s.writer.Write(ctx, func(v sqlitedb.WriteValue) error {
 		conn := v.Conn()
-		// An interrupted enrollment conversion retries with the very same
-		// snapshot. The checksum is unique, so reuse the import job of that
-		// revision while it is still the latest and the job did not fail;
-		// anything else keeps failing closed through the unique index.
-		var existing string
+		// config_revisions.checksum is unique, so identical bytes always map to
+		// one revision row. Rule:
+		//  - that revision is still the latest and its import job did not fail:
+		//    an interrupted conversion/cycle retries, reuse the job;
+		//  - otherwise (a revert after other imports, or the job failed): the
+		//    revision is refreshed to be the latest unapplied revision and gets a
+		//    new queued job. The tables are re-materialized from these bytes in
+		//    the same transaction below, so an old job can never apply stale
+		//    configuration over a newer one, and a failed apply retries.
+		var existing, existingRevision string
 		err := conn.QueryRowContext(ctx, `select j.id from config_revisions r
 			join apply_jobs j on j.revision_id = r.id and j.source = 'import'
 			where r.checksum = ? and r.source = 'import'
@@ -453,12 +491,38 @@ func (s *SQLitePhase2Store) CreateApplyJobFromSnapshot(ctx context.Context, sour
 		case !errors.Is(err, sql.ErrNoRows):
 			return err
 		}
+		err = conn.QueryRowContext(ctx, `select id from config_revisions
+			where checksum = ? and source = 'import'`, metadata.snapshotHash).Scan(&existingRevision)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
 		var revisionNumber int
 		if err := conn.QueryRowContext(ctx, `select coalesce(max(revision_number), 0) + 1 from config_revisions`).Scan(&revisionNumber); err != nil {
 			return err
 		}
 		revisionID, correlationID, jobText := uuid.NewString(), uuid.NewString(), uuid.NewString()
-		if _, err := conn.ExecContext(ctx, `insert into config_revisions (
+		if existingRevision != "" {
+			revisionID = existingRevision
+			// Jobs that never finished for this revision are superseded by the
+			// refresh; terminal history stays untouched.
+			if _, err := conn.ExecContext(ctx, `update apply_jobs
+				set status = 'failed', error_message = 'superseded by a newer import of the same snapshot', finished_at = ?
+				where revision_id = ? and status in ('queued', 'validating', 'applying')`,
+				v.Timestamp(), revisionID); err != nil {
+				return err
+			}
+			if _, err := conn.ExecContext(ctx, `update config_revisions
+				set revision_number = ?, created_at = ?, applied_at = null,
+					source_primary_id = ?, source_node_id = ?, source_revision_id = null,
+					snapshot_content_hash = ?, snapshot_version = ?, replication_version = ?,
+					leadership_generation = ?
+				where id = ?`,
+				revisionNumber, v.Timestamp(), metadata.sourcePrimaryID.String(), metadata.sourceNodeID.String(),
+				metadata.contentHash, metadata.snapshotVersion, metadata.replicationVersion,
+				metadata.leadershipGeneration, revisionID); err != nil {
+				return err
+			}
+		} else if _, err := conn.ExecContext(ctx, `insert into config_revisions (
 				id, revision_number, checksum, snapshot, source, source_primary_id,
 				source_node_id, source_revision_id, snapshot_content_hash,
 				snapshot_version, replication_version, leadership_generation, created_at, applied_at

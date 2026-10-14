@@ -240,6 +240,76 @@ func TestSQLiteImportSecondSnapshotReplacesContent(t *testing.T) {
 	}
 }
 
+func materializeAlternateConfig() domain.ConfigurationSnapshot {
+	return domain.ConfigurationSnapshot{
+		Settings: domain.Settings{
+			Ingress:             domain.Ingress{IPv4: "203.0.113.9"},
+			ForwardingRules:     []domain.ForwardingRule{},
+			RetentionMaxAgeDays: 7, RetentionMaxSizeMb: 50,
+		},
+		Zones: []domain.ZoneState{{
+			ID: "55555555-5555-4555-8555-555555555555", Name: "gamma.example", Enabled: true,
+			Records: []domain.DNSRecord{{ID: "cccccccc-0000-4000-8000-000000000001", Name: "x", Type: "A", Value: "192.0.2.50", TTL: 300, Enabled: true}},
+		}},
+		Streams:      []domain.StreamRoute{},
+		Certificates: []domain.CertificateStatus{},
+	}
+}
+
+func expectNodeConfiguration(t *testing.T, f *sqlitePublicationFixture, cfg domain.ConfigurationSnapshot, label string) {
+	t.Helper()
+	want := cfg
+	want.Settings.Ingress = domain.Ingress{IPv4: materializeNodeIPv4, IPv6: materializeNodeIPv6}
+	if gotJSON, wantJSON := mustJSON(t, readNodeConfiguration(t, f)), mustJSON(t, want); gotJSON != wantJSON {
+		t.Fatalf("%s: node tables diverge\n got: %s\nwant: %s", label, gotJSON, wantJSON)
+	}
+}
+
+// The primary went A -> B -> A: the node imports identical bytes again, which
+// used to collide with the unique config_revisions.checksum index.
+func TestSQLiteImportRevertToEarlierSnapshotMaterializesAgain(t *testing.T) {
+	f, store := newSQLitePhase2Fixture(t)
+	ctx := context.Background()
+	a, _ := materializeEnvelopeBody(t, f.primaryID, materializeConfig(), nil)
+	b, _ := materializeEnvelopeBody(t, f.primaryID, materializeAlternateConfig(), nil)
+	if _, err := store.CreateApplyJobFromSnapshot(ctx, "import", a); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateApplyJobFromSnapshot(ctx, "import", b); err != nil {
+		t.Fatal(err)
+	}
+	expectNodeConfiguration(t, f, materializeAlternateConfig(), "after B")
+	if _, err := store.CreateApplyJobFromSnapshot(ctx, "import", a); err != nil {
+		t.Fatalf("revert to A: %v", err)
+	}
+	expectNodeConfiguration(t, f, materializeConfig(), "after revert")
+	if n := phase2Count(t, f, `select count(*) from config_revisions`); n != 2 {
+		t.Fatalf("revisions = %d; the revert must refresh the existing one", n)
+	}
+}
+
+// A failed import job must not wedge the node: the next cycle re-imports the
+// same bytes and re-materializes the tables.
+func TestSQLiteImportFailedJobIsRetryable(t *testing.T) {
+	f, store := newSQLitePhase2Fixture(t)
+	ctx := context.Background()
+	a, _ := materializeEnvelopeBody(t, f.primaryID, materializeConfig(), nil)
+	first, err := store.CreateApplyJobFromSnapshot(ctx, "import", a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	settingsExec(t, f.db, `update apply_jobs set status = 'failed', error_message = 'boom' where id = ?`, first.String())
+	settingsExec(t, f.db, `delete from zones`)
+	retry, err := store.CreateApplyJobFromSnapshot(ctx, "import", a)
+	if err != nil || retry == first {
+		t.Fatalf("retry = %s, %v", retry, err)
+	}
+	expectNodeConfiguration(t, f, materializeConfig(), "after retry")
+	if n := phase2Count(t, f, `select count(*) from apply_jobs where id = ? and status = 'queued'`, retry.String()); n != 1 {
+		t.Fatal("retry job is not queued")
+	}
+}
+
 func TestSQLiteImportArchivesTheReplacedLocalConfiguration(t *testing.T) {
 	f, store := newSQLitePhase2Fixture(t)
 	body, _ := materializeEnvelopeBody(t, f.primaryID, materializeConfig(), nil)
