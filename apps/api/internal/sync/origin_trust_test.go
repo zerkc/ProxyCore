@@ -172,3 +172,19 @@ func TestSnapshotClientVerifiesThroughTheOriginTrustTransport(t *testing.T) {
 		t.Fatalf("with CA body=%q err=%v, want the served body", body, err)
 	}
 }
+
+// A token-embedded CA is the only anchor for the primary's origin: when it does
+// not match the server, neither a stored CA that would have matched nor the
+// system roots rescue the connection.
+func TestOriginTrustTransportOverrideIsExclusive(t *testing.T) {
+	pki, embedded := newTrustPKI(t), newTrustPKI(t)
+	origin := startTrustServer(t, pki)
+	rt := NewOriginTrustTransport(func(context.Context, string) (string, bool, error) { return pki.caPEM, true, nil })
+	if err := trustGet(t, rt, context.Background(), origin); err != nil {
+		t.Fatalf("stored CA alone: %v", err)
+	}
+	ctx := WithTrustOverride(context.Background(), origin, embedded.caPEM)
+	if err := trustGet(t, rt, ctx, origin); !IsUntrustedCertificate(err) {
+		t.Fatalf("override with a non-matching CA err = %v, want untrusted (no fallback to store or system roots)", err)
+	}
+}

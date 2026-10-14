@@ -218,8 +218,13 @@ func (h *enrollmentWorkflowHandler) handleDraft(w http.ResponseWriter, r *http.R
 	if !ok {
 		return
 	}
-	canonicalURL, err := enrollment.CanonicalizePrimaryURL(request.PrimaryURL)
-	if err != nil || canonicalURL != request.PrimaryURL {
+	primaryURL, requestCA, wireToken, embedded, ok := resolveDraftRoute(request)
+	if !ok {
+		writeIdentityProofError(w, http.StatusBadRequest, "invalid enrollment draft request")
+		return
+	}
+	canonicalURL, err := enrollment.CanonicalizePrimaryURL(primaryURL)
+	if err != nil || canonicalURL != primaryURL {
 		writeIdentityProofError(w, http.StatusBadRequest, "invalid enrollment draft request")
 		return
 	}
@@ -237,16 +242,18 @@ func (h *enrollmentWorkflowHandler) handleDraft(w http.ResponseWriter, r *http.R
 	}
 	ctx := r.Context()
 	caPEM := ""
-	if strings.TrimSpace(request.CAPEM) != "" {
-		normalized, _, err := configuration.NormalizePrimaryTrustCA(request.CAPEM)
+	if strings.TrimSpace(requestCA) != "" {
+		normalized, _, err := configuration.NormalizePrimaryTrustCA(requestCA)
 		if err != nil {
 			writeIdentityProofError(w, http.StatusBadRequest, "invalid CA certificate")
 			return
 		}
 		caPEM = normalized
+		// A non-empty CA is the only anchor for this origin: the transport
+		// builds a pool from it alone, never the system roots.
 		ctx = syncpublication.WithTrustOverride(ctx, primaryOrigin(canonicalURL), caPEM)
 	}
-	envelope, err := h.fetchSnapshot(ctx, canonicalURL, request.Token)
+	envelope, err := h.fetchSnapshot(ctx, canonicalURL, wireToken)
 	if errors.Is(err, syncpublication.ErrSnapshotClientUntrusted) {
 		writeIdentityProofError(w, http.StatusConflict, "primary certificate not trusted; load the primary CA")
 		return
@@ -264,15 +271,53 @@ func (h *enrollmentWorkflowHandler) handleDraft(w http.ResponseWriter, r *http.R
 		writeIdentityProofError(w, http.StatusConflict, "local identity unavailable")
 		return
 	}
-	draft, err := h.cache.PutWithPrimaryURLAndToken(selector, canonicalURL, envelope, overlay, request.Token)
+	draft, err := h.cache.PutWithPrimaryURLAndToken(selector, canonicalURL, envelope, overlay, wireToken)
 	if err != nil {
 		writeIdentityProofError(w, http.StatusConflict, "enrollment draft unavailable")
 		return
 	}
-	if caPEM != "" && h.cache.AttachPrimaryCA(draft.DraftID, caPEM) {
-		draft.PrimaryCAPEM = caPEM
+	if caPEM != "" {
+		if h.cache.AttachPrimaryCA(draft.DraftID, caPEM) {
+			draft.PrimaryCAPEM = caPEM
+		} else if embedded {
+			// A token-carried CA is mandatory: never leave a draft that
+			// could confirm without it.
+			h.cache.DeleteByID(draft.DraftID)
+			writeIdentityProofError(w, http.StatusConflict, "enrollment draft unavailable")
+			return
+		}
 	}
 	h.writePreview(w, http.StatusOK, draft, overlay)
+}
+
+// resolveDraftRoute decides the primary URL, CA and wire token of a draft. A v1
+// token behaves exactly as before (URL required from the request, CA optional).
+// For a v2 token the URL and CA come from the token; when the request also
+// carries them they must match after canonicalization, never silently
+// preferring the typed value. The wire token is always the v1 spelling of
+// selector+secret, so the primary never receives the embedded URL/CA.
+func resolveDraftRoute(request enrollmentDraftRequest) (primaryURL, caPEM, wireToken string, embedded, ok bool) {
+	claims, parsed := enrollment.ParseTokenClaims(request.Token)
+	if !parsed || claims.Version != 2 {
+		for index := range claims.Secret {
+			claims.Secret[index] = 0
+		}
+		return request.PrimaryURL, request.CAPEM, request.Token, false, true
+	}
+	defer zeroBytes(claims.Secret)
+	if request.PrimaryURL != "" {
+		canonical, err := enrollment.CanonicalizePrimaryURL(request.PrimaryURL)
+		if err != nil || canonical != claims.PrimaryURL {
+			return "", "", "", true, false
+		}
+	}
+	if strings.TrimSpace(request.CAPEM) != "" {
+		normalized, _, err := configuration.NormalizePrimaryTrustCA(request.CAPEM)
+		if err != nil || normalized != claims.CAPEM {
+			return "", "", "", true, false
+		}
+	}
+	return claims.PrimaryURL, claims.CAPEM, claims.LegacyWire(), true, true
 }
 
 func (h *enrollmentWorkflowHandler) handlePreview(w http.ResponseWriter, r *http.Request) {

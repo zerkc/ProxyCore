@@ -233,3 +233,26 @@ func TestExchangeClientPinWithoutHTTPTransportFailsClosed(t *testing.T) {
 		t.Fatalf("err = %v, want ErrExchangeInvalid", err)
 	}
 }
+
+// A v2 enrollment token (URL + CA) is several KiB and is deliberately never
+// sent in the Authorization header: the node downgrades it to the 83-byte v1
+// spelling of selector+secret before any request to the primary.
+func TestValidExchangeTokenBounds(t *testing.T) {
+	v1 := "pcenr1_" + strings.Repeat("ab", 16) + "_" + strings.Repeat("A", 43)
+	for name, tc := range map[string]struct {
+		token string
+		want  bool
+	}{
+		"v1 token":         {v1, true},
+		"at the bound":     {strings.Repeat("a", exchangeMaxTokenBytes), true},
+		"one over":         {strings.Repeat("a", exchangeMaxTokenBytes+1), false},
+		"v2 sized token":   {"pcenr2_" + strings.Repeat("A", 4000), false},
+		"short":            {"pcenr1_ab", true},
+		"embedded newline": {"pcenr1_a\nb", false},
+		"empty":            {"", false},
+	} {
+		if got := validExchangeToken(tc.token); got != tc.want {
+			t.Fatalf("%s: validExchangeToken = %v, want %v", name, got, tc.want)
+		}
+	}
+}

@@ -31,10 +31,13 @@ type Server struct {
 	updaterClient    UpdaterClient
 	identitySvc      *identity.Service
 	enrollmentTokens EnrollmentTokenAuthority
-	nodeUnlinker     NodeUnlinker
-	nodeLister       NodeLister
-	backupExporter   BackupExporter
-	backupImporter   BackupImporter
+	// selfContainedTokens makes token creation mint v2 tokens that embed the
+	// primary URL and enrollment CA (and refuse when they are unavailable).
+	selfContainedTokens bool
+	nodeUnlinker        NodeUnlinker
+	nodeLister          NodeLister
+	backupExporter      BackupExporter
+	backupImporter      BackupImporter
 	// enrollmentWorkflow serves the NODE enrollment workflow routes on the
 	// main API for owner sessions. Nil means the workflow is unavailable.
 	enrollmentWorkflow *enrollmentWorkflowHandler
@@ -92,6 +95,12 @@ func WithEnrollmentTokenAuthority(authority EnrollmentTokenAuthority) Option {
 	return func(s *Server) {
 		s.enrollmentTokens = authority
 	}
+}
+
+// WithSelfContainedEnrollmentTokens enables v2 (URL+CA carrying) tokens at
+// creation time. Production wiring always sets it.
+func WithSelfContainedEnrollmentTokens() Option {
+	return func(s *Server) { s.selfContainedTokens = true }
 }
 
 func WithBackup(exporter BackupExporter, importer BackupImporter) Option {
@@ -187,6 +196,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET "+enrollmentTrustSettingsAliasCAPEM, s.handleDownloadEnrollmentCA)
 	s.mux.HandleFunc("POST "+EnrollmentTokensPath, s.handleCreateEnrollmentToken)
 	s.mux.HandleFunc("GET "+EnrollmentTokensPath, s.handleListEnrollmentTokens)
+	s.mux.HandleFunc("GET "+EnrollmentTokensPath+"/defaults", s.handleEnrollmentTokenDefaults)
 	s.mux.HandleFunc("POST "+EnrollmentTokensPath+"/{id}/revoke", s.handleRevokeEnrollmentToken)
 	s.mux.HandleFunc("GET "+TopologyNodesPath, s.handleListNodes)
 	s.mux.HandleFunc("POST "+TopologyNodesPath+"/{id}/unlink", s.handleUnlinkNode)
