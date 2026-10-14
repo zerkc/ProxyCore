@@ -31,7 +31,10 @@ type SnapshotPublicationCredentialRecord struct {
 	HashVersion         string
 	CredentialRevokedAt *time.Time
 	NodeRevokedAt       *time.Time
-	PrimaryID           string
+	// NodeUnlinkedAt is set when the primary explicitly unlinked the node. It
+	// is only a signal for a caller that proved it holds the credential secret.
+	NodeUnlinkedAt *time.Time
+	PrimaryID      string
 }
 
 // SnapshotPublicationPrincipal contains only the non-secret identity granted

@@ -31,6 +31,7 @@ type Server struct {
 	updaterClient    UpdaterClient
 	identitySvc      *identity.Service
 	enrollmentTokens EnrollmentTokenAuthority
+	nodeUnlinker     NodeUnlinker
 	backupExporter   BackupExporter
 	backupImporter   BackupImporter
 	// enrollmentWorkflow serves the NODE enrollment workflow routes on the
@@ -186,6 +187,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST "+EnrollmentTokensPath, s.handleCreateEnrollmentToken)
 	s.mux.HandleFunc("GET "+EnrollmentTokensPath, s.handleListEnrollmentTokens)
 	s.mux.HandleFunc("POST "+EnrollmentTokensPath+"/{id}/revoke", s.handleRevokeEnrollmentToken)
+	s.mux.HandleFunc("POST "+TopologyNodesPath+"/{id}/unlink", s.handleUnlinkNode)
 	s.mux.HandleFunc("POST "+TopologyPromotePath, s.handleTopologyPromote)
 	s.mux.HandleFunc("POST "+TopologyDemotePath, s.handleTopologyDemote)
 	s.mux.HandleFunc("GET "+TopologySyncPath, s.handleTopologySyncStatus)

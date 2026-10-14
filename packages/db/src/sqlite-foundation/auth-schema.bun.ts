@@ -11,7 +11,7 @@ const raw = '{"n":922337203685477580812345,"text":"雪🦊"}';
 try {
   migrateSQLite(db);
   const ledger = db.query("SELECT * FROM proxycore_schema_migrations").all();
-  assert.equal(ledger.length, 7);
+  assert.equal(ledger.length, 8);
   assert.equal((ledger[5] as { name: string }).name, "enrollment_product");
   // Full column order/type/NOT NULL/default/PK contract, including absent clocks.
   const columns = {

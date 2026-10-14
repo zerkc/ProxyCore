@@ -22,7 +22,7 @@ const columns: Record<string, Column[]> = {
   enrollment_attempts: [id, text("state", 1n, 0n, "'draft'"), text("primary_url"), optional("expected_primary_id"), optional("verified_primary_id"), optional("verified_primary_node_id"), integer("verified_leadership_generation", true), optional("verified_primary_tls_spki_sha256"), optional("verified_primary_ca_fingerprint"), optional("preview_digest"), text("local_node_ip"), optional("archive_id"), text("ephemeral_private_key_wrapped"), optional("bootstrap_payload"), optional("node_credential_secret_id"), optional("cluster_key_id"), optional("initial_snapshot_hash"), optional("initial_snapshot_revision_id"), optional("initial_apply_job_id"), optional("failure_code"), optional("confirmed_at"), text("created_at"), text("updated_at")],
   enrollment_tokens: [id, text("token_selector"), text("token_hash"), text("hash_version"), text("created_by_user_id"), text("created_at"), text("expires_at"), optional("consumed_at"), optional("consumed_by_attempt_id"), optional("revoked_at")],
   node_credentials: [id, text("node_id"), text("credential_hash"), text("hash_version"), text("created_at"), optional("last_authenticated_at"), optional("revoked_at")],
-  enrolled_nodes: [text("node_id", 1n, 1n), text("installation_id"), text("primary_id"), optional("display_name"), text("credential_id"), text("enrolled_at"), optional("revoked_at"), text("created_by_attempt_id")],
+  enrolled_nodes: [text("node_id", 1n, 1n), text("installation_id"), text("primary_id"), optional("display_name"), text("credential_id"), text("enrolled_at"), optional("revoked_at"), text("created_by_attempt_id"), optional("unlinked_at")],
   enrollment_grants: [text("attempt_id", 1n, 1n), text("token_id"), text("installation_id"), text("node_id"), text("primary_id"), integer("primary_generation"), text("node_ephemeral_public_key"), text("sealed_bootstrap_payload"), text("payload_hash"), text("created_at"), text("expires_at"), optional("verified_preview_digest")],
   node_snapshot_acks: [text("node_id", 1n, 1n), text("content_hash", 1n, 2n), integer("snapshot_version"), integer("replication_version"), text("revision_id"), integer("leadership_generation"), text("applied_at"), text("received_at")],
   sync_attempts: [id, text("node_id"), text("trigger"), text("status", 1n, 0n, "'queued'"), optional("source_primary_id"), integer("leadership_generation", true), integer("snapshot_version", true), integer("replication_version", true), optional("content_hash"), optional("revision_id"), optional("apply_job_id"), optional("result_code"), optional("started_at"), optional("finished_at"), text("created_at"), text("updated_at")],
@@ -77,9 +77,9 @@ const snapshot = () => Object.keys(columns).map((table) => query(`SELECT *,${col
 try {
   migrateSQLite(db);
   const ledger = query("SELECT * FROM proxycore_schema_migrations ORDER BY version");
-  assert.equal(ledger.length, 7);
+  assert.equal(ledger.length, 8);
   assert.equal(ledger[5]!.name, "enrollment_product");
-  assert.equal(Object.values(columns).reduce((n, cols) => n + cols.length, 0), 84);
+  assert.equal(Object.values(columns).reduce((n, cols) => n + cols.length, 0), 85);
   assert.equal(query("SELECT count(*) AS n FROM sqlite_schema WHERE type='table'")[0]!.n, 32n);
   for (const [table, expected] of Object.entries(columns)) {
     assert.deepEqual(query(`PRAGMA table_info(${table})`).map((c) => [c.name, c.type, c.notnull, c.dflt_value, c.pk]), expected);

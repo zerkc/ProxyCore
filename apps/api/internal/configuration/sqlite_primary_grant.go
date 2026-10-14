@@ -180,7 +180,7 @@ func (t *sqlitePrimaryGrantTransaction) CreateEnrolledNode(ctx context.Context, 
 			return ErrEnrollmentGrantStore
 		}
 		result, err := t.v.Conn().ExecContext(ctx, `update enrolled_nodes
-			set primary_id = ?, credential_id = ?, enrolled_at = ?, created_by_attempt_id = ?, revoked_at = null
+			set primary_id = ?, credential_id = ?, enrolled_at = ?, created_by_attempt_id = ?, revoked_at = null, unlinked_at = null
 			where node_id = ? and installation_id = ? and revoked_at is not null`,
 			node.PrimaryID, node.CredentialID, enrolled, node.CreatedByAttemptID, node.NodeID, node.InstallationID)
 		if err != nil {

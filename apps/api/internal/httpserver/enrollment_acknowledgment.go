@@ -289,6 +289,7 @@ func acknowledgementAuthenticator(state *acknowledgementAuthState) configuration
 		if state != nil {
 			state.checked = true
 			state.revoked = record.CredentialRevokedAt != nil || record.NodeRevokedAt != nil
+			state.unlinked = nodeUnlinkedForSecretHolder(presented, record)
 		}
 		principal, err := syncpublication.AuthenticateNodeCredential(presented, &syncpublication.NodeCredentialRecord{
 			ID: record.ID, NodeID: record.NodeID, Hash: record.CredentialHash,
@@ -314,11 +315,17 @@ type acknowledgementAuthState struct {
 	checked         bool
 	authenticated   bool
 	revoked         bool
+	unlinked        bool
 	principalNodeID string
 }
 
 func writeSnapshotAcknowledgementStoreError(w http.ResponseWriter, err error, state *acknowledgementAuthState) {
 	switch {
+	case state != nil && state.revoked && state.unlinked:
+		setSnapshotAcknowledgementHeaders(w)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusGone)
+		_, _ = w.Write([]byte(`{"error":"node unlinked","code":"` + NodeUnlinkedCode + `"}`))
 	case errors.Is(err, configuration.ErrSnapshotAcknowledgementRevoked), state != nil && state.revoked:
 		writeSnapshotAcknowledgementError(w, http.StatusGone)
 	case errors.Is(err, configuration.ErrSnapshotAcknowledgementUnavailable):
