@@ -77,6 +77,10 @@ type PromoteResult struct {
 	PreviousRole       domain.TopologyRole
 	PreviousGeneration domain.LeadershipGeneration
 	RevokedCredentials int
+	// ClusterKeyErr is set when the fresh cluster key could not be minted right
+	// after the commit. The promotion itself stands; the key is then minted on
+	// first use (token creation) as before.
+	ClusterKeyErr error
 }
 
 // DemoteResult is the cache-consistent outcome of a demotion.
@@ -93,7 +97,8 @@ func promotableFrom(role domain.TopologyRole) bool {
 }
 
 // Promote runs the full promotion workflow: bump the leadership generation,
-// become PRIMARY, retire the cluster key (a fresh one is minted on first use),
+// become PRIMARY, retire the cluster key (a fresh one is minted right after the
+// commit when a provisioner is registered, otherwise on first use),
 // revoke every node credential and reset the primary relationship, and write
 // an audit record. Nodes of the former primary are not repointed; they must
 // be re-enrolled against this installation.
@@ -128,6 +133,7 @@ func (s *Service) Promote(ctx context.Context, opts PromoteOptions) (PromoteResu
 		if next > s.cached.LatestKnownGeneration {
 			s.cached.LatestKnownGeneration = next
 		}
+		result.ClusterKeyErr = s.ensureClusterKeyLocked(ctx)
 		result.Identity = s.cached
 		return result, nil
 	}
@@ -147,6 +153,10 @@ func (s *Service) Promote(ctx context.Context, opts PromoteOptions) (PromoteResu
 		s.cached.LatestKnownGeneration = change.Generation
 	}
 	s.cached.ClusterKeyID = change.ClusterKeyID
+	// Mint the new generation's cluster key now so the snapshot of the current
+	// configuration can be published immediately, without waiting for a first
+	// enrollment token. Best effort: the commit above is never rolled back.
+	result.ClusterKeyErr = s.ensureClusterKeyLocked(ctx)
 	result.Identity = s.cached
 	result.RevokedCredentials = change.RevokedCredentials
 	return result, nil

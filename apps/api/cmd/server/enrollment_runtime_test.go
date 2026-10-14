@@ -377,3 +377,73 @@ func TestEnrollmentTLSListenerFactoryWiresAddressProviderAndProofOnlyHandler(t *
 		t.Fatalf("ordinary route status=%d, want %d", recorder.Code, http.StatusNotFound)
 	}
 }
+
+type mutableRuntimeIdentity struct {
+	mu    sync.Mutex
+	value identity.Identity
+}
+
+func (m *mutableRuntimeIdentity) Current(context.Context) (identity.Identity, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.value, true, nil
+}
+
+func (m *mutableRuntimeIdentity) set(mutate func(*identity.Identity)) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	mutate(&m.value)
+}
+
+type triggerCounter struct {
+	mu sync.Mutex
+	n  int
+}
+
+func (c *triggerCounter) trigger() { c.mu.Lock(); c.n++; c.mu.Unlock() }
+func (c *triggerCounter) count() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.n
+}
+
+// F1: the supervisor is woken as soon as the identity changes (for example a
+// token creation flipping standalone-primary to primary), not at the next poll.
+func TestWatchEnrollmentIdentityTriggersOnlyOnChange(t *testing.T) {
+	source := &mutableRuntimeIdentity{value: identity.Identity{Role: "standalone-primary", LeadershipGeneration: 1}}
+	counter := &triggerCounter{}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		watchEnrollmentIdentity(ctx, source, counter.trigger, time.Millisecond)
+	}()
+	eventually := func(what string, ok func() bool) {
+		t.Helper()
+		deadline := time.Now().Add(2 * time.Second)
+		for !ok() {
+			if time.Now().After(deadline) {
+				t.Fatalf("timed out: %s (triggers=%d)", what, counter.count())
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+	time.Sleep(20 * time.Millisecond)
+	if counter.count() != 0 {
+		t.Fatalf("unchanged identity triggered %d times", counter.count())
+	}
+	source.set(func(i *identity.Identity) { i.Role = "primary" })
+	eventually("role change", func() bool { return counter.count() == 1 })
+	time.Sleep(20 * time.Millisecond)
+	if counter.count() != 1 {
+		t.Fatalf("one change triggered %d times", counter.count())
+	}
+	source.set(func(i *identity.Identity) { i.Role = "node" })
+	eventually("demotion", func() bool { return counter.count() == 2 })
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("watcher did not stop on cancellation")
+	}
+}

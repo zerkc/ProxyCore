@@ -244,7 +244,13 @@ func runServerWithNodeConverter(ctx context.Context, cfg config.Config, logger *
 		}
 	}
 
-	workers := make([]func(context.Context), 0, 4)
+	workers := make([]func(context.Context), 0, 5)
+	if supervisor != nil {
+		identityWatch := &enrollmentTLSIdentityAdapter{service: identitySvc, logger: logger}
+		workers = append(workers, func(workerCtx context.Context) {
+			watchEnrollmentIdentity(workerCtx, identityWatch, supervisor.Trigger, enrollmentIdentityWatchInterval)
+		})
+	}
 	if renewalStore != nil {
 		workers = append(workers, func(workerCtx context.Context) {
 			// Ordinary renewal is gated by the live identity on every cycle and
@@ -829,5 +835,8 @@ func newEnrollmentWorkflowTLSSupervisorWithGrantExchange(cfg config.Config, iden
 		Configuration:   configurationStore,
 		ListenerFactory: factory,
 		Address:         cfg.EnrollmentTLSAddr,
+		// Hostname or material changes are not identity changes, so poll them
+		// faster than the 30s default; identity flips wake the supervisor at once.
+		ReconcileInterval: enrollmentSupervisorReconcileInterval,
 	})
 }
