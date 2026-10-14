@@ -344,17 +344,11 @@ func (s *Server) requireUser(w http.ResponseWriter, r *http.Request, roles ...au
 	if !ok {
 		return auth.User{}, false
 	}
-	if s.isOrdinaryMutation(r) {
-		if s.identityService() != nil && !s.identityWritable() {
-			writeConfigError(w, &httpError{
-				status:  http.StatusForbidden,
-				message: "Configuration writes are disabled for this topology identity",
-				code:    "TOPOLOGY_READ_ONLY",
-			})
-			return auth.User{}, false
-		}
-	}
-	if s.config != nil {
+	readOnlyIdentity := s.identityService() != nil && !s.identityWritable()
+	// Auth/role/topology-read-only checks already ran in requireAuthenticatedUser.
+	// A non-writable identity (NODE) must never initialize ingress: that can
+	// write configuration and enqueue an apply job.
+	if s.config != nil && !readOnlyIdentity {
 		if err := s.initializeIngressSideEffect(r, user); err != nil {
 			writeConfigError(w, err)
 			return auth.User{}, false
@@ -426,6 +420,14 @@ func (s *Server) requireAuthenticatedUser(w http.ResponseWriter, r *http.Request
 	}
 	if len(roles) > 0 && !roleAllowed(user.Role, roles) {
 		writeConfigError(w, &httpError{status: http.StatusForbidden, message: "Permission denied"})
+		return auth.User{}, false
+	}
+	if s.isOrdinaryMutation(r) && s.identityService() != nil && !s.identityWritable() && !nodeReadOnlyExempt(r) {
+		writeConfigError(w, &httpError{
+			status:  http.StatusForbidden,
+			message: "Configuration writes are disabled for this topology identity",
+			code:    "TOPOLOGY_READ_ONLY",
+		})
 		return auth.User{}, false
 	}
 	return user, true
