@@ -43,7 +43,9 @@ export type EnrollmentApiErrorKind =
   | "server"
   | "network"
   | "invalid-response"
-  | "payload-too-large";
+  | "payload-too-large"
+  | "untrusted-certificate"
+  | "invalid-ca";
 
 export class EnrollmentApiError extends ApiError {
   constructor(
@@ -186,13 +188,14 @@ export function draftEnrollment(
   token: string,
   primaryURL: string,
   signal?: AbortSignal,
+  caPem?: string,
 ): Promise<DraftPreview> {
   return enrollmentRequest<DraftPreview>(
     "draft",
     "/api/topology/enrollment/draft",
     {
       method: "POST",
-      body: JSON.stringify({ token, primaryURL }),
+      body: JSON.stringify({ token, primaryURL, ...(caPem ? { caPem } : {}) }),
     },
     signal,
   );
@@ -283,11 +286,14 @@ async function enrollmentRequest<T>(
   }
 
   if (!response.ok) {
+    let text = "";
     try {
-      await readBoundedText(response);
+      text = await readBoundedText(response);
     } catch {
       // Error response contents are intentionally discarded, including secrets.
     }
+    const known = draftTrustErrorKind(operation, response.status, text);
+    if (known) throw new EnrollmentApiError(response.status, known, draftTrustErrorMessages[known]);
     throw enrollmentStatusError(operation, response.status);
   }
   if (response.status === 204) return undefined as T;
@@ -361,6 +367,30 @@ async function readBoundedText(response: Response) {
     offset += chunk.byteLength;
   }
   return new TextDecoder().decode(bytes);
+}
+
+// The only error bodies the UI reads: two fixed strings from the draft route
+// that tell the owner to fix the CA, each tied to its exact status. Anything
+// else stays discarded.
+const draftTrustErrors: Record<string, { status: number; kind: "untrusted-certificate" | "invalid-ca" }> = {
+  "primary certificate not trusted; load the primary CA": { status: 409, kind: "untrusted-certificate" },
+  "invalid CA certificate": { status: 400, kind: "invalid-ca" },
+};
+const draftTrustErrorMessages = {
+  "untrusted-certificate": "The PRIMARY certificate is not trusted by this NODE.",
+  "invalid-ca": "The CA certificate is not valid.",
+} as const;
+
+function draftTrustErrorKind(operation: EnrollmentOperation, status: number, text: string) {
+  if (operation !== "draft") return undefined;
+  try {
+    const parsed = JSON.parse(text) as { error?: unknown };
+    if (typeof parsed.error !== "string" || !Object.hasOwn(draftTrustErrors, parsed.error)) return undefined;
+    const known = draftTrustErrors[parsed.error]!;
+    return known.status === status ? known.kind : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function enrollmentStatusError(operation: EnrollmentOperation, status: number) {

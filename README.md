@@ -118,6 +118,30 @@ Enter the PRIMARY URL as `https://<host>:<port>/`, with an explicit port and a
 trailing slash (for example `https://primary.example:3443/`). Other forms are
 rejected as an invalid enrollment draft request.
 
+### Trusting a self-signed or private-CA PRIMARY
+
+A NODE verifies the PRIMARY's TLS certificate with normal PKI rules. When the
+PRIMARY uses the installation CA (or any private CA), load that CA on the NODE:
+
+1. On the PRIMARY, open the enrollment trust panel and choose **Download CA**.
+   Note its SHA-256 fingerprint.
+2. On the NODE, in the enrollment form, paste the PEM (or load the file) into
+   **PRIMARY CA certificate** and preview. The preview shows the **primary ca
+   fingerprint**; confirm it matches the one the PRIMARY displays before you
+   confirm the enrollment.
+3. On confirm the CA is stored for that PRIMARY address only and is used by every
+   later call to it, including continuous sync. It never applies to another
+   address and `skipVerify` is not supported.
+
+To re-enroll against a rebuilt PRIMARY at the same address (for example after a
+failure with no backup), run the enrollment again and load its new CA: the new
+CA replaces the previous one for that address. The PRIMARY certificate must also
+list the address the NODE uses (hostname or IP) among its subject alternative
+names.
+
+A NODE that cannot verify the PRIMARY shows "The PRIMARY certificate is not
+trusted by this NODE" instead of a generic snapshot error.
+
 ### Failover and failback (A and B)
 
 1. Enroll B as a NODE of A and wait until it shows **In sync**.

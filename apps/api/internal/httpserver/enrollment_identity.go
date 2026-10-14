@@ -52,13 +52,20 @@ type EnrollmentWorkflowHandlerOptions struct {
 	// appliedHash is the primary snapshot hash imported by this enrollment.
 	// Optional: when nil the node enrolls but never syncs.
 	RecordSyncBinding EnrollmentSyncBindingRecorder
-	ArchiveTTL        time.Duration
-	ApplyWaitTimeout  time.Duration
+	// RecordPrimaryTrust persists the CA the owner loaded for the primary's
+	// origin (replacing any previous one) so continuous sync keeps verifying it.
+	// Optional: it is only called when the draft carries a CA.
+	RecordPrimaryTrust EnrollmentPrimaryTrustRecorder
+	ArchiveTTL         time.Duration
+	ApplyWaitTimeout   time.Duration
 }
 
 type enrollmentDraftRequest struct {
 	Token      string `json:"token"`
 	PrimaryURL string `json:"primaryURL"`
+	// CAPEM optionally carries the primary's CA (PEM) so a self-signed or
+	// private-CA primary can be verified; it applies to this primary only.
+	CAPEM string `json:"caPem,omitempty"`
 }
 
 type enrollmentPreviewRequest struct {
@@ -80,6 +87,9 @@ type enrollmentPreviewResponse struct {
 	EnvelopePreview  enrollmentEnvelopePreview   `json:"envelopePreview"`
 	NodeLocalOverlay enrollment.NodeLocalOverlay `json:"nodeLocalOverlay"`
 	ExpiresAt        time.Time                   `json:"expiresAt"`
+	// PrimaryCAFingerprint is the DER SHA-256 of the CA loaded for this draft,
+	// for the owner to compare with the one the primary displays.
+	PrimaryCAFingerprint string `json:"primaryCaFingerprint,omitempty"`
 }
 
 type enrollmentEnvelopePreview struct {

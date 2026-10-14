@@ -34,5 +34,11 @@
     "name": "enrollment_product",
     "file": "006_enrollment_product.sql",
     "checksum": "13e0a5f1e6a3577054f9420aec9ef97996d935ae54ce367f53e90c373ddbab93"
+  },
+  {
+    "version": 7,
+    "name": "primary_trust",
+    "file": "007_primary_trust.sql",
+    "checksum": "ae55789cb3cf5f0920c9cd482fc899257c5bce88991694d3237bb313d98071b2"
   }
 ]

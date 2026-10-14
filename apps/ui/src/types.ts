@@ -42,6 +42,8 @@ export type DraftPreview = {
   envelopePreview: EnrollmentEnvelopePreview;
   nodeLocalOverlay?: EnrollmentNodeOverlay;
   expiresAt: string;
+  /** DER SHA-256 of the PRIMARY CA loaded for this draft, when one was loaded. */
+  primaryCaFingerprint?: string;
 };
 
 export type ConfirmResult = {

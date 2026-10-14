@@ -581,9 +581,11 @@ func enrollmentFixture(t *testing.T) migrationFixture {
 	writeOK(t, err)
 	f := migrationFixture{files: map[string]string{}}
 	writeOK(t, json.Unmarshal(raw, &f.entries))
-	if len(f.entries) != 6 {
+	if len(f.entries) < 6 {
 		t.Fatal("v6 authority", len(f.entries))
 	}
+	// These tests exercise the enrollment migration (v6) as the newest one.
+	f.entries = f.entries[:6]
 	for _, entry := range f.entries {
 		body, err := migrationAssets.ReadFile("migrations/" + entry.File)
 		writeOK(t, err)

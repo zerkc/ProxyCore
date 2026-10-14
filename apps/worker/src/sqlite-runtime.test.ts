@@ -84,7 +84,7 @@ describe.skipIf(!underBun)("createWorkerRuntime", () => {
     openSQLite(path).close();
     await expect(
       createWorkerRuntime({ sqlitePath: path }, fastWait),
-    ).rejects.toThrow(/version 6.*not ready|not ready.*version 6/is);
+    ).rejects.toThrow(/version 7.*not ready|not ready.*version 7/is);
   });
 
   it("fails fast when the schema is newer than the worker supports", async () => {

@@ -11,7 +11,7 @@ const raw = '{"n":922337203685477580812345,"text":"雪🦊"}';
 try {
   migrateSQLite(db);
   const ledger = db.query("SELECT * FROM proxycore_schema_migrations").all();
-  assert.equal(ledger.length, 6);
+  assert.equal(ledger.length, 7);
   assert.equal((ledger[5] as { name: string }).name, "enrollment_product");
   // Full column order/type/NOT NULL/default/PK contract, including absent clocks.
   const columns = {
@@ -45,7 +45,7 @@ try {
       assert(ddl.includes(`${c.name} TEXT COLLATE BINARY`));
     }
   }
-  assert.deepEqual(db.query<{ name: string }, []>("SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name").all().map((r) => r.name), ["applied_snapshots", "apply_jobs", "audit_events", "certificates", "cluster_keys", "config_revisions", "dns_records", "enrolled_nodes", "enrollment_attempts", "enrollment_grants", "enrollment_tokens", "forwarding_rules", "health_observations", "installation_identity", "installation_settings", "internal_ca", "internal_ca_enrollment_state", "node_credentials", "node_snapshot_acks", "node_state", "operational_artifacts", "provider_connections", "proxycore_schema_migrations", "resolver_pools", "secrets", "sessions", "standalone_archives", "stream_routes", "sync_attempts", "users", "zones"]);
+  assert.deepEqual(db.query<{ name: string }, []>("SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name").all().map((r) => r.name), ["applied_snapshots", "apply_jobs", "audit_events", "certificates", "cluster_keys", "config_revisions", "dns_records", "enrolled_nodes", "enrollment_attempts", "enrollment_grants", "enrollment_tokens", "forwarding_rules", "health_observations", "installation_identity", "installation_settings", "internal_ca", "internal_ca_enrollment_state", "node_credentials", "node_snapshot_acks", "node_state", "operational_artifacts", "primary_trust_anchors", "provider_connections", "proxycore_schema_migrations", "resolver_pools", "secrets", "sessions", "standalone_archives", "stream_routes", "sync_attempts", "users", "zones"]);
   for (const [table, index, column] of [["users", "users_username_idx", "username"], ["sessions", "sessions_token_hash_idx", "token_hash"]]) {
     const indexes = db.query<{ name: string; unique: bigint; partial: bigint }, []>(`PRAGMA index_list(${table})`).all();
     assert(indexes.some((i) => i.name === index && i.unique === 1n && i.partial === 0n));

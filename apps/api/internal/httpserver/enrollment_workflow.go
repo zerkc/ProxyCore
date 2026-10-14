@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	gosync "sync"
 	"time"
 
@@ -136,6 +137,9 @@ type kekEnvelopeValidator interface {
 }
 
 // EnrollmentSyncBindingRecorder stores the node's primary binding.
+// EnrollmentPrimaryTrustRecorder stores the CA trusted for a primary origin.
+type EnrollmentPrimaryTrustRecorder func(ctx context.Context, origin, caPEM string) error
+
 type EnrollmentSyncBindingRecorder func(ctx context.Context, binding configuration.NodeSyncBinding, appliedHash string) error
 
 const previewDigestDomain = "proxycore/enrollment/confirm/preview-digest/v1"
@@ -152,6 +156,7 @@ type enrollmentWorkflowHandler struct {
 	acceptGrant      EnrollmentGrantAcceptor
 	loadClusterKEK   EnrollmentClusterKEKLoader
 	recordSync       EnrollmentSyncBindingRecorder
+	recordTrust      EnrollmentPrimaryTrustRecorder
 	confirming       gosync.Map
 	archiveTTL       time.Duration
 	applyWaitTimeout time.Duration
@@ -175,7 +180,7 @@ func newEnrollmentWorkflowHandler(opts EnrollmentWorkflowHandlerOptions, certifi
 		cache: opts.Cache, verifyToken: opts.VerifyToken, fetchSnapshot: opts.FetchSnapshot,
 		validator: opts.Validator, identity: opts.Identity, localIngress: opts.LocalIngress,
 		converter: opts.Converter, exchangeGrant: opts.ExchangeGrant, acceptGrant: opts.AcceptGrant,
-		loadClusterKEK: opts.LoadClusterKEK, recordSync: opts.RecordSyncBinding, archiveTTL: archiveTTL, applyWaitTimeout: applyWaitTimeout,
+		loadClusterKEK: opts.LoadClusterKEK, recordSync: opts.RecordSyncBinding, recordTrust: opts.RecordPrimaryTrust, archiveTTL: archiveTTL, applyWaitTimeout: applyWaitTimeout,
 		certificate: certificate,
 	}
 }
@@ -230,7 +235,22 @@ func (h *enrollmentWorkflowHandler) handleDraft(w http.ResponseWriter, r *http.R
 		writeIdentityProofError(w, http.StatusServiceUnavailable, "enrollment workflow unavailable")
 		return
 	}
-	envelope, err := h.fetchSnapshot(r.Context(), canonicalURL, request.Token)
+	ctx := r.Context()
+	caPEM := ""
+	if strings.TrimSpace(request.CAPEM) != "" {
+		normalized, _, err := configuration.NormalizePrimaryTrustCA(request.CAPEM)
+		if err != nil {
+			writeIdentityProofError(w, http.StatusBadRequest, "invalid CA certificate")
+			return
+		}
+		caPEM = normalized
+		ctx = syncpublication.WithTrustOverride(ctx, primaryOrigin(canonicalURL), caPEM)
+	}
+	envelope, err := h.fetchSnapshot(ctx, canonicalURL, request.Token)
+	if errors.Is(err, syncpublication.ErrSnapshotClientUntrusted) {
+		writeIdentityProofError(w, http.StatusConflict, "primary certificate not trusted; load the primary CA")
+		return
+	}
 	if err != nil || envelope == nil {
 		writeIdentityProofError(w, http.StatusConflict, "primary snapshot unavailable")
 		return
@@ -248,6 +268,9 @@ func (h *enrollmentWorkflowHandler) handleDraft(w http.ResponseWriter, r *http.R
 	if err != nil {
 		writeIdentityProofError(w, http.StatusConflict, "enrollment draft unavailable")
 		return
+	}
+	if caPEM != "" && h.cache.AttachPrimaryCA(draft.DraftID, caPEM) {
+		draft.PrimaryCAPEM = caPEM
 	}
 	h.writePreview(w, http.StatusOK, draft, overlay)
 }
@@ -354,8 +377,13 @@ func (h *enrollmentWorkflowHandler) handleConfirm(w http.ResponseWriter, r *http
 		return
 	}
 
+	// The owner-loaded CA (if any) verifies every call to this primary below.
+	ctx := r.Context()
+	if draft.PrimaryCAPEM != "" {
+		ctx = syncpublication.WithTrustOverride(ctx, primaryOrigin(draft.PrimaryURL), draft.PrimaryCAPEM)
+	}
 	// 1. exchange (the primary consumes the token and seals to our key)
-	exchanged, err := h.exchangeGrant(r.Context(), draft.PrimaryURL, token, exchangeRequest)
+	exchanged, err := h.exchangeGrant(ctx, draft.PrimaryURL, token, exchangeRequest)
 	if err != nil {
 		h.writeExchangeFailure(w, request.DraftID, err)
 		return
@@ -386,6 +414,15 @@ func (h *enrollmentWorkflowHandler) handleConfirm(w http.ResponseWriter, r *http
 	if !result.OK || len(result.Issues) != 0 {
 		writeIdentityProofError(w, http.StatusConflict, "primary snapshot denied")
 		return
+	}
+	// 3a. persist the owner-loaded CA (replacing any previous one for this
+	// origin) so continuous sync keeps verifying the primary. Failing closed
+	// here avoids a node that enrolls but can never sync.
+	if draft.PrimaryCAPEM != "" {
+		if h.recordTrust == nil || h.recordTrust(r.Context(), primaryOrigin(draft.PrimaryURL), draft.PrimaryCAPEM) != nil {
+			writeIdentityProofError(w, http.StatusServiceUnavailable, "enrollment workflow unavailable")
+			return
+		}
 	}
 	// 3b. remember the primary before the role commit point, so a node can
 	// never exist without the binding continuous sync needs. A failed convert
@@ -578,10 +615,26 @@ func requestedOverlayMatches(requestedNodeID string, requestedIngress *domain.In
 }
 
 func (h *enrollmentWorkflowHandler) writePreview(w http.ResponseWriter, status int, draft enrollment.Draft, overlay enrollment.NodeLocalOverlay) {
-	writeWorkflowJSON(w, status, enrollmentPreviewResponse{
+	response := enrollmentPreviewResponse{
 		DraftID: draft.DraftID, EnvelopePreview: newEnvelopePreview(draft.Envelope, overlay),
 		NodeLocalOverlay: overlay, ExpiresAt: draft.ExpiresAt,
-	})
+	}
+	if draft.PrimaryCAPEM != "" {
+		if _, fingerprint, err := configuration.NormalizePrimaryTrustCA(draft.PrimaryCAPEM); err == nil {
+			response.PrimaryCAFingerprint = fingerprint
+		}
+	}
+	writeWorkflowJSON(w, status, response)
+}
+
+// primaryOrigin reduces a canonical primary URL to its "https://host:port"
+// trust key.
+func primaryOrigin(primaryURL string) string {
+	parsed, err := url.Parse(primaryURL)
+	if err != nil || parsed.Host == "" {
+		return ""
+	}
+	return "https://" + strings.ToLower(parsed.Host)
 }
 
 func newEnvelopePreview(envelope *replicationsnapshot.Envelope, overlay enrollment.NodeLocalOverlay) enrollmentEnvelopePreview {

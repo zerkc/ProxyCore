@@ -38,8 +38,11 @@ type Draft struct {
 	PrimaryURL string
 	Envelope   *replicationsnapshot.Envelope
 	Overlay    NodeLocalOverlay
-	CreatedAt  time.Time
-	ExpiresAt  time.Time
+	// PrimaryCAPEM is the owner-loaded CA used to verify this primary. It is
+	// public certificate material, kept only until the draft is confirmed.
+	PrimaryCAPEM string
+	CreatedAt    time.Time
+	ExpiresAt    time.Time
 }
 
 type DraftCacheOptions struct {
@@ -189,6 +192,26 @@ func (c *DraftCache) GetByID(id string) (Draft, bool) {
 		return Draft{}, false
 	}
 	return c.getLocked(selector, c.now().UTC())
+}
+
+// AttachPrimaryCA records the validated CA the owner loaded for this draft's
+// primary. It reports false when the draft does not exist or has expired.
+func (c *DraftCache) AttachPrimaryCA(id, caPEM string) bool {
+	if c == nil || id == "" {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	selector, ok := c.byID[id]
+	if !ok {
+		return false
+	}
+	entry := c.entries[selector]
+	if entry == nil || !c.now().UTC().Before(entry.draft.ExpiresAt) {
+		return false
+	}
+	entry.draft.PrimaryCAPEM = caPEM
+	return true
 }
 
 func (c *DraftCache) DeleteByID(id string) {

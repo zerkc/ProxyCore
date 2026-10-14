@@ -77,10 +77,10 @@ const snapshot = () => Object.keys(columns).map((table) => query(`SELECT *,${col
 try {
   migrateSQLite(db);
   const ledger = query("SELECT * FROM proxycore_schema_migrations ORDER BY version");
-  assert.equal(ledger.length, 6);
+  assert.equal(ledger.length, 7);
   assert.equal(ledger[5]!.name, "enrollment_product");
   assert.equal(Object.values(columns).reduce((n, cols) => n + cols.length, 0), 84);
-  assert.equal(query("SELECT count(*) AS n FROM sqlite_schema WHERE type='table'")[0]!.n, 31n);
+  assert.equal(query("SELECT count(*) AS n FROM sqlite_schema WHERE type='table'")[0]!.n, 32n);
   for (const [table, expected] of Object.entries(columns)) {
     assert.deepEqual(query(`PRAGMA table_info(${table})`).map((c) => [c.name, c.type, c.notnull, c.dflt_value, c.pk]), expected);
     const ddl = query(`SELECT sql FROM sqlite_schema WHERE name='${table}'`)[0]!.sql as string;

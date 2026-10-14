@@ -60,7 +60,13 @@ type confirmFixture struct {
 	bindings        []configuration.NodeSyncBinding
 	boundHashes     []string
 	bindErr         error
+	exchangeCAs     []string
+	trusts          []trustRecord
+	trustErr        error
+	order           []string
 }
+
+type trustRecord struct{ origin, caPEM string }
 
 type kekValidatorFunc func(context.Context, replicationsnapshot.Envelope, *cluster.KEK) replicationsnapshot.ValidationResult
 
@@ -146,9 +152,20 @@ func newConfirmFixture(t *testing.T, withToken bool) *confirmFixture {
 			ExchangeGrant:  f.exchange,
 			AcceptGrant:    f.accept,
 			LoadClusterKEK: f.loadKEK,
+			RecordPrimaryTrust: func(_ context.Context, origin, caPEM string) error {
+				f.mu.Lock()
+				defer f.mu.Unlock()
+				if f.trustErr != nil {
+					return f.trustErr
+				}
+				f.trusts = append(f.trusts, trustRecord{origin, caPEM})
+				f.order = append(f.order, "trust")
+				return nil
+			},
 			RecordSyncBinding: func(_ context.Context, binding configuration.NodeSyncBinding, appliedHash string) error {
 				f.mu.Lock()
 				defer f.mu.Unlock()
+				f.order = append(f.order, "bind")
 				if f.bindErr != nil {
 					return f.bindErr
 				}
@@ -162,9 +179,11 @@ func newConfirmFixture(t *testing.T, withToken bool) *confirmFixture {
 }
 
 // exchange plays the primary: same attempt -> same sealed payload (exact retry).
-func (f *confirmFixture) exchange(_ context.Context, _ string, token string, req syncpublication.ExchangeRequest) (syncpublication.ExchangeResult, error) {
+func (f *confirmFixture) exchange(ctx context.Context, _ string, token string, req syncpublication.ExchangeRequest) (syncpublication.ExchangeResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	ca, _ := syncpublication.TrustOverrideFor(ctx, "https://primary.example:3443")
+	f.exchangeCAs = append(f.exchangeCAs, ca)
 	f.exchangeTokens = append(f.exchangeTokens, token)
 	f.exchangeReqs = append(f.exchangeReqs, req)
 	if f.exchangeErr != nil {
