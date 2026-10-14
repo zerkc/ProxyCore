@@ -7,6 +7,7 @@ import { DashboardProvider, useDashboard } from "./dashboard/dashboard-context";
 import DashboardShell from "./dashboard/DashboardShell";
 import { DnsZonesView } from "./dashboard/dns/DnsZonesView";
 import { ZoneRecordsView } from "./dashboard/dns/ZoneRecordsView";
+import { NodesView } from "./dashboard/NodesView";
 import { IngressView } from "./dashboard/IngressView";
 import { StreamsView } from "./dashboard/streams/StreamsView";
 import { Overview } from "./dashboard/views";
@@ -40,6 +41,7 @@ function DashboardRoutes() {
             element={<DashboardCertificatesPage />}
           />
           <Route path="continuity" element={<DashboardContinuityPage />} />
+          <Route path="nodes" element={<DashboardNodesPage />} />
           <Route path="ingress" element={<IngressView />} />
           <Route path="streams" element={<DashboardStreamsPage />} />
           <Route path="backup" element={<BackupView />} />
@@ -104,6 +106,11 @@ function DashboardCertificatesPage() {
 function DashboardContinuityPage() {
   const { identity } = useDashboard();
   return <ContinuityView identity={identity} />;
+}
+
+function DashboardNodesPage() {
+  const { identity } = useDashboard();
+  return <NodesView role={identity?.role} />;
 }
 
 function DashboardStreamsPage() {

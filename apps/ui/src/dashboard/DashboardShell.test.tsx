@@ -28,6 +28,8 @@ describe("dashboard continuity navigation", () => {
       icon: "backup",
     });
     expect(resolveDashboardNav("/dashboard/backup").id).toBe("backup");
+    expect(resolveDashboardNav("/dashboard/nodes").id).toBe("nodes");
+    expect(resolveDashboardNav("/dashboard/continuity").id).toBe("continuity");
     expect(
       getDashboardNavigation("ordinary").some((item) => item.id === "backup"),
     ).toBe(true);

@@ -74,7 +74,14 @@ describe("NodesView", () => {
   it("does not call the API on a non-primary role", async () => {
     const fetchMock = queueFetch();
     const container = await mount(createElement(NodesView, { role: "node" }));
-    expect(container.textContent).toBe("");
+    expect(byTestId(container, "nodes-unavailable")).toBeDefined();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("shows the blocked state without an API call when the role is unknown", async () => {
+    const fetchMock = queueFetch();
+    const container = await mount(createElement(NodesView, {}));
+    expect(byTestId(container, "nodes-unavailable")).toBeDefined();
     expect(fetchMock).not.toHaveBeenCalled();
   });
 

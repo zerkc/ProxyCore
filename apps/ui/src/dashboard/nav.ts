@@ -28,8 +28,7 @@ export const dashboardNav = [
     icon: "continuity",
   },
   {
-    // Rendered inside the continuity page (anchor), primaries only.
-    href: "/dashboard/continuity#nodes",
+    href: "/dashboard/nodes",
     id: "nodes",
     label: "nodes",
     title: "linked nodes",

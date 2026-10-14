@@ -119,7 +119,13 @@ export function NodesView({ role }: { role?: TopologyRole }) {
     if (mounted.current) setBusy(false);
   }
 
-  if (!enabled) return null;
+  if (!enabled) {
+    return (
+      <p className="mt-8 border-y border-dashed border-line px-1 py-5 text-sm text-faint" role="status" data-testid="nodes-unavailable">
+        Nodes are listed only on a PRIMARY.
+      </p>
+    );
+  }
 
   return (
     <section id="nodes" className="mt-8 space-y-4 border-t border-line/80 pt-6" aria-labelledby="nodes-title" data-testid="nodes-view">
