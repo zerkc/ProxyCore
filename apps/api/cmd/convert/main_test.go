@@ -189,7 +189,7 @@ func TestRunConvertsValidatesAndPublishes(t *testing.T) {
 	if err := json.Unmarshal(raw, &marker); err != nil {
 		t.Fatal(err)
 	}
-	if marker.Format == "" || marker.ToolVersion == "" || marker.ConvertedAt == "" || marker.SchemaVersion != 6 ||
+	if marker.Format == "" || marker.ToolVersion == "" || marker.ConvertedAt == "" || marker.SchemaVersion != 7 ||
 		len(marker.Fingerprint) != 64 || len(marker.Tables) != 30 || marker.Tables["secrets"].Rows != 1 || marker.Tables["secrets"].Hash == "" {
 		t.Errorf("marker: %s", raw)
 	}
