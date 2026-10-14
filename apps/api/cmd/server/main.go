@@ -145,6 +145,39 @@ func runServerWithNodeConverter(ctx context.Context, cfg config.Config, logger *
 	}
 	options = append(options, stack.backupOptions(cfg)...)
 
+	// Continuous sync: a NODE keeps pulling its primary's snapshots. The loop
+	// is inert on every other role and when the installation has no binding.
+	nodeSyncStore := configuration.NewSQLiteNodeSyncStore(stack.writer)
+	nodeSyncInterval := nodeSyncIntervalFromEnv()
+	var nodeSyncer *syncpublication.NodeSyncer
+	if localKEKLoader != nil && stack.keys != nil && stack.db != nil && cfg.MasterKeyBase64 != "" {
+		credentialReader := enrollment.NewBootstrapAcceptor(enrollment.BootstrapAcceptorOptions{
+			DB: stack.db, Writer: stack.writer, Keys: stack.keys, MasterKeyBase64: cfg.MasterKeyBase64,
+		})
+		nodeSyncer = newNodeSyncer(nodeSyncDependencies{
+			Store:          nodeSyncStore,
+			Identity:       identitySvc,
+			Client:         snapshotClient,
+			Converter:      buildNodeConverter(true, stack.phase2, identitySvc, logger),
+			Validator:      httpserver.NewLocalKEKSnapshotValidator(localKEKLoader),
+			LoadCredential: credentialReader.LoadNodeCredentialSecret,
+			Ingress: func() domain.Ingress {
+				return domain.Ingress{IPv4: cfg.ProxyIngressIPv4, IPv6: cfg.ProxyIngressIPv6}
+			},
+			Interval: nodeSyncInterval,
+			Logger:   logger,
+		})
+	}
+	topologySync := httpserver.TopologySyncOptions{
+		LoadState:     nodeSyncStore.LoadNodeSyncState,
+		PublishedHash: stack.phase2.LatestPublishedContentHash,
+		Interval:      nodeSyncInterval,
+	}
+	if nodeSyncer != nil {
+		topologySync.Retry = nodeSyncer.Retry
+	}
+	options = append(options, httpserver.WithTopologySync(topologySync))
+
 	draftCache := enrollment.NewDraftCache(enrollment.DraftCacheOptions{})
 	var supervisor *enrollment.EnrollmentTLSSupervisor
 	var workflow httpserver.EnrollmentWorkflowHandlerOptions
@@ -165,6 +198,9 @@ func runServerWithNodeConverter(ctx context.Context, cfg config.Config, logger *
 		}
 		wireEnrollmentWorkflowDependencies(&workflow, snapshotClient, localKEKLoader)
 		wireEnrollmentGrantExchange(&workflow, stack, cfg.MasterKeyBase64)
+		workflow.RecordSyncBinding = func(ctx context.Context, binding configuration.NodeSyncBinding, appliedHash string) error {
+			return nodeSyncStore.BindNodeSync(ctx, binding, appliedHash, time.Now().UTC())
+		}
 		options = append(options, httpserver.WithEnrollmentWorkflow(workflow))
 	}
 
@@ -208,7 +244,7 @@ func runServerWithNodeConverter(ctx context.Context, cfg config.Config, logger *
 		}
 	}
 
-	workers := make([]func(context.Context), 0, 3)
+	workers := make([]func(context.Context), 0, 4)
 	if renewalStore != nil {
 		workers = append(workers, func(workerCtx context.Context) {
 			// Ordinary renewal is gated by the live identity on every cycle and
@@ -230,6 +266,11 @@ func runServerWithNodeConverter(ctx context.Context, cfg config.Config, logger *
 		})
 		workers = append(workers, func(workerCtx context.Context) {
 			publicationProducer.Run(workerCtx)
+		})
+	}
+	if nodeSyncer != nil {
+		workers = append(workers, func(workerCtx context.Context) {
+			nodeSyncer.Run(workerCtx)
 		})
 	}
 	// Start the standalone-archive retention worker. Phase 1 introduces

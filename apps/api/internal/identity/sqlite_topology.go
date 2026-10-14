@@ -72,6 +72,11 @@ func (s *SQLiteStore) PromoteTopology(ctx context.Context, in PromoteInput) (Top
 		); err != nil {
 			return err
 		}
+		// The node's sync progress describes a relationship that just ended.
+		if _, err := v.Conn().ExecContext(v.Context(),
+			`delete from health_observations where component = 'node-sync'`); err != nil {
+			return err
+		}
 		if err := sqliteInsertTopologyAudit(v, auditActionPromote, in.ActorUserID, current, map[string]any{
 			"previousRole":       string(current.Role),
 			"previousGeneration": int64(current.LeadershipGeneration),

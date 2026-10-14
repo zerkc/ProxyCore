@@ -265,3 +265,110 @@ func snapshotResponse(status int, body []byte) *http.Response {
 		Body: io.NopCloser(bytes.NewReader(body)), Header: make(http.Header),
 	}
 }
+
+func TestSnapshotClientConditionalFetchSendsAfterAndReadsNotModified(t *testing.T) {
+	after := strings.Repeat("a", 64)
+	appliedAt := time.Date(2026, 3, 4, 5, 6, 7, 8, time.UTC)
+	var rawQuery string
+	client := NewSnapshotClient(SnapshotClientOptions{
+		HTTPClient: &http.Client{Transport: snapshotRoundTripper(func(request *http.Request) (*http.Response, error) {
+			rawQuery = request.URL.RawQuery
+			response := snapshotResponse(http.StatusNotModified, nil)
+			response.Header.Set(SnapshotContentHashHeader, after)
+			response.Header.Set(SnapshotAppliedAtHeader, appliedAt.Format(time.RFC3339Nano))
+			return response, nil
+		})},
+	})
+	got, err := client.FetchSnapshotIfChanged(context.Background(), "https://primary.example:3443/", bytes.Repeat([]byte{0x42}, NodeCredentialSecretBytes), after)
+	if err != nil {
+		t.Fatalf("FetchSnapshotIfChanged: %v", err)
+	}
+	if rawQuery != "after="+after || !got.NotModified || got.ContentHash != after || !got.AppliedAt.Equal(appliedAt) || len(got.Body) != 0 {
+		t.Fatalf("query=%q result=%+v", rawQuery, got)
+	}
+}
+
+func TestSnapshotClientConditionalFetchReturnsBodyAndMetadata(t *testing.T) {
+	hash := strings.Repeat("b", 64)
+	appliedAt := time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC)
+	client := NewSnapshotClient(SnapshotClientOptions{
+		HTTPClient: &http.Client{Transport: snapshotRoundTripper(func(*http.Request) (*http.Response, error) {
+			response := snapshotResponse(http.StatusOK, []byte("snapshot"))
+			response.Header.Set(SnapshotContentHashHeader, hash)
+			response.Header.Set(SnapshotAppliedAtHeader, appliedAt.Format(time.RFC3339Nano))
+			return response, nil
+		})},
+	})
+	got, err := client.FetchSnapshotIfChanged(context.Background(), "https://primary.example:3443/", bytes.Repeat([]byte{0x42}, NodeCredentialSecretBytes), "")
+	if err != nil || got.NotModified || string(got.Body) != "snapshot" || got.ContentHash != hash || !got.AppliedAt.Equal(appliedAt) {
+		t.Fatalf("result=%+v err=%v", got, err)
+	}
+}
+
+func TestSnapshotClientConditionalFetchRejectsUnexpectedNotModified(t *testing.T) {
+	client := NewSnapshotClient(SnapshotClientOptions{
+		HTTPClient: &http.Client{Transport: snapshotRoundTripper(func(*http.Request) (*http.Response, error) {
+			return snapshotResponse(http.StatusNotModified, nil), nil
+		})},
+	})
+	credential := bytes.Repeat([]byte{0x42}, NodeCredentialSecretBytes)
+	if _, err := client.FetchSnapshotIfChanged(context.Background(), "https://primary.example:3443/", credential, strings.Repeat("a", 64)); !errors.Is(err, ErrSnapshotClientInvalid) {
+		t.Fatalf("304 without metadata = %v, want ErrSnapshotClientInvalid", err)
+	}
+	if _, err := client.FetchSnapshotIfChanged(context.Background(), "https://primary.example:3443/", credential, ""); !errors.Is(err, ErrSnapshotClientInvalid) {
+		t.Fatalf("304 to an unconditional request = %v, want ErrSnapshotClientInvalid", err)
+	}
+	if _, err := client.FetchSnapshotIfChanged(context.Background(), "https://primary.example:3443/", credential, "not-a-hash"); !errors.Is(err, ErrSnapshotClientInvalid) {
+		t.Fatalf("malformed after = %v", err)
+	}
+}
+
+func TestSnapshotClientAcknowledgePostsPrimaryMetadataWithBearer(t *testing.T) {
+	credential, err := NewNodeCredential("11112222-3333-4444-8999-aabbccddeeff", bytes.Repeat([]byte{0x19}, NodeCredentialSecretBytes))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer credential.Destroy()
+	hash := strings.Repeat("c", 64)
+	appliedAt := time.Date(2026, 3, 4, 5, 6, 7, 9, time.UTC)
+	var method, path, authorization, body string
+	client := NewSnapshotClient(SnapshotClientOptions{
+		HTTPClient: &http.Client{Transport: snapshotRoundTripper(func(request *http.Request) (*http.Response, error) {
+			method, path, authorization = request.Method, request.URL.Path, request.Header.Get("Authorization")
+			raw, _ := io.ReadAll(request.Body)
+			body = string(raw)
+			return snapshotResponse(http.StatusNoContent, nil), nil
+		})},
+	})
+	nodeID := "99998888-7777-4666-8555-444433332222"
+	err = client.AcknowledgeSnapshot(context.Background(), "https://primary.example:3443/", []byte(credential.BearerCopy()), nodeID, hash, appliedAt)
+	if err != nil {
+		t.Fatalf("AcknowledgeSnapshot: %v", err)
+	}
+	if method != http.MethodPost || path != "/api/topology/sync/acknowledge" || authorization != "Bearer "+credential.BearerCopy() {
+		t.Fatalf("method=%s path=%s", method, path)
+	}
+	for _, want := range []string{`"nodeId":"` + nodeID + `"`, `"contentHash":"` + hash + `"`, `"primaryUrl":"https://primary.example:3443`, `"appliedAt":"2026-03-04T05:06:07.000000009Z"`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("body %s missing %s", body, want)
+		}
+	}
+}
+
+func TestSnapshotClientAcknowledgeMapsDenials(t *testing.T) {
+	for status, want := range map[int]error{
+		http.StatusGone: ErrSnapshotClientGone, http.StatusForbidden: ErrSnapshotClientUnauthorized,
+		http.StatusServiceUnavailable: ErrSnapshotClientUnavailable, http.StatusBadRequest: ErrSnapshotClientInvalid,
+	} {
+		client := NewSnapshotClient(SnapshotClientOptions{
+			HTTPClient: &http.Client{Transport: snapshotRoundTripper(func(*http.Request) (*http.Response, error) {
+				return snapshotResponse(status, []byte(`{"error":"x"}`)), nil
+			})},
+		})
+		err := client.AcknowledgeSnapshot(context.Background(), "https://primary.example:3443/",
+			bytes.Repeat([]byte{0x42}, NodeCredentialSecretBytes), "99998888-7777-4666-8555-444433332222", strings.Repeat("c", 64), time.Now())
+		if !errors.Is(err, want) {
+			t.Fatalf("status %d: err=%v want %v", status, err, want)
+		}
+	}
+}

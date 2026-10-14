@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/zerkc/ProxyCore/apps/api/internal/configuration"
 	"github.com/zerkc/ProxyCore/apps/api/internal/domain"
@@ -60,7 +61,12 @@ func NewEnrollmentSnapshotPublicationMux(publication *EnrollmentSnapshotPublicat
 func (h *EnrollmentSnapshotPublicationHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	setSnapshotPublicationHeaders(w)
 	if r == nil || r.URL == nil || r.URL.Path != EnrollmentSnapshotPublicationPath ||
-		r.URL.RawPath != "" || r.URL.RawQuery != "" || r.URL.ForceQuery {
+		r.URL.RawPath != "" || r.URL.ForceQuery {
+		writeSnapshotPublicationError(w, http.StatusNotFound)
+		return
+	}
+	after, queryOK := parseSnapshotAfterQuery(r.URL.RawQuery)
+	if !queryOK {
 		writeSnapshotPublicationError(w, http.StatusNotFound)
 		return
 	}
@@ -122,7 +128,7 @@ func (h *EnrollmentSnapshotPublicationHandler) ServeHTTP(w http.ResponseWriter, 
 	publisher := syncpublication.NewSnapshotPublisher(store, h.identity, syncpublication.SnapshotPublisherOptions{
 		MaxBytes: h.maxBytes,
 	})
-	result, err := publisher.Publish(r.Context(), syncpublication.SnapshotRequest{Credential: canonicalBearer})
+	result, err := publisher.Publish(r.Context(), syncpublication.SnapshotRequest{Credential: canonicalBearer, After: after})
 	if err != nil {
 		switch {
 		case state.revoked:
@@ -134,13 +140,52 @@ func (h *EnrollmentSnapshotPublicationHandler) ServeHTTP(w http.ResponseWriter, 
 		}
 		return
 	}
+	if result.Current {
+		// The caller already holds the latest snapshot. The headers tell it the
+		// primary's hash and applied_at so it can acknowledge without a body.
+		setSnapshotMetadataHeaders(w, result.Metadata)
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
 	if len(result.Bytes) == 0 {
 		writeSnapshotPublicationError(w, http.StatusNoContent)
 		return
 	}
+	setSnapshotMetadataHeaders(w, result.Metadata)
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(result.Bytes)
+}
+
+// parseSnapshotAfterQuery accepts either no query or exactly one `after`
+// parameter holding a canonical lowercase SHA-256 hex content hash.
+func parseSnapshotAfterQuery(raw string) (string, bool) {
+	if raw == "" {
+		return "", true
+	}
+	const prefix = "after="
+	if !strings.HasPrefix(raw, prefix) {
+		return "", false
+	}
+	value := raw[len(prefix):]
+	if len(value) != syncpublication.SnapshotContentHashHexLength {
+		return "", false
+	}
+	for i := 0; i < len(value); i++ {
+		c := value[i]
+		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
+			return "", false
+		}
+	}
+	return value, true
+}
+
+func setSnapshotMetadataHeaders(w http.ResponseWriter, metadata syncpublication.SnapshotMetadata) {
+	if metadata.ContentHash == "" || metadata.AppliedAt.IsZero() {
+		return
+	}
+	w.Header().Set(syncpublication.SnapshotContentHashHeader, metadata.ContentHash)
+	w.Header().Set(syncpublication.SnapshotAppliedAtHeader, metadata.AppliedAt.UTC().Format(time.RFC3339Nano))
 }
 
 func (h *EnrollmentSnapshotPublicationHandler) validTLSAuthority(r *http.Request) bool {

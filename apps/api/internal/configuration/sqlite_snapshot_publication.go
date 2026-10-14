@@ -341,3 +341,36 @@ func sqliteLatestSnapshotPublication(v sqlitedb.WriteValue, primaryID string) (S
 	record.ProofComplete = proofComplete == 1
 	return record, size, nil
 }
+
+// LatestPublishedContentHash returns the content hash of the snapshot this
+// PRIMARY currently publishes to its nodes: the absolute newest candidate for
+// the local installation, and only when it is complete and not discarded.
+// ok is false when nothing publishable exists yet. It needs no credential and
+// returns no snapshot bytes.
+func (s *SQLiteSnapshotPublicationStore) LatestPublishedContentHash(ctx context.Context) (hash string, ok bool, err error) {
+	if ctx == nil || s == nil || s.writer == nil {
+		return "", false, ErrSnapshotPublicationStore
+	}
+	err = s.writer.Write(ctx, func(v sqlitedb.WriteValue) error {
+		identity, err := sqlitePublicationIdentity(v)
+		if err != nil {
+			return err
+		}
+		candidate, size, err := sqliteLatestSnapshotPublication(v, identity.InstallationID)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if candidate.ProofComplete && candidate.DiscardedAt == nil && size > 0 &&
+			candidate.LeadershipGeneration == identity.LeadershipGeneration {
+			hash, ok = candidate.ContentHash, true
+		}
+		return nil
+	})
+	if err != nil {
+		return "", false, ErrSnapshotPublicationStore
+	}
+	return hash, ok, nil
+}

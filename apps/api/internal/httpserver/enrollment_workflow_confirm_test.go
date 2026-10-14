@@ -21,6 +21,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/zerkc/ProxyCore/apps/api/internal/cluster"
+	"github.com/zerkc/ProxyCore/apps/api/internal/configuration"
 	"github.com/zerkc/ProxyCore/apps/api/internal/domain"
 	"github.com/zerkc/ProxyCore/apps/api/internal/enrollment"
 	"github.com/zerkc/ProxyCore/apps/api/internal/httpserver"
@@ -56,6 +57,9 @@ type confirmFixture struct {
 	localRole       domain.TopologyRole
 	localKeyID      string
 	convertKeyIDs   []*uuid.UUID
+	bindings        []configuration.NodeSyncBinding
+	boundHashes     []string
+	bindErr         error
 }
 
 type kekValidatorFunc func(context.Context, replicationsnapshot.Envelope, *cluster.KEK) replicationsnapshot.ValidationResult
@@ -142,6 +146,16 @@ func newConfirmFixture(t *testing.T, withToken bool) *confirmFixture {
 			ExchangeGrant:  f.exchange,
 			AcceptGrant:    f.accept,
 			LoadClusterKEK: f.loadKEK,
+			RecordSyncBinding: func(_ context.Context, binding configuration.NodeSyncBinding, appliedHash string) error {
+				f.mu.Lock()
+				defer f.mu.Unlock()
+				if f.bindErr != nil {
+					return f.bindErr
+				}
+				f.bindings = append(f.bindings, binding)
+				f.boundHashes = append(f.boundHashes, appliedHash)
+				return nil
+			},
 		},
 	})
 	return f
@@ -424,5 +438,34 @@ func TestConfirmPassesAcceptedClusterKeyToConverter(t *testing.T) {
 	}
 	if _, ok := f.keys[f.convertKeyIDs[0].String()]; !ok {
 		t.Fatalf("converter received %s, not the accepted key", f.convertKeyIDs[0])
+	}
+}
+
+func TestConfirmRecordsSyncBindingForTheContinuousSyncLoop(t *testing.T) {
+	f := newConfirmFixture(t, true)
+	rec := f.confirm()
+	if rec.Code != http.StatusOK {
+		t.Fatalf("confirm status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if len(f.bindings) != 1 {
+		t.Fatalf("bindings=%d, want 1", len(f.bindings))
+	}
+	binding := f.bindings[0]
+	if !strings.HasPrefix(binding.PrimaryURL, "https://primary.example:3443") ||
+		binding.PrimaryInstallationID != f.envelope.Transient.SourcePrimaryID.String() ||
+		binding.CredentialID == "" || f.boundHashes[0] != f.envelope.ContentHash {
+		t.Fatalf("binding=%+v hash=%q", binding, f.boundHashes[0])
+	}
+}
+
+func TestConfirmFailsClosedWhenSyncBindingCannotBeRecorded(t *testing.T) {
+	f := newConfirmFixture(t, true)
+	f.bindErr = errors.New("disk full")
+	rec := f.confirm()
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if f.convertCalls != 0 {
+		t.Fatalf("convert ran %d times without a sync binding", f.convertCalls)
 	}
 }

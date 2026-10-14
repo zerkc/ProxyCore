@@ -36,6 +36,8 @@ type Server struct {
 	// enrollmentWorkflow serves the NODE enrollment workflow routes on the
 	// main API for owner sessions. Nil means the workflow is unavailable.
 	enrollmentWorkflow *enrollmentWorkflowHandler
+	// topologySync exposes node sync status and the manual retry trigger.
+	topologySync *TopologySyncOptions
 }
 
 type Option func(*Server)
@@ -186,6 +188,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST "+EnrollmentTokensPath+"/{id}/revoke", s.handleRevokeEnrollmentToken)
 	s.mux.HandleFunc("POST "+TopologyPromotePath, s.handleTopologyPromote)
 	s.mux.HandleFunc("POST "+TopologyDemotePath, s.handleTopologyDemote)
+	s.mux.HandleFunc("GET "+TopologySyncPath, s.handleTopologySyncStatus)
+	s.mux.HandleFunc("POST "+TopologySyncRetryPath, s.handleTopologySyncRetry)
 	for _, path := range []string{EnrollmentDraftPath, EnrollmentPreviewPath, EnrollmentConfirmPath, EnrollmentRecoverPath} {
 		// Method-less pattern so non-POST requests get 405 instead of the SPA fallback.
 		s.mux.HandleFunc(path, s.handleEnrollmentWorkflow)

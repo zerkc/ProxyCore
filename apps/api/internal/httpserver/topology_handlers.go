@@ -77,6 +77,8 @@ func (s *Server) handleTopologyPromote(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	// Read the sync state first: promotion clears the node's sync binding.
+	syncWarning := s.promoteSyncWarning(r.Context())
 	result, err := svc.Promote(r.Context(), identity.PromoteOptions{
 		ActorUserID:        user.ID,
 		ExpectedGeneration: request.expectedGeneration(),
@@ -85,7 +87,7 @@ func (s *Server) handleTopologyPromote(w http.ResponseWriter, r *http.Request) {
 		s.writeTopologyError(w, "promote", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	response := map[string]any{
 		"ok":                 true,
 		"identity":           s.publicIdentity(),
 		"previousRole":       string(result.PreviousRole),
@@ -96,7 +98,11 @@ func (s *Server) handleTopologyPromote(w http.ResponseWriter, r *http.Request) {
 			"code":    splitBrainWarningCode,
 			"message": splitBrainWarningMessage,
 		},
-	})
+	}
+	if syncWarning != nil {
+		response["syncWarning"] = syncWarning
+	}
+	writeJSON(w, http.StatusOK, response)
 }
 
 // handleTopologyDemote converts PRIMARY into NODE after revoking the

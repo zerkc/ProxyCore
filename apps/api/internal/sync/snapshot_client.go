@@ -23,6 +23,14 @@ const (
 	snapshotPublicationHTTPPath    = "/api/topology/sync/snapshot"
 	snapshotByTokenHTTPPath        = "/api/topology/sync/snapshot-by-token"
 	maxSnapshotByTokenRequestBytes = 8 << 10
+
+	snapshotAcknowledgementHTTPPath = "/api/topology/sync/acknowledge"
+	snapshotAfterQueryKey           = "after"
+
+	// SnapshotContentHashHeader and SnapshotAppliedAtHeader carry the primary's
+	// metadata for the latest snapshot on publication responses (200 and 304).
+	SnapshotContentHashHeader = "X-ProxyCore-Snapshot-Hash"
+	SnapshotAppliedAtHeader   = "X-ProxyCore-Snapshot-Applied-At"
 )
 
 var (
@@ -117,7 +125,118 @@ func (c *SnapshotClient) FetchSnapshot(ctx context.Context, primaryURL string, c
 		return nil, ErrSnapshotClientInvalid
 	}
 	request.Header.Set("Authorization", "Bearer "+bearer)
-	return c.fetchWithRetries(request)
+	result, err := c.fetchWithRetries(request, false)
+	return result.Body, err
+}
+
+// SnapshotFetchResult is one conditional publication read. NotModified means
+// the primary's latest snapshot is exactly the hash the caller already holds;
+// Body is then empty. ContentHash and AppliedAt are the primary's own metadata
+// for the latest snapshot and are what an acknowledgement must echo back.
+type SnapshotFetchResult struct {
+	NotModified bool
+	Body        []byte
+	ContentHash string
+	AppliedAt   time.Time
+}
+
+// FetchSnapshotIfChanged is FetchSnapshot with the publication endpoint's
+// AfterContentHash short-circuit: when after equals the primary's latest hash
+// the primary answers 304 and no body is transferred.
+func (c *SnapshotClient) FetchSnapshotIfChanged(ctx context.Context, primaryURL string, credential []byte, after string) (SnapshotFetchResult, error) {
+	if after != "" && !validSnapshotHash(after) {
+		return SnapshotFetchResult{}, ErrSnapshotClientInvalid
+	}
+	if c == nil || c.httpClient == nil || c.canonicalURL == nil || ctx == nil || len(credential) == 0 {
+		return SnapshotFetchResult{}, ErrSnapshotClientInvalid
+	}
+	if err := ctx.Err(); err != nil {
+		return SnapshotFetchResult{}, ErrSnapshotClientUnavailable
+	}
+	normalized, err := c.canonicalURL(primaryURL)
+	if err != nil || !validSnapshotClientOrigin(normalized) {
+		return SnapshotFetchResult{}, ErrSnapshotClientInvalid
+	}
+	bearer, ok := snapshotBearer(credential)
+	if !ok {
+		return SnapshotFetchResult{}, ErrSnapshotClientInvalid
+	}
+	endpoint := strings.TrimRight(normalized, "/") + snapshotPublicationHTTPPath
+	if after != "" {
+		endpoint += "?" + snapshotAfterQueryKey + "=" + after
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return SnapshotFetchResult{}, ErrSnapshotClientInvalid
+	}
+	request.Header.Set("Authorization", "Bearer "+bearer)
+	return c.fetchWithRetries(request, after != "")
+}
+
+type snapshotAcknowledgementBody struct {
+	NodeID      string `json:"nodeId"`
+	PrimaryURL  string `json:"primaryUrl"`
+	ContentHash string `json:"contentHash"`
+	AppliedAt   string `json:"appliedAt"`
+}
+
+// AcknowledgeSnapshot tells the primary which of its snapshots this node has
+// applied. appliedAt is the PRIMARY's applied_at for that snapshot as reported
+// by the publication response, not a node clock.
+func (c *SnapshotClient) AcknowledgeSnapshot(ctx context.Context, primaryURL string, credential []byte, nodeID, contentHash string, appliedAt time.Time) error {
+	if c == nil || c.httpClient == nil || c.canonicalURL == nil || ctx == nil || len(credential) == 0 ||
+		nodeID == "" || !validSnapshotHash(contentHash) || appliedAt.IsZero() {
+		return ErrSnapshotClientInvalid
+	}
+	if err := ctx.Err(); err != nil {
+		return ErrSnapshotClientUnavailable
+	}
+	normalized, err := c.canonicalURL(primaryURL)
+	if err != nil || !validSnapshotClientOrigin(normalized) {
+		return ErrSnapshotClientInvalid
+	}
+	bearer, ok := snapshotBearer(credential)
+	if !ok {
+		return ErrSnapshotClientInvalid
+	}
+	payload, err := json.Marshal(snapshotAcknowledgementBody{
+		NodeID: nodeID, PrimaryURL: normalized, ContentHash: contentHash,
+		AppliedAt: appliedAt.UTC().Format(time.RFC3339Nano),
+	})
+	if err != nil {
+		return ErrSnapshotClientInvalid
+	}
+	endpoint := strings.TrimRight(normalized, "/") + snapshotAcknowledgementHTTPPath
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
+	if err != nil {
+		return ErrSnapshotClientInvalid
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer "+bearer)
+	response, err := c.httpClient.Do(request)
+	if err != nil {
+		if snapshotTLSFailure(err) {
+			return ErrSnapshotClientInvalid
+		}
+		return ErrSnapshotClientUnavailable
+	}
+	defer response.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4<<10))
+	if response.ProtoMajor != 2 {
+		return ErrSnapshotClientInvalid
+	}
+	switch {
+	case response.StatusCode == http.StatusNoContent || response.StatusCode == http.StatusOK:
+		return nil
+	case response.StatusCode == http.StatusGone:
+		return ErrSnapshotClientGone
+	case response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden:
+		return ErrSnapshotClientUnauthorized
+	case response.StatusCode >= 500 && response.StatusCode <= 599:
+		return ErrSnapshotClientUnavailable
+	default:
+		return ErrSnapshotClientInvalid
+	}
 }
 
 // FetchSnapshotByToken retrieves one canonical snapshot using a pcenr1 token
@@ -147,10 +266,11 @@ func (c *SnapshotClient) FetchSnapshotByToken(ctx context.Context, primaryURL st
 		return nil, ErrSnapshotClientInvalid
 	}
 	request.Header.Set("Content-Type", "application/json")
-	return c.fetchWithRetries(request)
+	result, err := c.fetchWithRetries(request, false)
+	return result.Body, err
 }
 
-func (c *SnapshotClient) fetchWithRetries(request *http.Request) ([]byte, error) {
+func (c *SnapshotClient) fetchWithRetries(request *http.Request, allowNotModified bool) (SnapshotFetchResult, error) {
 	attempts := c.retryableErrors
 	if attempts <= 0 {
 		attempts = 1
@@ -158,76 +278,102 @@ func (c *SnapshotClient) fetchWithRetries(request *http.Request) ([]byte, error)
 	for attempt := 1; attempt <= attempts; attempt++ {
 		if attempt > 1 && request.Body != nil {
 			if request.GetBody == nil {
-				return nil, ErrSnapshotClientUnavailable
+				return SnapshotFetchResult{}, ErrSnapshotClientUnavailable
 			}
 			body, err := request.GetBody()
 			if err != nil {
-				return nil, ErrSnapshotClientUnavailable
+				return SnapshotFetchResult{}, ErrSnapshotClientUnavailable
 			}
 			request.Body = body
 		}
 		response, err := c.httpClient.Do(request)
 		if err != nil {
 			if snapshotTLSFailure(err) {
-				return nil, ErrSnapshotClientInvalid
+				return SnapshotFetchResult{}, ErrSnapshotClientInvalid
 			}
 			if attempt == attempts {
-				return nil, ErrSnapshotClientUnavailable
+				return SnapshotFetchResult{}, ErrSnapshotClientUnavailable
 			}
 			if err := c.wait(request.Context(), attempt); err != nil {
-				return nil, ErrSnapshotClientUnavailable
+				return SnapshotFetchResult{}, ErrSnapshotClientUnavailable
 			}
 			continue
 		}
-		body, retry, result := c.handleSnapshotResponse(response)
+		fetched, retry, result := c.handleSnapshotResponse(response, allowNotModified)
 		if !retry {
-			return body, result
+			return fetched, result
 		}
 		if attempt == attempts {
-			return nil, ErrSnapshotClientUnavailable
+			return SnapshotFetchResult{}, ErrSnapshotClientUnavailable
 		}
 		if err := c.wait(request.Context(), attempt); err != nil {
-			return nil, ErrSnapshotClientUnavailable
+			return SnapshotFetchResult{}, ErrSnapshotClientUnavailable
 		}
 	}
-	return nil, ErrSnapshotClientUnavailable
+	return SnapshotFetchResult{}, ErrSnapshotClientUnavailable
 }
 
-func (c *SnapshotClient) handleSnapshotResponse(response *http.Response) ([]byte, bool, error) {
+func (c *SnapshotClient) handleSnapshotResponse(response *http.Response, allowNotModified bool) (SnapshotFetchResult, bool, error) {
 	if response == nil {
-		return nil, true, ErrSnapshotClientUnavailable
+		return SnapshotFetchResult{}, true, ErrSnapshotClientUnavailable
 	}
 	if response.Body != nil {
 		defer response.Body.Close()
 	}
 	if response.ProtoMajor == 1 || (response.ProtoMajor != 0 && response.ProtoMajor != 2) {
-		return nil, false, ErrSnapshotClientInvalid
+		return SnapshotFetchResult{}, false, ErrSnapshotClientInvalid
 	}
 	switch {
 	case response.StatusCode >= 500 && response.StatusCode <= 599:
-		return nil, true, ErrSnapshotClientUnavailable
+		return SnapshotFetchResult{}, true, ErrSnapshotClientUnavailable
 	case response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden:
-		return nil, false, ErrSnapshotClientUnauthorized
+		return SnapshotFetchResult{}, false, ErrSnapshotClientUnauthorized
 	case response.StatusCode == http.StatusGone:
-		return nil, false, ErrSnapshotClientGone
+		return SnapshotFetchResult{}, false, ErrSnapshotClientGone
 	case response.StatusCode == http.StatusNotFound:
-		return nil, false, ErrSnapshotClientNotFound
+		return SnapshotFetchResult{}, false, ErrSnapshotClientNotFound
 	case response.StatusCode == http.StatusNoContent:
-		return nil, false, ErrSnapshotClientUnavailable
+		return SnapshotFetchResult{}, false, ErrSnapshotClientUnavailable
+	case response.StatusCode == http.StatusNotModified && allowNotModified:
+		meta, ok := snapshotResponseMetadata(response.Header)
+		if !ok {
+			return SnapshotFetchResult{}, false, ErrSnapshotClientInvalid
+		}
+		meta.NotModified = true
+		return meta, false, nil
 	case response.StatusCode != http.StatusOK:
-		return nil, false, ErrSnapshotClientInvalid
+		return SnapshotFetchResult{}, false, ErrSnapshotClientInvalid
 	}
 	if response.Body == nil {
-		return nil, false, ErrSnapshotClientInvalid
+		return SnapshotFetchResult{}, false, ErrSnapshotClientInvalid
 	}
 	body, err := io.ReadAll(io.LimitReader(response.Body, c.maxBodyBytes+1))
 	if err != nil {
-		return nil, true, ErrSnapshotClientUnavailable
+		return SnapshotFetchResult{}, true, ErrSnapshotClientUnavailable
 	}
 	if int64(len(body)) > c.maxBodyBytes || len(body) == 0 {
-		return nil, false, ErrSnapshotClientInvalid
+		return SnapshotFetchResult{}, false, ErrSnapshotClientInvalid
 	}
-	return body, false, nil
+	result := SnapshotFetchResult{Body: body}
+	// Metadata headers are optional on a full response (enrollment-time
+	// fetches predate them) but must be well formed when present.
+	if response.Header.Get(SnapshotContentHashHeader) != "" || response.Header.Get(SnapshotAppliedAtHeader) != "" {
+		meta, ok := snapshotResponseMetadata(response.Header)
+		if !ok {
+			return SnapshotFetchResult{}, false, ErrSnapshotClientInvalid
+		}
+		result.ContentHash, result.AppliedAt = meta.ContentHash, meta.AppliedAt
+	}
+	return result, false, nil
+}
+
+func snapshotResponseMetadata(header http.Header) (SnapshotFetchResult, bool) {
+	hash := header.Get(SnapshotContentHashHeader)
+	appliedAt, err := time.Parse(time.RFC3339Nano, header.Get(SnapshotAppliedAtHeader))
+	if !validSnapshotHash(hash) || err != nil || appliedAt.IsZero() {
+		return SnapshotFetchResult{}, false
+	}
+	return SnapshotFetchResult{ContentHash: hash, AppliedAt: appliedAt.UTC()}, true
 }
 
 func (c *SnapshotClient) wait(ctx context.Context, attempt int) error {

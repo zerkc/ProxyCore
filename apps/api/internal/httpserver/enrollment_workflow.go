@@ -16,6 +16,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/zerkc/ProxyCore/apps/api/internal/cluster"
+	"github.com/zerkc/ProxyCore/apps/api/internal/configuration"
 	"github.com/zerkc/ProxyCore/apps/api/internal/domain"
 	"github.com/zerkc/ProxyCore/apps/api/internal/enrollment"
 	"github.com/zerkc/ProxyCore/apps/api/internal/identity"
@@ -134,6 +135,9 @@ type kekEnvelopeValidator interface {
 	ValidateWithKEK(context.Context, replicationsnapshot.Envelope, *cluster.KEK) replicationsnapshot.ValidationResult
 }
 
+// EnrollmentSyncBindingRecorder stores the node's primary binding.
+type EnrollmentSyncBindingRecorder func(ctx context.Context, binding configuration.NodeSyncBinding, appliedHash string) error
+
 const previewDigestDomain = "proxycore/enrollment/confirm/preview-digest/v1"
 
 type enrollmentWorkflowHandler struct {
@@ -147,6 +151,7 @@ type enrollmentWorkflowHandler struct {
 	exchangeGrant    EnrollmentGrantExchanger
 	acceptGrant      EnrollmentGrantAcceptor
 	loadClusterKEK   EnrollmentClusterKEKLoader
+	recordSync       EnrollmentSyncBindingRecorder
 	confirming       gosync.Map
 	archiveTTL       time.Duration
 	applyWaitTimeout time.Duration
@@ -170,7 +175,7 @@ func newEnrollmentWorkflowHandler(opts EnrollmentWorkflowHandlerOptions, certifi
 		cache: opts.Cache, verifyToken: opts.VerifyToken, fetchSnapshot: opts.FetchSnapshot,
 		validator: opts.Validator, identity: opts.Identity, localIngress: opts.LocalIngress,
 		converter: opts.Converter, exchangeGrant: opts.ExchangeGrant, acceptGrant: opts.AcceptGrant,
-		loadClusterKEK: opts.LoadClusterKEK, archiveTTL: archiveTTL, applyWaitTimeout: applyWaitTimeout,
+		loadClusterKEK: opts.LoadClusterKEK, recordSync: opts.RecordSyncBinding, archiveTTL: archiveTTL, applyWaitTimeout: applyWaitTimeout,
 		certificate: certificate,
 	}
 }
@@ -381,6 +386,20 @@ func (h *enrollmentWorkflowHandler) handleConfirm(w http.ResponseWriter, r *http
 	if !result.OK || len(result.Issues) != 0 {
 		writeIdentityProofError(w, http.StatusConflict, "primary snapshot denied")
 		return
+	}
+	// 3b. remember the primary before the role commit point, so a node can
+	// never exist without the binding continuous sync needs. A failed convert
+	// leaves a binding on a non-node, which the sync loop ignores.
+	if h.recordSync != nil {
+		binding := configuration.NodeSyncBinding{
+			PrimaryURL:            draft.PrimaryURL,
+			CredentialID:          accepted.CredentialID,
+			PrimaryInstallationID: draft.Envelope.Transient.SourcePrimaryID.String(),
+		}
+		if err := h.recordSync(r.Context(), binding, draft.Envelope.ContentHash); err != nil {
+			writeIdentityProofError(w, http.StatusServiceUnavailable, "enrollment workflow unavailable")
+			return
+		}
 	}
 	// 4. archive/import/apply, then the role commit point
 	converted, err := h.converter.Convert(r.Context(), enrollment.NodeConversionInput{
