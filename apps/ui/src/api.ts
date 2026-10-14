@@ -8,6 +8,7 @@ import type {
   ConfirmResult,
   DraftPreview,
   EnrollmentTokenCreation,
+  EnrollmentTokenDefaults,
   EnrollmentTokenSummary,
   RecoverableState,
   TopologyConversionResult,
@@ -17,6 +18,7 @@ export type {
   ConfirmResult,
   DraftPreview,
   EnrollmentTokenCreation,
+  EnrollmentTokenDefaults,
   EnrollmentTokenSummary,
   RecoverableState,
   TopologyConversionResult,
@@ -46,7 +48,12 @@ export type EnrollmentApiErrorKind =
   | "invalid-response"
   | "payload-too-large"
   | "untrusted-certificate"
-  | "invalid-ca";
+  | "invalid-ca"
+  | "trust-not-ready"
+  | "trust-unavailable"
+  | "primary-url-required"
+  | "primary-url-invalid"
+  | "primary-url-not-in-cert";
 
 export class EnrollmentApiError extends ApiError {
   constructor(
@@ -141,6 +148,7 @@ const ENROLLMENT_RESPONSE_LIMIT_BYTES = 64 * 1024;
 
 type EnrollmentOperation =
   | "create-token"
+  | "token-defaults"
   | "list-tokens"
   | "revoke-token"
   | "draft"
@@ -149,15 +157,31 @@ type EnrollmentOperation =
   | "recover";
 
 export async function createEnrollmentToken(
+  options?: { primaryUrl?: string } | AbortSignal,
   signal?: AbortSignal,
 ): Promise<EnrollmentTokenCreation> {
+  // Backwards compatible: the first argument used to be the abort signal.
+  const resolvedOptions = options instanceof AbortSignal ? undefined : options;
+  const resolvedSignal = options instanceof AbortSignal ? options : signal;
+  const primaryUrl = resolvedOptions?.primaryUrl?.trim();
   const body = await enrollmentRequest<unknown>(
     "create-token",
     "/api/enrollment/tokens",
-    { method: "POST", body: "{}" },
-    signal,
+    { method: "POST", body: JSON.stringify(primaryUrl ? { primaryUrl } : {}) },
+    resolvedSignal,
   );
   return normalizeTokenCreation(body);
+}
+
+export function getEnrollmentTokenDefaults(
+  signal?: AbortSignal,
+): Promise<EnrollmentTokenDefaults> {
+  return enrollmentRequest<EnrollmentTokenDefaults>(
+    "token-defaults",
+    "/api/enrollment/tokens/defaults",
+    { method: "GET" },
+    signal,
+  );
 }
 
 export function listEnrollmentTokens(
@@ -187,7 +211,7 @@ export function revokeEnrollmentToken(
 
 export function draftEnrollment(
   token: string,
-  primaryURL: string,
+  primaryURL?: string,
   signal?: AbortSignal,
   caPem?: string,
 ): Promise<DraftPreview> {
@@ -196,7 +220,11 @@ export function draftEnrollment(
     "/api/topology/enrollment/draft",
     {
       method: "POST",
-      body: JSON.stringify({ token, primaryURL, ...(caPem ? { caPem } : {}) }),
+      body: JSON.stringify({
+        token,
+        ...(primaryURL ? { primaryURL } : {}),
+        ...(caPem ? { caPem } : {}),
+      }),
     },
     signal,
   );
@@ -295,6 +323,8 @@ async function enrollmentRequest<T>(
     }
     const known = draftTrustErrorKind(operation, response.status, text);
     if (known) throw new EnrollmentApiError(response.status, known, draftTrustErrorMessages[known]);
+    const tokenKnown = tokenCreateErrorKind(operation, response.status, text);
+    if (tokenKnown) throw new EnrollmentApiError(response.status, tokenKnown.kind, tokenKnown.message);
     throw enrollmentStatusError(operation, response.status);
   }
   if (response.status === 204) return undefined as T;
@@ -382,6 +412,28 @@ const draftTrustErrorMessages = {
   "invalid-ca": "The CA certificate is not valid.",
 } as const;
 
+// Token creation reports its failures with a stable machine code; only these
+// code/status pairs are read, everything else stays discarded.
+const tokenCreateErrors: Record<string, { status: number; kind: EnrollmentApiErrorKind; message: string }> = {
+  ENROLLMENT_TRUST_NOT_READY: { status: 409, kind: "trust-not-ready", message: "Enrollment trust is not ready." },
+  ENROLLMENT_TRUST_UNAVAILABLE: { status: 503, kind: "trust-unavailable", message: "Enrollment trust is unavailable." },
+  PRIMARY_URL_REQUIRED: { status: 422, kind: "primary-url-required", message: "A primary URL is required." },
+  PRIMARY_URL_INVALID: { status: 422, kind: "primary-url-invalid", message: "The primary URL is not valid." },
+  PRIMARY_URL_NOT_IN_CERT: { status: 422, kind: "primary-url-not-in-cert", message: "The primary URL host is not covered by the enrollment certificate." },
+};
+
+function tokenCreateErrorKind(operation: EnrollmentOperation, status: number, text: string) {
+  if (operation !== "create-token") return undefined;
+  try {
+    const parsed = JSON.parse(text) as { code?: unknown };
+    if (typeof parsed.code !== "string" || !Object.hasOwn(tokenCreateErrors, parsed.code)) return undefined;
+    const known = tokenCreateErrors[parsed.code]!;
+    return known.status === status ? known : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function draftTrustErrorKind(operation: EnrollmentOperation, status: number, text: string) {
   if (operation !== "draft") return undefined;
   try {
@@ -417,6 +469,11 @@ function enrollmentStatusError(operation: EnrollmentOperation, status: number) {
       forbidden: "Owner access is required to create an enrollment token.",
       conflict: "The enrollment token could not be created.",
       server: "Enrollment token creation is temporarily unavailable.",
+    },
+    "token-defaults": {
+      unauthorized: "Sign in again to load enrollment defaults.",
+      forbidden: "Owner access is required to load enrollment defaults.",
+      server: "Enrollment defaults are temporarily unavailable.",
     },
     "list-tokens": {
       unauthorized: "Sign in again to view enrollment tokens.",

@@ -300,4 +300,47 @@ describe("NodeContinuityView", () => {
       expect(container.textContent).not.toContain("not trusted");
     });
   });
+
+  describe("self-contained tokens", () => {
+    const v2 = "pcenr2_payload-must-not-appear";
+
+    async function submitToken(container: TestElement, token: string, url?: string) {
+      setValue(element(container, "node-enrollment-token"), token);
+      if (url) setValue(element(container, "node-primary-url"), url);
+      await settle();
+      await act(async () => {
+        element(container, "node-enrollment-form").dispatchEvent(new TestEvent("submit", { bubbles: true, cancelable: true }));
+        await settle();
+      });
+    }
+
+    it("sends only the token for a v2 token and marks URL and CA optional", async () => {
+      const fetchMock = queueFetch(jsonResponse({ error: "token-missing" }, 410), previewResponse());
+      const container = await mount(view());
+      setValue(element(container, "node-enrollment-token"), v2);
+      await settle();
+      expect(container.textContent).toContain("Advanced / legacy token");
+      expect(container.textContent).toContain("PRIMARY URL (optional)");
+      await submitToken(container, v2);
+      expect(JSON.parse(String(fetchMock.mock.calls[1]![1].body))).toEqual({ token: v2 });
+      expect(container.textContent).toContain("Enrollment preview");
+    });
+
+    it("still requires the PRIMARY URL for a v1 token", async () => {
+      const fetchMock = queueFetch(jsonResponse({ error: "token-missing" }, 410));
+      const container = await mount(view());
+      await submitToken(container, plaintext);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(container.textContent).toContain("Enter the PRIMARY URL for this legacy token.");
+      expect(container.textContent).toContain("legacy token");
+    });
+
+    it("rejects an empty token for a v2-looking blank form", async () => {
+      const fetchMock = queueFetch(jsonResponse({ error: "token-missing" }, 410));
+      const container = await mount(view());
+      await submitToken(container, "   ");
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(container.textContent).toContain("Enter the enrollment token.");
+    });
+  });
 });

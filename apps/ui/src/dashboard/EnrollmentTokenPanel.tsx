@@ -4,10 +4,11 @@ import {
   ApiError,
   createEnrollmentToken,
   EnrollmentApiError,
+  getEnrollmentTokenDefaults,
   listEnrollmentTokens,
   revokeEnrollmentToken,
 } from "../api";
-import type { EnrollmentTokenCreation, EnrollmentTokenSummary } from "../types";
+import type { EnrollmentTokenCreation, EnrollmentTokenDefaults, EnrollmentTokenSummary } from "../types";
 import type { TopologyIdentity } from "./types";
 
 const REVOKE_CONFIRMATION = "replace-and-revoke";
@@ -37,6 +38,9 @@ export function EnrollmentTokenPanel({ identity }: { identity?: TopologyIdentity
   const [revoking, setRevoking] = useState(false);
   const [feedback, setFeedback] = useState("");
   const [error, setError] = useState("");
+  const [primaryUrl, setPrimaryUrl] = useState("");
+  const [defaults, setDefaults] = useState<EnrollmentTokenDefaults>();
+  const primaryUrlEdited = useRef(false);
 
   useEffect(() => {
     if (!canManageEnrollmentTokens(identity)) return;
@@ -50,6 +54,7 @@ export function EnrollmentTokenPanel({ identity }: { identity?: TopologyIdentity
     setRevokeConfirmation("");
     setFeedback("");
     setError("");
+    setDefaults(undefined);
 
     async function load() {
       try {
@@ -68,6 +73,12 @@ export function EnrollmentTokenPanel({ identity }: { identity?: TopologyIdentity
       }
     }
     void load();
+    // Defaults only prefill the field; a failed load never blocks generating.
+    void getEnrollmentTokenDefaults(controller.signal).then((loaded) => {
+      if (cancelled || !loaded || typeof loaded !== "object") return;
+      setDefaults(loaded);
+      if (!primaryUrlEdited.current && typeof loaded.primaryUrl === "string") setPrimaryUrl(loaded.primaryUrl);
+    }).catch(() => undefined);
     return () => {
       cancelled = true;
       controller.abort();
@@ -94,7 +105,7 @@ export function EnrollmentTokenPanel({ identity }: { identity?: TopologyIdentity
     setFeedback("");
     setError("");
     try {
-      const created = sanitizeTokenCreation(await createEnrollmentToken(controller.signal));
+      const created = sanitizeTokenCreation(await createEnrollmentToken({ primaryUrl: primaryUrl.trim() || undefined }, controller.signal));
       if (controller.signal.aborted) return;
       setCreation(created);
       setTokens((current) => [creationSummary(created), ...current]);
@@ -205,10 +216,18 @@ export function EnrollmentTokenPanel({ identity }: { identity?: TopologyIdentity
           {creating ? "Creating…" : "Create enrollment token"}
         </button>
       </div>
+      <div className="space-y-2">
+        <label className="pc-label" htmlFor="enrollment-token-primary-url">Primary URL
+          <input id="enrollment-token-primary-url" className="pc-input font-mono" data-testid="enrollment-token-primary-url" value={primaryUrl} onInput={(event) => { primaryUrlEdited.current = true; setPrimaryUrl(event.currentTarget.value); }} onChange={(event) => { primaryUrlEdited.current = true; setPrimaryUrl(event.currentTarget.value); }} placeholder="https://primary.example:3443/" aria-describedby="enrollment-token-primary-url-help" autoComplete="off" spellCheck={false} disabled={creating} />
+          <span id="enrollment-token-primary-url-help" className="mt-1 block text-xs text-faint" data-testid="enrollment-token-primary-url-help">The node will connect to this address. If you changed the enrollment port, edit it here before generating.</span>
+        </label>
+        {defaults && defaults.trustReady === false ? <p className="pc-toast-err" role="status" data-testid="enrollment-token-trust-warning">Enrollment trust is not ready yet, so a token cannot be generated. Set it up in the enrollment trust panel first.</p> : null}
+        {defaults && defaults.trustReady !== false && defaults.hostCovered === false ? <p className="pc-toast-err" role="status" data-testid="enrollment-token-host-warning">The default address is not covered by the enrollment certificate. Add its host to the enrollment hostnames in the enrollment trust panel, or enter another address.</p> : null}
+      </div>
       {creation ? (
         <section className="space-y-4 border-2 border-signal/60 bg-signal/5 p-4" aria-labelledby="new-enrollment-token-title" data-testid="enrollment-token-acknowledgement">
           <div><p className="pc-eyebrow pc-eyebrow-signal">save now</p><h3 id="new-enrollment-token-title" className="pc-title mt-2 text-xl text-mist">New enrollment token</h3></div>
-          <textarea ref={tokenValueRef} className="pc-input min-h-24 resize-none font-mono text-sm" data-testid="enrollment-token-value" value={creation.token} readOnly aria-label="New enrollment token" />
+          <textarea ref={tokenValueRef} className="pc-input min-h-24 resize-none break-all font-mono text-sm" data-testid="enrollment-token-value" value={creation.token} readOnly aria-label="New enrollment token" />
           <p className="text-sm leading-6 text-mute">This token will not be shown again. Save it in a secure operator channel.</p>
           <div className="flex flex-wrap gap-2">
             <button type="button" className="pc-btn" data-testid="copy-enrollment-token" onClick={() => void copyToken()}>Copy token</button>
@@ -327,7 +346,21 @@ function tokenListError(caught: unknown) {
 
 function tokenCreateError(caught: unknown) {
   if (caught instanceof ApiError && caught.status === 403) return "Owner access is required to create an enrollment token.";
-  if (caught instanceof EnrollmentApiError && caught.status === 409) return "The enrollment token could not be created.";
+  if (caught instanceof EnrollmentApiError) {
+    switch (caught.kind) {
+      case "trust-not-ready":
+        return "Enrollment trust is not ready. Set up the enrollment trust panel (certificate and hostnames) before generating a token.";
+      case "trust-unavailable":
+        return "Enrollment trust is temporarily unavailable. Check the enrollment trust panel and try again.";
+      case "primary-url-required":
+        return "Enter the primary URL the node should connect to, for example https://primary.example:3443/.";
+      case "primary-url-invalid":
+        return "The primary URL is not valid. Use the form https://host:port.";
+      case "primary-url-not-in-cert":
+        return "This host is not covered by the enrollment certificate. Add it to the enrollment hostnames in the enrollment trust panel, then try again.";
+    }
+    if (caught.status === 409) return "The enrollment token could not be created.";
+  }
   return "The enrollment token could not be created. Try again.";
 }
 
