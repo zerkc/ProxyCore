@@ -584,3 +584,48 @@ if grep -Fq -- 'pull_policy: never' "$ROOT/compose.yaml"; then
   printf 'compose.yaml must not forbid pulling\n' >&2
   exit 1
 fi
+
+# Port 53 handling: our own CoreDNS and a free port pass; the systemd-resolved
+# stub is disabled automatically; any other holder fails before deploying.
+# $1 busy(0|1)  $2 own coredns(0|1)  $3 resolved stub(0|1)  $4 disable ok(0|1)
+run_port_check() {
+  port_busy=$1
+  own_coredns=$2
+  stub=$3
+  disable_ok=$4
+  (
+    PROXYCORE_INSTALL_NO_MAIN=1 . "$ROOT/scripts/install.sh"
+    DNS_PORT=53
+    ENROLLMENT_PORT=3443
+    sleep() { :; }
+    port_in_use() { [ "$port_busy" = 1 ] && [ "$1" = 53 ]; }
+    coredns_running() { [ "$own_coredns" = 1 ]; }
+    resolved_stub_active() { [ "$stub" = 1 ]; }
+    disable_resolved_stub() {
+      printf 'disable_resolved_stub called\n'
+      [ "$disable_ok" = 1 ] || return 1
+      port_busy=0
+    }
+    check_host_ports
+  ) 2>&1
+}
+output=$(run_port_check 0 0 0 1) || { printf 'free DNS port was refused: %s\n' "$output" >&2; exit 1; }
+output=$(run_port_check 1 1 0 1) || { printf 'own CoreDNS on DNS port was refused: %s\n' "$output" >&2; exit 1; }
+output=$(run_port_check 1 0 0 1) && { printf 'foreign DNS port holder was accepted\n' >&2; exit 1; }
+case "$output" in
+  *'another process'*'DNS_PORT='*) ;;
+  *) printf 'foreign holder refusal is not actionable: %s\n' "$output" >&2; exit 1 ;;
+esac
+case "$output" in
+  *disable_resolved_stub*) printf 'non-resolved holder must not touch systemd-resolved\n' >&2; exit 1 ;;
+esac
+output=$(run_port_check 1 0 1 1) || { printf 'resolved stub was not disabled: %s\n' "$output" >&2; exit 1; }
+case "$output" in
+  *'disable_resolved_stub called'*) ;;
+  *) printf 'resolved stub path did not disable the stub: %s\n' "$output" >&2; exit 1 ;;
+esac
+output=$(run_port_check 1 0 1 0) && { printf 'failed stub disable was accepted\n' >&2; exit 1; }
+case "$output" in
+  *'DNSStubListener=no'*) ;;
+  *) printf 'failed stub disable is not actionable: %s\n' "$output" >&2; exit 1 ;;
+esac
