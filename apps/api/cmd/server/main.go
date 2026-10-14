@@ -185,7 +185,17 @@ func runServerWithNodeConverter(ctx context.Context, cfg config.Config, logger *
 		acknowledgementOptions := httpserver.EnrollmentSnapshotAcknowledgementHandlerOptions{
 			Store: phase2Store, Identity: identitySvc,
 		}
-		supervisor, err = newEnrollmentWorkflowTLSSupervisorWithHandlersAndAcknowledgement(cfg, identitySvc, tlsStore, workflow, logger, &publicationOptions, &snapshotByTokenOptions, &acknowledgementOptions)
+		// A missing grant store or an unusable service makes the route answer
+		// the same uniform denial instead of revealing installation state.
+		grantStore, _ := any(phase2Store).(configuration.PrimaryGrantStore)
+		grantExchangeOptions := httpserver.EnrollmentGrantExchangeHandlerOptions{
+			Issuer: enrollment.NewPrimaryService(grantStore, enrollment.PrimaryServiceOptions{
+				CredentialIssuer: nodeCredentialIssuer{},
+				Identity:         identitySvc,
+			}),
+			Now: time.Now,
+		}
+		supervisor, err = newEnrollmentWorkflowTLSSupervisorWithGrantExchange(cfg, identitySvc, tlsStore, workflow, logger, &publicationOptions, &snapshotByTokenOptions, &acknowledgementOptions, &grantExchangeOptions)
 		if err != nil {
 			logEnrollmentTLSFailure(logger, "supervisor unavailable")
 			supervisor = nil
@@ -625,6 +635,7 @@ type enrollmentWorkflowTLSListenerFactory struct {
 	publication     *httpserver.EnrollmentSnapshotPublicationHandlerOptions
 	snapshotByToken *httpserver.EnrollmentSnapshotByTokenHandlerOptions
 	acknowledgement *httpserver.EnrollmentSnapshotAcknowledgementHandlerOptions
+	grantExchange   *httpserver.EnrollmentGrantExchangeHandlerOptions
 }
 
 func newEnrollmentWorkflowTLSListenerFactory(identityCurrent enrollment.EnrollmentTLSIdentityCurrent, workflow httpserver.EnrollmentWorkflowHandlerOptions, logger *log.Logger) *enrollmentWorkflowTLSListenerFactory {
@@ -697,6 +708,11 @@ func (f *enrollmentWorkflowTLSListenerFactory) Listen(ctx context.Context, addre
 		acknowledgement := httpserver.NewEnrollmentSnapshotAcknowledgementHandler(acknowledgementOptions)
 		handler = httpserver.NewEnrollmentSnapshotAcknowledgementMux(acknowledgement, handler)
 	}
+	if f.grantExchange != nil {
+		exchangeOptions := *f.grantExchange
+		exchangeOptions.Certificate = certificate
+		handler = httpserver.NewEnrollmentGrantExchangeMux(httpserver.NewEnrollmentGrantExchangeHandler(exchangeOptions), handler)
+	}
 	server, err := f.newServer(listener, handler, provider)
 	if err != nil || server == nil {
 		_ = listener.Close()
@@ -720,12 +736,17 @@ func newEnrollmentWorkflowTLSSupervisorWithHandlers(cfg config.Config, identityS
 }
 
 func newEnrollmentWorkflowTLSSupervisorWithHandlersAndAcknowledgement(cfg config.Config, identityService *identity.Service, configStore enrollmentTLSConfigurationStore, workflow httpserver.EnrollmentWorkflowHandlerOptions, logger *log.Logger, publication *httpserver.EnrollmentSnapshotPublicationHandlerOptions, snapshotByToken *httpserver.EnrollmentSnapshotByTokenHandlerOptions, acknowledgement *httpserver.EnrollmentSnapshotAcknowledgementHandlerOptions) (*enrollment.EnrollmentTLSSupervisor, error) {
+	return newEnrollmentWorkflowTLSSupervisorWithGrantExchange(cfg, identityService, configStore, workflow, logger, publication, snapshotByToken, acknowledgement, nil)
+}
+
+func newEnrollmentWorkflowTLSSupervisorWithGrantExchange(cfg config.Config, identityService *identity.Service, configStore enrollmentTLSConfigurationStore, workflow httpserver.EnrollmentWorkflowHandlerOptions, logger *log.Logger, publication *httpserver.EnrollmentSnapshotPublicationHandlerOptions, snapshotByToken *httpserver.EnrollmentSnapshotByTokenHandlerOptions, acknowledgement *httpserver.EnrollmentSnapshotAcknowledgementHandlerOptions, grantExchange *httpserver.EnrollmentGrantExchangeHandlerOptions) (*enrollment.EnrollmentTLSSupervisor, error) {
 	identityCurrent := &enrollmentTLSIdentityAdapter{service: identityService, logger: logger}
 	configurationStore := &enrollmentTLSConfigurationAdapter{store: configStore, logger: logger}
 	factory := newEnrollmentWorkflowTLSListenerFactory(identityCurrent, workflow, logger)
 	factory.publication = publication
 	factory.snapshotByToken = snapshotByToken
 	factory.acknowledgement = acknowledgement
+	factory.grantExchange = grantExchange
 	return enrollment.NewEnrollmentTLSSupervisor(enrollment.EnrollmentTLSSupervisorOptions{
 		Identity:        identityCurrent,
 		Configuration:   configurationStore,
