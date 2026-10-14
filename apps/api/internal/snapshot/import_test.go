@@ -347,3 +347,29 @@ func TestImportRejectsTamperedContentHash(t *testing.T) {
 		t.Fatal("nothing may be archived or enqueued for a rejected envelope")
 	}
 }
+
+// A v2 envelope (ingress excluded from the hash) imports with its hash
+// untouched, and a tampered non-ingress field is rejected.
+func TestImportAcceptsHashV2AndRejectsTamper(t *testing.T) {
+	env := importHashEnvelope(t)
+	env.HashVersion = HashVersionIngressExcluded
+	hash, err := env.ExpectedHash()
+	if err != nil {
+		t.Fatal(err)
+	}
+	env.ContentHash = hash
+	imp := NewImporter(&fakeArchive{}, &fakeEnqueuer{}, nil)
+	if _, err := imp.Import(context.Background(), &env, ImporterInput{LocalNodeID: domain.NewNodeID()}); err != nil {
+		t.Fatalf("v2 import: %v", err)
+	}
+	if env.ContentHash != hash {
+		t.Fatal("v2 hash must be kept as received")
+	}
+	tampered := importHashEnvelope(t)
+	tampered.HashVersion = HashVersionIngressExcluded
+	tampered.ContentHash = hash
+	tampered.Replicated.Owners = []ReplicatedOwner{{UserID: uuid.New(), Username: "x"}}
+	if _, err := imp.Import(context.Background(), &tampered, ImporterInput{LocalNodeID: domain.NewNodeID()}); err == nil {
+		t.Fatal("tampered v2 envelope must be rejected")
+	}
+}

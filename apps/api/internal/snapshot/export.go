@@ -172,6 +172,7 @@ func (e *Exporter) Export(ctx context.Context, in ExporterInput) (Envelope, erro
 			Owners:        replicatedOwners,
 		},
 	}
+	env.HashVersion = HashVersionCurrent
 	hash, err := env.ExpectedHash()
 	if err != nil {
 		return Envelope{}, fmt.Errorf("exporter: compute content hash: %w", err)

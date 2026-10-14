@@ -19,6 +19,7 @@ package snapshot
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -86,7 +87,21 @@ type Envelope struct {
 	NodeLocal   NodeLocalFields `json:"nodeLocal"`
 	Replicated  ReplicatedFields `json:"replicated"`
 	ContentHash string         `json:"contentHash"`
+	// HashVersion selects the content-hash definition. Absent (0) or 1 is the
+	// legacy definition that covers settings.ingress; 2 excludes the ingress
+	// so installations with identical configuration but different ingress
+	// addresses share a hash. The marker itself is never hashed.
+	HashVersion int `json:"hashVersion,omitempty"`
 }
+
+const (
+	// HashVersionLegacy is the original definition (ingress included).
+	HashVersionLegacy = 1
+	// HashVersionIngressExcluded excludes settings.ingress from the hash.
+	HashVersionIngressExcluded = 2
+	// HashVersionCurrent is stamped on every newly built envelope.
+	HashVersionCurrent = HashVersionIngressExcluded
+)
 
 // ClassificationError is returned when a snapshot places an
 // authoritative-local field inside the replicated payload or vice versa.
@@ -127,7 +142,15 @@ func (e *Envelope) ExpectedHash() (string, error) {
 	if err := e.validateClassification(); err != nil {
 		return "", err
 	}
-	canonical := canonicalizeReplicated(e.Replicated)
+	var canonical []byte
+	switch e.HashVersion {
+	case 0, HashVersionLegacy:
+		canonical = canonicalizeReplicated(e.Replicated)
+	case HashVersionIngressExcluded:
+		canonical = canonicalizeReplicatedWithoutIngress(e.Replicated)
+	default:
+		return "", fmt.Errorf("unsupported snapshot hashVersion %d", e.HashVersion)
+	}
 	sum := sha256.Sum256(canonical)
 	return hex.EncodeToString(sum[:]), nil
 }
@@ -172,4 +195,23 @@ func (e *Envelope) Validate() error {
 // bytes are then ready to be hashed.
 func canonicalizeReplicated(r ReplicatedFields) []byte {
 	return []byte(domain.StableStringify(r))
+}
+
+// canonicalizeReplicatedWithoutIngress is the v2 definition: identical to the
+// legacy one except configuration.settings.ingress is removed before hashing.
+func canonicalizeReplicatedWithoutIngress(r ReplicatedFields) []byte {
+	raw, err := json.Marshal(r)
+	if err != nil {
+		return []byte(domain.StableStringify(r))
+	}
+	var tree map[string]any
+	if err := json.Unmarshal(raw, &tree); err != nil {
+		return []byte(domain.StableStringify(r))
+	}
+	if cfg, ok := tree["configuration"].(map[string]any); ok {
+		if settings, ok := cfg["settings"].(map[string]any); ok {
+			delete(settings, "ingress")
+		}
+	}
+	return []byte(domain.StableStringify(tree))
 }
