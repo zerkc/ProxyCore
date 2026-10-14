@@ -147,3 +147,23 @@ func (s *Server) writeTopologyError(w http.ResponseWriter, operation string, err
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "topology change failed", "code": "TOPOLOGY_CHANGE_FAILED"})
 	}
 }
+
+// handleEnrollmentWorkflow authenticates an Owner and delegates to the shared
+// enrollment workflow handler. It uses the read-only authentication path
+// because a NODE (or about-to-be NODE) installation is not writable.
+func (s *Server) handleEnrollmentWorkflow(w http.ResponseWriter, r *http.Request) {
+	setNoStore(w)
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed", "code": "METHOD_NOT_ALLOWED"})
+		return
+	}
+	if _, ok := s.requireUserReadOnly(w, r, auth.RoleOwner); !ok {
+		return
+	}
+	if s.enrollmentWorkflow == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "error": "enrollment workflow unavailable", "code": "ENROLLMENT_UNAVAILABLE"})
+		return
+	}
+	s.enrollmentWorkflow.ServeHTTP(w, r)
+}
