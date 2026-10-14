@@ -99,10 +99,12 @@ func isAllowedTransition(from, to domain.TopologyRole) bool {
 		return to == domain.TopologyRoleNode
 	case domain.TopologyRolePrimary:
 		return to == domain.TopologyRolePrimaryWithNodes ||
-			to == domain.TopologyRoleStalePrimary
+			to == domain.TopologyRoleStalePrimary ||
+			to == domain.TopologyRoleNode
 	case domain.TopologyRolePrimaryWithNodes:
 		return to == domain.TopologyRolePrimary ||
-			to == domain.TopologyRoleStalePrimary
+			to == domain.TopologyRoleStalePrimary ||
+			to == domain.TopologyRoleNode
 	case domain.TopologyRoleNode:
 		return to == domain.TopologyRolePrimary
 	case domain.TopologyRoleStalePrimary:

@@ -16,8 +16,10 @@ func TestStateMachineAllowsListedTransitions(t *testing.T) {
 		{domain.TopologyRoleStandalone, domain.TopologyRoleNode},
 		{domain.TopologyRolePrimary, domain.TopologyRolePrimaryWithNodes},
 		{domain.TopologyRolePrimary, domain.TopologyRoleStalePrimary},
+		{domain.TopologyRolePrimary, domain.TopologyRoleNode},
 		{domain.TopologyRolePrimaryWithNodes, domain.TopologyRolePrimary},
 		{domain.TopologyRolePrimaryWithNodes, domain.TopologyRoleStalePrimary},
+		{domain.TopologyRolePrimaryWithNodes, domain.TopologyRoleNode},
 		{domain.TopologyRoleNode, domain.TopologyRolePrimary},
 		{domain.TopologyRoleStalePrimary, domain.TopologyRolePrimary},
 		{domain.TopologyRoleStalePrimary, domain.TopologyRoleNode},
@@ -44,8 +46,8 @@ func TestStateMachineRejectsUnlistedTransitions(t *testing.T) {
 		{domain.TopologyRoleStandalone, domain.TopologyRolePrimary},
 		{domain.TopologyRoleStandalone, domain.TopologyRolePrimaryWithNodes},
 		{domain.TopologyRoleStandalone, domain.TopologyRoleStalePrimary},
-		{domain.TopologyRolePrimary, domain.TopologyRoleNode},
-		{domain.TopologyRolePrimaryWithNodes, domain.TopologyRoleNode},
+		{domain.TopologyRolePrimary, domain.TopologyRoleStandalone},
+		{domain.TopologyRolePrimaryWithNodes, domain.TopologyRoleStandalone},
 		{domain.TopologyRoleNode, domain.TopologyRoleStandalone},
 		{domain.TopologyRoleNode, domain.TopologyRolePrimaryWithNodes},
 		{domain.TopologyRoleNode, domain.TopologyRoleStalePrimary},
@@ -124,8 +126,8 @@ func TestStateMachineAllowedTransitionsForEachRole(t *testing.T) {
 		expected []domain.TopologyRole
 	}{
 		{domain.TopologyRoleStandalone, []domain.TopologyRole{domain.TopologyRoleNode}},
-		{domain.TopologyRolePrimary, []domain.TopologyRole{domain.TopologyRolePrimaryWithNodes, domain.TopologyRoleStalePrimary}},
-		{domain.TopologyRolePrimaryWithNodes, []domain.TopologyRole{domain.TopologyRolePrimary, domain.TopologyRoleStalePrimary}},
+		{domain.TopologyRolePrimary, []domain.TopologyRole{domain.TopologyRolePrimaryWithNodes, domain.TopologyRoleStalePrimary, domain.TopologyRoleNode}},
+		{domain.TopologyRolePrimaryWithNodes, []domain.TopologyRole{domain.TopologyRolePrimary, domain.TopologyRoleStalePrimary, domain.TopologyRoleNode}},
 		{domain.TopologyRoleNode, []domain.TopologyRole{domain.TopologyRolePrimary}},
 		{domain.TopologyRoleStalePrimary, []domain.TopologyRole{domain.TopologyRolePrimary, domain.TopologyRoleNode}},
 	}

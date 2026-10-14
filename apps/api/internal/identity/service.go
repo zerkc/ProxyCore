@@ -196,6 +196,11 @@ func (s *Service) TransitionTo(ctx context.Context, role domain.TopologyRole) (I
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	from := s.cached.Role
+	if from == role {
+		// Same-role transitions are idempotent. A demoted installation is
+		// already NODE when the enrollment conversion commits its role.
+		return s.cached, nil
+	}
 	if !isAllowedTransition(from, role) {
 		return Identity{}, fmt.Errorf("%w: %s -> %s", ErrInvalidTransition, from, role)
 	}
@@ -243,32 +248,14 @@ func (s *Service) RecordImportedSnapshot(ctx context.Context, sourcePrimary uuid
 	return s.cached, nil
 }
 
-// PromoteToPrimary rotates the leadership generation to the next value and
-// moves the installation into RolePrimary. Phase 4 implements the full
-// promotion workflow; this method is the contract-level entry point used by
-// Phase 0/1 tests and is intentionally minimal.
+// PromoteToPrimary promotes the installation with default options. It is the
+// compatibility entry point over Promote; see Promote for the full workflow.
 func (s *Service) PromoteToPrimary(ctx context.Context) (Identity, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	current := s.cached
-	if current.Role != domain.TopologyRoleNode &&
-		current.Role != domain.TopologyRoleStalePrimary &&
-		current.Role != domain.TopologyRoleStandalone {
-		return Identity{}, fmt.Errorf("%w: cannot promote from %s", ErrInvalidTransition, current.Role)
-	}
-	next := current.LeadershipGeneration.Next()
-	if err := s.store.UpdateLeadershipGeneration(ctx, next); err != nil {
+	result, err := s.Promote(ctx, PromoteOptions{})
+	if err != nil {
 		return Identity{}, err
 	}
-	if err := s.store.UpdateRole(ctx, domain.TopologyRolePrimary); err != nil {
-		return Identity{}, err
-	}
-	s.cached.Role = domain.TopologyRolePrimary
-	s.cached.LeadershipGeneration = next
-	if next > s.cached.LatestKnownGeneration {
-		s.cached.LatestKnownGeneration = next
-	}
-	return s.cached, nil
+	return result.Identity, nil
 }
 
 // isAllowedTransition encodes the Phase 0/1 transition matrix. The full
@@ -281,10 +268,12 @@ func isAllowedTransition(from, to domain.TopologyRole) bool {
 		return to == domain.TopologyRoleNode
 	case domain.TopologyRolePrimary:
 		return to == domain.TopologyRolePrimaryWithNodes ||
-			to == domain.TopologyRoleStalePrimary
+			to == domain.TopologyRoleStalePrimary ||
+			to == domain.TopologyRoleNode
 	case domain.TopologyRolePrimaryWithNodes:
 		return to == domain.TopologyRolePrimary ||
-			to == domain.TopologyRoleStalePrimary
+			to == domain.TopologyRoleStalePrimary ||
+			to == domain.TopologyRoleNode
 	case domain.TopologyRoleNode:
 		return to == domain.TopologyRolePrimary
 	case domain.TopologyRoleStalePrimary:
