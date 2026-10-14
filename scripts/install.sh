@@ -444,13 +444,55 @@ coredns_running() {
   docker compose ps --status running --services 2>/dev/null | grep -qx coredns
 }
 
+# True when the busy port 53 is the systemd-resolved stub listener. It binds
+# 127.0.0.53:53, which conflicts with Docker publishing 0.0.0.0:53.
+resolved_stub_active() {
+  command -v systemctl >/dev/null 2>&1 || return 1
+  systemctl is-active --quiet systemd-resolved 2>/dev/null || return 1
+  ss -lntu 2>/dev/null | grep -Eq '127\.0\.0\.5[34]:53([[:space:]]|$)'
+}
+
+run_privileged() {
+  if [ "$(id -u)" -eq 0 ]; then
+    "$@"
+  elif command -v sudo >/dev/null 2>&1; then
+    sudo "$@"
+  else
+    return 1
+  fi
+}
+
+# Turns off only the stub listener. systemd-resolved keeps running and the
+# host keeps resolving through /run/systemd/resolve/resolv.conf, so image
+# pulls and the host's own DNS are unaffected.
+disable_resolved_stub() {
+  run_privileged mkdir -p /etc/systemd/resolved.conf.d || return 1
+  printf '[Resolve]\nDNSStubListener=no\n' |
+    run_privileged tee /etc/systemd/resolved.conf.d/proxycore.conf >/dev/null || return 1
+  case "$(readlink /etc/resolv.conf 2>/dev/null || true)" in
+    */stub-resolv.conf)
+      run_privileged ln -sf /run/systemd/resolve/resolv.conf /etc/resolv.conf || return 1
+      ;;
+  esac
+  run_privileged systemctl restart systemd-resolved
+}
+
 check_host_ports() {
   # Best-effort conflict detection. A busy DNS_PORT held by something other
-  # than our own CoreDNS is fatal: the container cannot start and compose
-  # would fail halfway through the deploy. The other ports stay warnings so
-  # update behavior remains compatible.
+  # than our own CoreDNS cannot be published: when it is the systemd-resolved
+  # stub we free it, otherwise we stop before compose fails halfway through
+  # the deploy. The other ports stay warnings so updates remain compatible.
   if port_in_use "$DNS_PORT" && ! coredns_running; then
-    die "host port ${DNS_PORT} is already in use, so CoreDNS cannot bind it. On Ubuntu/Debian this is usually systemd-resolved: set DNSStubListener=no in /etc/systemd/resolved.conf and run 'systemctl restart systemd-resolved'. Or pick another port with DNS_PORT=<port> (inspect the owner with: ss -lntup | grep ':${DNS_PORT} ')"
+    if [ "$DNS_PORT" = 53 ] && resolved_stub_active; then
+      log "systemd-resolved holds port 53; disabling its DNS stub listener"
+      disable_resolved_stub ||
+        die "could not disable the systemd-resolved stub listener (root or sudo required). Set DNSStubListener=no in /etc/systemd/resolved.conf, restart systemd-resolved, or use DNS_PORT=<port>"
+      sleep 1
+      port_in_use "$DNS_PORT" &&
+        die "host port ${DNS_PORT} is still in use after disabling the systemd-resolved stub listener (inspect with: ss -lntup | grep ':${DNS_PORT} ')"
+    else
+      die "host port ${DNS_PORT} is already in use by another process, so CoreDNS cannot bind it. Free it or pick another port with DNS_PORT=<port> (inspect with: ss -lntup | grep ':${DNS_PORT} ')"
+    fi
   fi
   for port in 80 443 "$ENROLLMENT_PORT"; do
     if port_in_use "$port"; then
