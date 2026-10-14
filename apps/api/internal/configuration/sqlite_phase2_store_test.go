@@ -263,6 +263,67 @@ func TestSQLitePhase2PublishRevertToEarlierHashBecomesLatest(t *testing.T) {
 	}
 }
 
+// X -> Y -> X: re-applying X reuses X's revision (checksum is unique), so its
+// revision number (5) is lower than Y's (6). The most recently applied
+// configuration is still the one published as latest.
+func TestSQLitePhase2PublishReapplyReusingRevisionNumberBecomesLatest(t *testing.T) {
+	f, store := newSQLitePhase2Fixture(t)
+	ctx := context.Background()
+	body, hashX := publicationEnvelopeBody(t, f.primaryID)
+	hashY := strings.Repeat("c", 64)
+	at := func(sec int) time.Time { return time.Date(2026, 3, 1, 2, 3, sec, 0, time.UTC) }
+	publish := func(revisionID, jobID, hash string, sec int) {
+		t.Helper()
+		if err := store.WithCanonicalSnapshot(ctx, func(tx CanonicalSnapshotTransaction) error {
+			write := canonicalWriteFor(f, revisionID, jobID, hash, body)
+			write.AppliedAt = at(sec)
+			return tx.PublishCanonicalSnapshot(ctx, write)
+		}); err != nil {
+			t.Fatalf("publish %s: %v", hash[:4], err)
+		}
+	}
+	revX, jobX1 := insertCanonicalApply(t, f, 5)
+	revY, jobY := insertCanonicalApply(t, f, 6)
+	publish(revX, jobX1, hashX, 10)
+	publish(revY, jobY, hashY, 20)
+	if got, ok, err := f.store.LatestPublishedContentHash(ctx); err != nil || !ok || got != hashY {
+		t.Fatalf("latest after Y = %q, %v, %v", got, ok, err)
+	}
+	// The re-apply of X: a new job on the SAME revision, finished later than Y.
+	jobX2 := uuid.NewString()
+	finished := tokenKey(t, at(30))
+	settingsExec(t, f.db, `insert into apply_jobs(id,revision_id,target,status,correlation_id,created_at,finished_at,source) values(?,?,'combined','applied',?,?,?,'ordinary')`,
+		jobX2, revX, uuid.NewString(), finished, finished)
+	if candidates, err := store.ListCanonicalSnapshotCandidates(ctx); err != nil || len(candidates) != 1 || candidates[0].JobID != jobX2 {
+		t.Fatalf("candidates = %v, %v", candidates, err)
+	}
+	publish(revX, jobX2, hashX, 30)
+	if got, ok, err := f.store.LatestPublishedContentHash(ctx); err != nil || !ok || got != hashX {
+		t.Fatalf("latest after re-apply of X = %q, %v, %v", got, ok, err)
+	}
+	// A node on Y receives X; a node already on X short-circuits.
+	request := publicationRequest(f)
+	request.AfterContentHash = hashY
+	got, err := f.store.ReadSnapshotPublication(ctx, request)
+	if err != nil || got.Current || got.Snapshot.ContentHash != hashX || len(got.Snapshot.Bytes) == 0 {
+		t.Fatalf("node on Y = %#v, %v", got, err)
+	}
+	request.AfterContentHash = hashX
+	if got, err = f.store.ReadSnapshotPublication(ctx, request); err != nil || !got.Current || got.Snapshot.ContentHash != hashX {
+		t.Fatalf("node on X = %#v, %v", got, err)
+	}
+	// Replaying the older apply of X (or Y) afterwards does not rewind latest,
+	// even though Y has the higher revision number.
+	publish(revX, jobX1, hashX, 10)
+	publish(revY, jobY, hashY, 20)
+	if got, ok, err := f.store.LatestPublishedContentHash(ctx); err != nil || !ok || got != hashX {
+		t.Fatalf("latest after stale replays = %q, %v, %v", got, ok, err)
+	}
+	if candidates, err := store.ListCanonicalSnapshotCandidates(ctx); err != nil || len(candidates) != 0 {
+		t.Fatalf("candidates after = %v, %v", candidates, err)
+	}
+}
+
 // Publishing an older revision for a hash that a newer revision already holds is
 // a stale replay and must not move the published snapshot backwards.
 func TestSQLitePhase2PublishStaleRevisionDoesNotRewindLatest(t *testing.T) {

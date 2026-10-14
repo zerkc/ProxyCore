@@ -265,3 +265,94 @@ func withCertificateSecret(cfg domain.ConfigurationSnapshot, secretID string) do
 	cfg.Certificates[0].SecretID = secretID
 	return cfg
 }
+
+func listOwnersOf(t *testing.T, f *sqlitePublicationFixture, store *SQLitePhase2Store) []replicationsnapshot.ReplicableOwner {
+	t.Helper()
+	var owners []replicationsnapshot.ReplicableOwner
+	err := store.WithCanonicalSnapshot(context.Background(), func(tx CanonicalSnapshotTransaction) error {
+		var err error
+		owners, err = tx.ListReplicableOwners(context.Background())
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return owners
+}
+
+func TestSQLiteExportOmitsInactiveUsersAndNodeKeepsThemInactive(t *testing.T) {
+	f, store := newSQLitePhase2Fixture(t)
+	settingsExec(t, f.db, `insert into users(id,username,password_hash,role,active,created_at,updated_at) values (?,'disabled-op','scrypt$x','operator',0,'0','0')`, uuid.NewString())
+	owners := listOwnersOf(t, f, store)
+	if len(owners) != 1 || owners[0].Username != "synthetic-owner" || owners[0].Role != "owner" {
+		t.Fatalf("exported owners = %+v, want only the active owner", owners)
+	}
+	// An inactive owner is not exported either; only the active owner remains.
+	settingsExec(t, f.db, `insert into users(id,username,password_hash,role,active,created_at,updated_at) values (?,'disabled-owner','scrypt$y','owner',0,'0','0')`, uuid.NewString())
+	if got := listOwnersOf(t, f, store); len(got) != 1 || got[0].Username != "synthetic-owner" {
+		t.Fatalf("inactive owner exported: %+v", got)
+	}
+	// A node importing the exported set leaves non-exported local users inactive.
+	exported := make([]replicationsnapshot.ReplicatedOwner, 0, len(owners))
+	for _, o := range owners {
+		exported = append(exported, replicationsnapshot.ReplicatedOwner{UserID: o.UserID, Username: o.Username, PasswordHash: "scrypt$synthetic", Role: o.Role})
+	}
+	node, nodeStore := newSQLitePhase2Fixture(t)
+	settingsExec(t, node.db, `insert into users(id,username,password_hash,role,created_at,updated_at) values (?,'disabled-op','scrypt$x','operator','0','0')`, uuid.NewString())
+	if err := importWith(t, node, nodeStore, func(env *replicationsnapshot.Envelope) { env.Replicated.Owners = exported }); err != nil {
+		t.Fatal(err)
+	}
+	if n := phase2Count(t, node, `select count(*) from users where username = 'disabled-op' and active = 0`); n != 1 {
+		t.Fatalf("user absent from the snapshot must be inactive on the node, got %d", n)
+	}
+}
+
+func TestSQLiteImportActiveOwnersOnlyOperatorsFailsClosed(t *testing.T) {
+	f, store := newSQLitePhase2Fixture(t)
+	err := importWith(t, f, store, func(env *replicationsnapshot.Envelope) {
+		env.Replicated.Owners = []replicationsnapshot.ReplicatedOwner{
+			{UserID: uuid.New(), Username: "only-operator", PasswordHash: importedOwnerHash, Role: "operator"},
+		}
+	})
+	if err == nil {
+		t.Fatal("snapshot with owners but no role=owner must fail closed")
+	}
+}
+
+func TestSQLiteImportV3VerifiesSecretDigestAgainstUnwrappedPlaintext(t *testing.T) {
+	secretID := uuid.MustParse("55555555-aaaa-4aaa-8aaa-555555555555")
+	for _, tc := range []struct {
+		name      string
+		plaintext string // the value the digest is computed over
+		wantErr   bool
+	}{
+		{"matching digest imports", importedSecretPlaintext, false},
+		{"digest of another value is rejected", "some-other-value", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f, store := newSQLitePhase2Fixture(t)
+			kek := clusterKEK(t, f)
+			keyRef := f.clusterKey
+			digest, err := kek.SecretDigest(secretID.String(), "certificate-key", []byte(tc.plaintext))
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = importWith(t, f, store, func(env *replicationsnapshot.Envelope) {
+				env.NodeLocal.ClusterKeyRef = &keyRef
+				secret := wrappedSecret(t, kek, secretID, "certificate-key", importedSecretPlaintext)
+				secret.Digest = digest
+				env.HashVersion = replicationsnapshot.HashVersionStableSecrets
+				env.Replicated.Secrets = []replicationsnapshot.ReplicatedSecret{secret}
+				env.Replicated.Configuration = withCertificateSecret(materializeConfig(), secretID.String())
+			})
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("err = %v, wantErr %v", err, tc.wantErr)
+			}
+			if tc.wantErr {
+				if n := phase2Count(t, f, `select count(*) from secrets where id = ?`, secretID.String()); n != 0 {
+					t.Fatal("rejected import must roll back")
+				}
+			}
+		})
+	}
+}

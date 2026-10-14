@@ -301,8 +301,10 @@ func (t *sqlitePhase2Transaction) ListSecrets(ctx context.Context) ([]replicatio
 	return result, nil
 }
 
+// ListReplicableOwners exports only active users: a deactivated user must not
+// be reactivated on nodes (the importer sets active=1 for every exported owner).
 func (t *sqlitePhase2Transaction) ListReplicableOwners(ctx context.Context) ([]replicationsnapshot.ReplicableOwner, error) {
-	rows, err := t.v.Conn().QueryContext(ctx, `select id, username, password_hash, role from users order by id`)
+	rows, err := t.v.Conn().QueryContext(ctx, `select id, username, password_hash, role from users where active = 1 order by id`)
 	if err != nil {
 		return nil, err
 	}
@@ -340,8 +342,7 @@ func (t *sqlitePhase2Transaction) PublishCanonicalSnapshot(ctx context.Context, 
 	}
 	// A content hash may be published again (a revert returns to an earlier
 	// configuration). The unique content_hash index allows one row per hash, so
-	// that row is rebound to the newer revision below. Recency is the revision
-	// number: a replay or an older revision never moves the row backwards.
+	// that row is rebound to the newer apply below. Recency is the apply clock.
 	existing, err := t.findCanonicalSnapshotByHash(ctx, write.ContentHash)
 	if err != nil {
 		return err
@@ -350,20 +351,29 @@ func (t *sqlitePhase2Transaction) PublishCanonicalSnapshot(ctx context.Context, 
 		if sqliteCanonicalSnapshotMatches(existing.AppliedSnapshotRecord, write) {
 			return nil
 		}
-		var newNumber int
-		if err := t.v.Conn().QueryRowContext(ctx, `select revision_number from config_revisions where id = ?`,
-			write.RevisionID).Scan(&newNumber); err != nil {
-			return ErrCanonicalSnapshotConflict
-		}
-		if existing.RevisionID != nil {
-			var oldNumber int
-			err := t.v.Conn().QueryRowContext(ctx, `select revision_number from config_revisions where id = ?`,
-				*existing.RevisionID).Scan(&oldNumber)
-			if err == nil && oldNumber >= newNumber {
-				return nil
+		// Recency is the apply clock, not the revision number: re-applying an
+		// earlier configuration reuses its revision (the checksum is unique)
+		// while a newer one already exists. An older apply never rewinds the
+		// published snapshot; an equal clock falls back to the revision number.
+		switch {
+		case write.AppliedAt.Before(existing.AppliedAt):
+			return nil
+		case write.AppliedAt.Equal(existing.AppliedAt):
+			var newNumber int
+			if err := t.v.Conn().QueryRowContext(ctx, `select revision_number from config_revisions where id = ?`,
+				write.RevisionID).Scan(&newNumber); err != nil {
+				return ErrCanonicalSnapshotConflict
 			}
-			if err != nil && !errors.Is(err, sql.ErrNoRows) {
-				return err
+			if existing.RevisionID != nil {
+				var oldNumber int
+				err := t.v.Conn().QueryRowContext(ctx, `select revision_number from config_revisions where id = ?`,
+					*existing.RevisionID).Scan(&oldNumber)
+				if err == nil && oldNumber >= newNumber {
+					return nil
+				}
+				if err != nil && !errors.Is(err, sql.ErrNoRows) {
+					return err
+				}
 			}
 		}
 	}

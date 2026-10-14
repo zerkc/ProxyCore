@@ -1,6 +1,7 @@
 package configuration
 
 import (
+	"crypto/subtle"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -52,6 +53,15 @@ func sqliteImportReplicatedSecrets(v sqlitedb.WriteValue, env replicationsnapsho
 		plain, err := kek.Unwrap(secret.Envelope)
 		if err != nil {
 			return fmt.Errorf("import secrets: secret %s cannot be unwrapped", secret.ID)
+		}
+		// Hash v3 does not cover the envelope, so the digest is what binds the
+		// unwrapped value to the verified content hash.
+		if secret.Digest != "" {
+			want, derr := kek.SecretDigest(secret.ID.String(), secret.Purpose, plain)
+			if derr != nil || subtle.ConstantTimeCompare([]byte(want), []byte(secret.Digest)) != 1 {
+				zeroSecretBytes(plain)
+				return fmt.Errorf("import secrets: secret %s digest mismatch", secret.ID)
+			}
 		}
 		ciphertext, err := secrets.EncryptSecret(string(plain), master)
 		zeroSecretBytes(plain)

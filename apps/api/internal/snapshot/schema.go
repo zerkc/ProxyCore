@@ -37,6 +37,10 @@ type ReplicatedSecret struct {
 	ID       uuid.UUID `json:"id"`
 	Purpose  string    `json:"purpose"`
 	Envelope string    `json:"envelope"`
+	// Digest is a keyed HMAC of the plaintext (see cluster.KEK.SecretDigest).
+	// Hash definition v3 covers it instead of Envelope, whose random nonce
+	// changes on every export. Absent on legacy (v1/v2) envelopes.
+	Digest string `json:"digest,omitempty"`
 }
 
 // ReplicatedOwner carries the durable admin identity that all nodes must
@@ -99,8 +103,11 @@ const (
 	HashVersionLegacy = 1
 	// HashVersionIngressExcluded excludes settings.ingress from the hash.
 	HashVersionIngressExcluded = 2
+	// HashVersionStableSecrets additionally replaces each secret's envelope by
+	// its stable digest, so re-wrapping a secret does not change the hash.
+	HashVersionStableSecrets = 3
 	// HashVersionCurrent is stamped on every newly built envelope.
-	HashVersionCurrent = HashVersionIngressExcluded
+	HashVersionCurrent = HashVersionStableSecrets
 )
 
 // ClassificationError is returned when a snapshot places an
@@ -148,6 +155,13 @@ func (e *Envelope) ExpectedHash() (string, error) {
 		canonical = canonicalizeReplicated(e.Replicated)
 	case HashVersionIngressExcluded:
 		canonical = canonicalizeReplicatedWithoutIngress(e.Replicated)
+	case HashVersionStableSecrets:
+		for _, secret := range e.Replicated.Secrets {
+			if secret.Digest == "" {
+				return "", fmt.Errorf("hashVersion %d requires a digest on secret %s", HashVersionStableSecrets, secret.ID)
+			}
+		}
+		canonical = canonicalizeReplicatedStableSecrets(e.Replicated)
 	default:
 		return "", fmt.Errorf("unsupported snapshot hashVersion %d", e.HashVersion)
 	}
@@ -200,6 +214,19 @@ func canonicalizeReplicated(r ReplicatedFields) []byte {
 // canonicalizeReplicatedWithoutIngress is the v2 definition: identical to the
 // legacy one except configuration.settings.ingress is removed before hashing.
 func canonicalizeReplicatedWithoutIngress(r ReplicatedFields) []byte {
+	return canonicalizeReplicatedTree(r, false)
+}
+
+// canonicalizeReplicatedStableSecrets is the v3 definition: v2 with every
+// secret's random-nonce envelope removed (id, purpose and digest remain). The
+// digest is mandatory in v3 (ExpectedHash rejects a secret without one) and the
+// importer verifies it against the unwrapped plaintext, which is what binds
+// the value to the hash.
+func canonicalizeReplicatedStableSecrets(r ReplicatedFields) []byte {
+	return canonicalizeReplicatedTree(r, true)
+}
+
+func canonicalizeReplicatedTree(r ReplicatedFields, stableSecrets bool) []byte {
 	raw, err := json.Marshal(r)
 	if err != nil {
 		return []byte(domain.StableStringify(r))
@@ -211,6 +238,15 @@ func canonicalizeReplicatedWithoutIngress(r ReplicatedFields) []byte {
 	if cfg, ok := tree["configuration"].(map[string]any); ok {
 		if settings, ok := cfg["settings"].(map[string]any); ok {
 			delete(settings, "ingress")
+		}
+	}
+	if stableSecrets {
+		if list, ok := tree["secrets"].([]any); ok {
+			for _, item := range list {
+				if secret, ok := item.(map[string]any); ok {
+					delete(secret, "envelope")
+				}
+			}
 		}
 	}
 	return []byte(domain.StableStringify(tree))

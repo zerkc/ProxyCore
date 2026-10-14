@@ -129,10 +129,15 @@ func (e *Exporter) Export(ctx context.Context, in ExporterInput) (Envelope, erro
 		if err != nil {
 			return Envelope{}, fmt.Errorf("exporter: wrap secret %s: %w", s.ID, err)
 		}
+		digest, err := in.ClusterKEK.SecretDigest(s.ID.String(), s.Purpose, s.Value)
+		if err != nil {
+			return Envelope{}, fmt.Errorf("exporter: digest secret %s: %w", s.ID, err)
+		}
 		replicatedSecrets = append(replicatedSecrets, ReplicatedSecret{
 			ID:       s.ID,
 			Purpose:  s.Purpose,
 			Envelope: envelope,
+			Digest:   digest,
 		})
 	}
 
