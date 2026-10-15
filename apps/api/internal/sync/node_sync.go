@@ -93,6 +93,8 @@ type NodeSyncer struct {
 	opts NodeSyncOptions
 	run  gosync.Mutex
 	wait func(context.Context, time.Duration) error
+	// wake interrupts the inter-cycle sleep (buffered 1, never blocks senders).
+	wake chan struct{}
 
 	mu        gosync.Mutex
 	nextDelay time.Duration
@@ -117,7 +119,7 @@ func NewNodeSyncer(opts NodeSyncOptions) *NodeSyncer {
 	if opts.Logf == nil {
 		opts.Logf = func(string, ...any) {}
 	}
-	return &NodeSyncer{opts: opts, wait: nodeSyncWait, nextDelay: opts.Interval}
+	return &NodeSyncer{opts: opts, wait: nodeSyncWait, wake: make(chan struct{}, 1), nextDelay: opts.Interval}
 }
 
 func nodeSyncWait(ctx context.Context, d time.Duration) error {
@@ -143,9 +145,39 @@ func (s *NodeSyncer) Run(ctx context.Context) {
 		case errors.As(err, &failure):
 			s.opts.Logf("node sync cycle failed: %s", failure.Code)
 		}
-		if s.wait(ctx, s.delay()) != nil {
+		if s.waitOrWake(ctx, s.delay()) != nil {
 			return
 		}
+	}
+}
+
+// Wake makes a sleeping Run loop start its next cycle now (for example after
+// re-enrollment cleared an unlinked state). It is nil-safe and never blocks;
+// repeated wakes coalesce.
+func (s *NodeSyncer) Wake() {
+	if s == nil || s.wake == nil {
+		return
+	}
+	select {
+	case s.wake <- struct{}{}:
+	default:
+	}
+}
+
+// waitOrWake sleeps for d through the wait seam, returning early (nil) on
+// Wake and ctx.Err() when ctx is cancelled.
+func (s *NodeSyncer) waitOrWake(ctx context.Context, d time.Duration) error {
+	sleepCtx, cancel := context.WithCancel(ctx)
+	done := make(chan error, 1)
+	go func() { done <- s.wait(sleepCtx, d) }()
+	select {
+	case err := <-done:
+		cancel()
+		return err
+	case <-s.wake:
+		cancel()
+		<-done
+		return ctx.Err()
 	}
 }
 

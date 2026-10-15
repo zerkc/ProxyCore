@@ -216,3 +216,48 @@ func TestNodeSyncUnlinkSignalNotNotifiedWhenPersistenceFails(t *testing.T) {
 		t.Fatalf("overlay must follow persisted truth: calls=%v state=%+v", *calls, h.store.state.NodeSyncProgress)
 	}
 }
+
+func TestNodeSyncWakeInterruptsUnlinkedSleep(t *testing.T) {
+	h := newNodeSyncHarness(t, strings.Repeat("a", 64))
+	h.store.state.Unlinked = true
+	fetched := make(chan struct{}, 4)
+	h.syncer.opts.Fetch = func(context.Context, configuration.NodeSyncState, string) (SnapshotFetchResult, error) {
+		fetched <- struct{}{}
+		return SnapshotFetchResult{NotModified: true, ContentHash: strings.Repeat("a", 64)}, nil
+	}
+	h.syncer.opts.MaxBackoff = time.Hour
+	h.syncer.opts.Interval = time.Hour
+
+	ctx, cancel := context.WithCancel(context.Background())
+	finished := make(chan struct{})
+	go func() { h.syncer.Run(ctx); close(finished) }()
+	defer func() { cancel(); <-finished }()
+
+	// First cycle is unlinked: no fetch, loop goes to its long sleep.
+	deadline := time.Now().Add(2 * time.Second)
+	for h.syncer.delay() != time.Hour && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	select {
+	case <-fetched:
+		t.Fatal("unlinked node must not fetch")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	h.store.mu.Lock()
+	h.store.state.Unlinked = false
+	h.store.mu.Unlock()
+	h.syncer.Wake()
+
+	select {
+	case <-fetched:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Wake did not interrupt the unlinked sleep")
+	}
+}
+
+func TestNodeSyncWakeIsNilSafe(t *testing.T) {
+	var s *NodeSyncer
+	s.Wake()
+	(&NodeSyncer{}).Wake()
+}

@@ -212,7 +212,13 @@ func runServerWithNodeConverter(ctx context.Context, cfg config.Config, logger *
 			}
 		}
 		workflow.RecordSyncBinding = func(ctx context.Context, binding configuration.NodeSyncBinding, appliedHash string) error {
-			return nodeSyncStore.BindNodeSync(ctx, binding, appliedHash, time.Now().UTC())
+			if err := nodeSyncStore.BindNodeSync(ctx, binding, appliedHash, time.Now().UTC()); err != nil {
+				return err
+			}
+			// Re-enrollment cleared any unlinked state; do not wait out the
+			// loop's MaxBackoff sleep before resuming. Nil-safe.
+			nodeSyncer.Wake()
+			return nil
 		}
 		options = append(options, httpserver.WithEnrollmentWorkflow(workflow))
 	}
