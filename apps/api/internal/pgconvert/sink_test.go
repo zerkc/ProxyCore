@@ -198,7 +198,7 @@ func TestConvertOlderVariantAppliesDefaults(t *testing.T) {
 	if got := queryString(t, db, `select sync_enabled || consecutive_failures || (select count(*) from users where password_change_required = 0) from node_state`); got != "002" {
 		t.Errorf("defaults = %q", got)
 	}
-	if len(report.Gaps) != 5 {
+	if len(report.Gaps) != 9 {
 		t.Errorf("gaps = %+v", report.Gaps)
 	}
 	for name, table := range report.Tables {
