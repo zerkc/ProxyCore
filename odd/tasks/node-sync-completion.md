@@ -51,4 +51,4 @@ Branch `feat/node-sync-completion` created from `main` (0751555). No tasks done 
 Per task: delegated direct (one writer; 2+ non-trivial files each). Exploration for T1 from the audit (26 tool uses, path:line above).
 
 ## Delivery
-Strategy: ask-on-risk; running count passed ~400 after T2 (T1 +155, T2 +584). User chose chain strategy `feature-branch-chain`: slices stack on an integration branch, main receives one merge at the end. Slice boundaries and PR contents to be recorded here when PRs are prepared (push/PR/merge remain user decisions).
+Strategy: ask-on-risk; running count passed ~400 after T2 (T1 +155, T2 +584). User chose chain strategy `feature-branch-chain`: slices stack on an integration branch, main receives one merge at the end. Superseded: the user later chose a single PR holding every commit of `feat/node-sync-completion` (T1-T7 plus docs) for easier merging, so there are no slices. Push/PR/merge remain user decisions.
