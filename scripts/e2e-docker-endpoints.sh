@@ -76,7 +76,7 @@ join_node() { # token label : draft -> preview -> confirm using ONLY the token
   local token="$1" label="$2" code id
   code="$(draft_retry "$token")"; expect "$label draft" 200 "$code" "POST /api/topology/enrollment/draft {token}"
   id="$(jq -r '.draftId' "$BODY")"
-  jqexpect "$label draft shows the primary CA fingerprint" '.primaryCaFingerprint | test("^[0-9a-f]{64}$")'
+  jqexpect "$label draft shows the primary CA fingerprint" ".primaryCaFingerprint == \"$CA_FP\""
   expect "$label preview" 200 "$(req node POST /api/topology/enrollment/preview "{\"draftId\":\"$id\"}")" "POST /api/topology/enrollment/preview"
   expect "$label confirm" 200 "$(req node POST /api/topology/enrollment/confirm "{\"draftId\":\"$id\"}")" "POST /api/topology/enrollment/confirm"
   jqexpect "$label became a node" '.role == "node"'
@@ -245,6 +245,8 @@ expect "primary apply for first snapshot" 202 "$(req primary POST /api/apply)" "
 expect "draft GET refused" 405 "$(req node GET /api/topology/enrollment/draft)" "GET /api/topology/enrollment/draft"
 expect "recover without draft" 410 "$(req node POST /api/topology/enrollment/recover '{}')" "POST /api/topology/enrollment/recover"
 TOKEN="$(new_token)"; [[ "$TOKEN" == pcenr2_* ]] || bail "join token" "not a v2 token"
+expect "draft invalid caPem rejected" 400 "$(req node POST /api/topology/enrollment/draft "$(jq -nc --arg t "$TOKEN" '{token:$t,caPem:"not a certificate"}')")" "POST /api/topology/enrollment/draft (garbage caPem)"
+req primary GET /api/topology/settings/enrollment-trust/ca >/dev/null; cp "$BODY" "$TMP/ca-first.pem"
 join_node "$TOKEN" "join"
 FP_SHOWN="$(jq -r '.role' "$BODY")"
 wait_for "node replicates e2e.test" 90 has_zone node e2e.test
@@ -329,6 +331,23 @@ expect "node promote" 200 "$(req node POST /api/topology/promote '{"confirm":tru
 jqexpect "node promoted" '.identity.role == "primary" and .nodesMustReenroll == true'
 expect "node demote" 200 "$(req node POST /api/topology/demote '{"confirm":true}')" "POST /api/topology/demote on NODE"
 jqexpect "node demoted" '.identity.role == "node" and .nextStep == "enroll"'
+
+echo "-- primary rebuilt at the same address (new CA): wrong CA refused, re-enroll replaces the CA"
+dc primary down -v >/dev/null 2>&1
+install primary; bootstrap_login primary
+expect "rebuilt hostnames" 200 "$(req primary PUT /api/settings/enrollment-hostnames "{\"hostnames\":[\"$PRIMARY_ALIAS\"]}")" "PUT /api/settings/enrollment-hostnames"
+expect "rebuilt settings" 200 "$(req primary PUT /api/settings '{"ingress":{"ipv4":"192.0.2.10"},"defaultPool":{"id":"default","endpoints":[{"host":"192.0.2.53","port":53}]}}')" "PUT /api/settings"
+expect "rebuilt promote" 200 "$(req primary POST /api/topology/promote '{"confirm":true}')" "POST /api/topology/promote"
+wait_for "rebuilt enrollment trust" 90 trust_ready
+OLD_FP="$CA_FP"; CA_FP="$(jq -r '.caDerSha256' "$BODY")"
+[[ "$CA_FP" != "$OLD_FP" ]] && record PASS "rebuilt primary has a new CA" "$CA_FP" || bail "rebuilt primary has a new CA" "fingerprint unchanged"
+expect "rebuilt zone" 201 "$(req primary POST /api/zones '{"name":"rebuilt.test"}')" "POST /api/zones"
+expect "rebuilt apply" 202 "$(req primary POST /api/apply)" "POST /api/apply"
+TOKEN3="$(new_token)"
+expect "old CA refused for the new primary token" 400 "$(req node POST /api/topology/enrollment/draft "$(jq -nc --arg t "$TOKEN3" --arg c "$(cat "$TMP/ca-first.pem")" '{token:$t,caPem:$c}')")" "POST /api/topology/enrollment/draft (old caPem)"
+join_node "$TOKEN3" "rebuilt re-enroll"
+wait_for "node syncs with the replaced CA" 90 has_zone node rebuilt.test
+record PASS "sync with the replaced CA" "rebuilt.test replicated after re-enrolling against the new CA"
 
 echo "== log hygiene =="
 if { dc primary logs --no-color 2>&1; dc node logs --no-color 2>&1; } | grep -E "pcenr[12]_|BEGIN (EC |RSA )?PRIVATE KEY|$PASSWORD|$NEW_PASSWORD" >/dev/null; then

@@ -66,7 +66,7 @@ rawreq() {
   curl -sS -o "$BODY" -w '%{http_code}' -X "$method" "$@" "http://127.0.0.1:$port$path" || echo 000
 }
 # treq WHICH METHOD PATH [JSON] -> status; enrollment TLS listener (:3443), TLS verification off
-# (the e2e checks the endpoint contract; CA trust is covered by e2e-node-ca-trust.sh).
+# (the e2e checks the endpoint contract; CA pinning and CA replacement are asserted in e2e-docker-endpoints.sh).
 # The alias is resolved to 127.0.0.1 so SNI and Host match the enrollment certificate.
 treq() {
   local which="$1" method="$2" path="$3" data="${4-}" port

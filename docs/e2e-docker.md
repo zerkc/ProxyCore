@@ -29,8 +29,9 @@ Adding a route to `routes()` without a request in the e2e makes the run fail.
 ## Helpers
 
 `scripts/lib/e2e-docker.sh` holds the shared harness (`req`, `treq` for the
-`:3443` listener, `expect`, `jqexpect`, summary, cleanup). The older
-`scripts/e2e-node-ca-trust.sh` keeps its own copy and is independent.
+`:3443` listener, `expect`, `jqexpect`, summary, cleanup). CA pinning (token-carried
+CA, fingerprint match, wrong CA refused) and CA replacement after a primary
+rebuild are asserted in E2 of the endpoints suite.
 
 ## Notes
 
