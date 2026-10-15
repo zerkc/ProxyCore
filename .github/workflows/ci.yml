@@ -5,6 +5,7 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -151,6 +152,20 @@ jobs:
           # Dummy values only for `compose config` interpolation (not used at runtime).
           PROXYCORE_MASTER_KEY_BASE64: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
         run: docker compose -f compose.yaml config --quiet
+
+  # Optional, not part of the required "CI" gate below: builds the API/worker
+  # images and drives a real PRIMARY + NODE pair (about 8 minutes). It runs on
+  # push to main and on manual dispatch; run it locally with
+  # `bash scripts/e2e-docker-endpoints.sh` (see docs/e2e-docker.md).
+  e2e-docker-endpoints:
+    name: E2E (Docker endpoints)
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run the endpoints e2e
+        run: bash scripts/e2e-docker-endpoints.sh
 
   ci:
     name: CI

@@ -335,5 +335,8 @@ if { dc primary logs --no-color 2>&1; dc node logs --no-color 2>&1; } | grep -E 
   record FAIL "no secrets in logs" "a token, private key or password appears in container logs"
 else record PASS "no secrets in logs" "no enrollment token, private key or password in either installation's logs"; fi
 
+echo "== E3. endpoint coverage =="
+E2E_HITS_FILE="$HITS" bash "$ROOT/scripts/lib/e2e-coverage.sh" && record PASS "route coverage" "every server.go route and :3443 endpoint was hit" || record FAIL "route coverage" "see the list above"
+
 summary
 ((FAILURES == 0))
