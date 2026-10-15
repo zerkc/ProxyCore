@@ -138,7 +138,7 @@ func TestValidateAcceptsFaithfulConversion(t *testing.T) {
 			t.Errorf("%s: %+v", name, tr)
 		}
 	}
-	if report.SchemaVersion != 7 {
+	if report.SchemaVersion != 9 {
 		t.Errorf("schema version %d", report.SchemaVersion)
 	}
 	if report.SecretsDecrypted != 5 || report.RevisionChecksums != 2 || report.SnapshotBlobs != 1 || report.LegacySnapshots != 2 {
