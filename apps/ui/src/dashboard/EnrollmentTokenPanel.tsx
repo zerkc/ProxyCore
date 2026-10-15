@@ -3,11 +3,13 @@ import { useNavigate } from "react-router-dom";
 import {
   ApiError,
   createEnrollmentToken,
+  deleteEnrollmentToken,
   EnrollmentApiError,
+  getEnrollmentTokenDefaults,
   listEnrollmentTokens,
   revokeEnrollmentToken,
 } from "../api";
-import type { EnrollmentTokenCreation, EnrollmentTokenSummary } from "../types";
+import type { EnrollmentTokenCreation, EnrollmentTokenDefaults, EnrollmentTokenSummary } from "../types";
 import type { TopologyIdentity } from "./types";
 
 const REVOKE_CONFIRMATION = "replace-and-revoke";
@@ -35,8 +37,13 @@ export function EnrollmentTokenPanel({ identity }: { identity?: TopologyIdentity
   const [revokeID, setRevokeID] = useState<string>();
   const [revokeConfirmation, setRevokeConfirmation] = useState("");
   const [revoking, setRevoking] = useState(false);
+  const [deleteID, setDeleteID] = useState<string>();
+  const [deleting, setDeleting] = useState(false);
   const [feedback, setFeedback] = useState("");
   const [error, setError] = useState("");
+  const [primaryUrl, setPrimaryUrl] = useState("");
+  const [defaults, setDefaults] = useState<EnrollmentTokenDefaults>();
+  const primaryUrlEdited = useRef(false);
 
   useEffect(() => {
     if (!canManageEnrollmentTokens(identity)) return;
@@ -48,8 +55,10 @@ export function EnrollmentTokenPanel({ identity }: { identity?: TopologyIdentity
     setCreation(undefined);
     setRevokeID(undefined);
     setRevokeConfirmation("");
+    setDeleteID(undefined);
     setFeedback("");
     setError("");
+    setDefaults(undefined);
 
     async function load() {
       try {
@@ -68,6 +77,12 @@ export function EnrollmentTokenPanel({ identity }: { identity?: TopologyIdentity
       }
     }
     void load();
+    // Defaults only prefill the field; a failed load never blocks generating.
+    void getEnrollmentTokenDefaults(controller.signal).then((loaded) => {
+      if (cancelled || !loaded || typeof loaded !== "object") return;
+      setDefaults(loaded);
+      if (!primaryUrlEdited.current && typeof loaded.primaryUrl === "string") setPrimaryUrl(loaded.primaryUrl);
+    }).catch(() => undefined);
     return () => {
       cancelled = true;
       controller.abort();
@@ -94,7 +109,7 @@ export function EnrollmentTokenPanel({ identity }: { identity?: TopologyIdentity
     setFeedback("");
     setError("");
     try {
-      const created = sanitizeTokenCreation(await createEnrollmentToken(controller.signal));
+      const created = sanitizeTokenCreation(await createEnrollmentToken({ primaryUrl: primaryUrl.trim() || undefined }, controller.signal));
       if (controller.signal.aborted) return;
       setCreation(created);
       setTokens((current) => [creationSummary(created), ...current]);
@@ -183,6 +198,41 @@ export function EnrollmentTokenPanel({ identity }: { identity?: TopologyIdentity
     }
   }
 
+  async function confirmDelete() {
+    if (!deleteID || deleting) return;
+    const id = deleteID;
+    const controller = beginActionRequest();
+    setDeleting(true);
+    setFeedback("");
+    setError("");
+    try {
+      await deleteEnrollmentToken(id, controller.signal);
+      if (controller.signal.aborted) return;
+      setDeleteID(undefined);
+      setFeedback("Token deleted");
+      try {
+        const loaded = await listEnrollmentTokens(controller.signal);
+        if (!controller.signal.aborted) setTokens(loaded.map(sanitizeTokenSummary));
+      } catch {
+        if (!controller.signal.aborted) setTokens((current) => current.filter((token) => token.id !== id));
+      }
+    } catch (caught) {
+      if (controller.signal.aborted) return;
+      if (caught instanceof ApiError && caught.status === 401) {
+        navigate("/login");
+        return;
+      }
+      setDeleteID(undefined);
+      if (caught instanceof EnrollmentApiError && caught.kind === "not-found") {
+        setTokens((current) => current.filter((token) => token.id !== id));
+      }
+      setError(tokenDeleteError(caught));
+    } finally {
+      if (actionRequest.current === controller) actionRequest.current = undefined;
+      if (!controller.signal.aborted) setDeleting(false);
+    }
+  }
+
   function beginActionRequest() {
     actionRequest.current?.abort();
     const controller = new AbortController();
@@ -205,10 +255,18 @@ export function EnrollmentTokenPanel({ identity }: { identity?: TopologyIdentity
           {creating ? "Creating…" : "Create enrollment token"}
         </button>
       </div>
+      <div className="space-y-2">
+        <label className="pc-label" htmlFor="enrollment-token-primary-url">Primary URL
+          <input id="enrollment-token-primary-url" className="pc-input font-mono" data-testid="enrollment-token-primary-url" value={primaryUrl} onInput={(event) => { primaryUrlEdited.current = true; setPrimaryUrl(event.currentTarget.value); }} onChange={(event) => { primaryUrlEdited.current = true; setPrimaryUrl(event.currentTarget.value); }} placeholder="https://primary.example:3443/" aria-describedby="enrollment-token-primary-url-help" autoComplete="off" spellCheck={false} disabled={creating} />
+          <span id="enrollment-token-primary-url-help" className="mt-1 block text-xs text-faint" data-testid="enrollment-token-primary-url-help">The node will connect to this address. If you changed the enrollment port, edit it here before generating.</span>
+        </label>
+        {defaults && defaults.trustReady === false ? <p className="pc-toast-err" role="status" data-testid="enrollment-token-trust-warning">Enrollment trust is not ready yet, so a token cannot be generated. Set it up in the enrollment trust panel first.</p> : null}
+        {defaults && defaults.trustReady !== false && defaults.hostCovered === false ? <p className="pc-toast-err" role="status" data-testid="enrollment-token-host-warning">The default address is not covered by the enrollment certificate. Add its host to the enrollment hostnames in the enrollment trust panel, or enter another address.</p> : null}
+      </div>
       {creation ? (
         <section className="space-y-4 border-2 border-signal/60 bg-signal/5 p-4" aria-labelledby="new-enrollment-token-title" data-testid="enrollment-token-acknowledgement">
           <div><p className="pc-eyebrow pc-eyebrow-signal">save now</p><h3 id="new-enrollment-token-title" className="pc-title mt-2 text-xl text-mist">New enrollment token</h3></div>
-          <textarea ref={tokenValueRef} className="pc-input min-h-24 resize-none font-mono text-sm" data-testid="enrollment-token-value" value={creation.token} readOnly aria-label="New enrollment token" />
+          <textarea ref={tokenValueRef} className="pc-input min-h-24 resize-none break-all font-mono text-sm" data-testid="enrollment-token-value" value={creation.token} readOnly aria-label="New enrollment token" />
           <p className="text-sm leading-6 text-mute">This token will not be shown again. Save it in a secure operator channel.</p>
           <div className="flex flex-wrap gap-2">
             <button type="button" className="pc-btn" data-testid="copy-enrollment-token" onClick={() => void copyToken()}>Copy token</button>
@@ -227,7 +285,7 @@ export function EnrollmentTokenPanel({ identity }: { identity?: TopologyIdentity
         <p className="border-y border-dashed border-line px-1 py-5 text-sm text-faint">No enrollment tokens have been created.</p>
       ) : (
         <div className="space-y-3" data-testid="enrollment-token-list">
-          {tokens.map((token) => <TokenRow key={token.id} token={token} revokeOpen={revokeID === token.id} confirmation={revokeID === token.id ? revokeConfirmation : ""} revoking={revoking} onRevoke={() => beginRevoke(token.id)} onCancel={cancelRevoke} onConfirmationChange={setRevokeConfirmation} onSubmit={revoke} />)}
+          {tokens.map((token) => <TokenRow key={token.id} token={token} revokeOpen={revokeID === token.id} confirmation={revokeID === token.id ? revokeConfirmation : ""} revoking={revoking} deleteOpen={deleteID === token.id} deleting={deleting} onDelete={() => { setDeleteID(token.id); setFeedback(""); setError(""); }} onCancelDelete={() => { if (!deleting) setDeleteID(undefined); }} onConfirmDelete={() => void confirmDelete()} onRevoke={() => beginRevoke(token.id)} onCancel={cancelRevoke} onConfirmationChange={setRevokeConfirmation} onSubmit={revoke} />)}
         </div>
       )}
     </section>
@@ -235,9 +293,14 @@ export function EnrollmentTokenPanel({ identity }: { identity?: TopologyIdentity
 }
 
 function TokenRow({
-  token, revokeOpen, confirmation, revoking, onRevoke, onCancel, onConfirmationChange, onSubmit,
+  token, revokeOpen, confirmation, revoking, deleteOpen, deleting, onDelete, onCancelDelete, onConfirmDelete, onRevoke, onCancel, onConfirmationChange, onSubmit,
 }: {
   token: EnrollmentTokenSummary;
+  deleteOpen: boolean;
+  deleting: boolean;
+  onDelete: () => void;
+  onCancelDelete: () => void;
+  onConfirmDelete: () => void;
   revokeOpen: boolean;
   confirmation: string;
   revoking: boolean;
@@ -251,12 +314,24 @@ function TokenRow({
     ["expires", formatTokenDate(token.expiresAt)], ["consumed", formatTokenDate(token.consumedAt)],
     ["revoked", formatTokenDate(token.revokedAt)],
   ];
+  const inactive = !token.consumedAt && (Boolean(token.revokedAt) || isExpired(token.expiresAt));
   return (
     <article className="border-y border-line/80 px-1 py-4" data-testid={`enrollment-token-row-${token.id}`}>
       <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_auto] md:items-start">
         <dl className="grid gap-3 text-sm sm:grid-cols-2 lg:grid-cols-4">{fields.map(([label, value]) => <TokenField key={label} label={label} value={value} />)}</dl>
-        {!revokeOpen ? <button type="button" className="pc-btn-ghost !text-xs" data-testid={`revoke-enrollment-token-${token.id}`} onClick={onRevoke}>Revoke</button> : null}
+        <div className="flex flex-wrap gap-2">
+          {!revokeOpen ? <button type="button" className="pc-btn-ghost !text-xs" data-testid={`revoke-enrollment-token-${token.id}`} onClick={onRevoke}>Revoke</button> : null}
+          {inactive && !deleteOpen ? <button type="button" className="pc-btn-ghost !text-xs" data-testid={`delete-enrollment-token-${token.id}`} onClick={onDelete}>Delete</button> : null}
+        </div>
       </div>
+      {token.consumedAt ? <p className="mt-3 text-xs text-faint" data-testid={`enrollment-token-managed-hint-${token.id}`}>This token was used to enroll a node. Manage that node in the Nodes view.</p> : null}
+      {deleteOpen ? (
+        <div className="mt-4 flex flex-wrap items-center gap-2 border-t border-line/80 pt-4" data-testid={`delete-enrollment-confirm-${token.id}`}>
+          <p className="text-sm text-mute">Delete this token permanently?</p>
+          <button type="button" className="pc-btn" data-testid={`confirm-delete-${token.id}`} disabled={deleting} onClick={onConfirmDelete}>{deleting ? "Deleting…" : "Confirm delete"}</button>
+          <button type="button" className="pc-btn-ghost" data-testid={`cancel-delete-${token.id}`} disabled={deleting} onClick={onCancelDelete}>Cancel</button>
+        </div>
+      ) : null}
       {revokeOpen ? (
         <form className="mt-4 flex flex-wrap items-end gap-2 border-t border-line/80 pt-4" data-testid={`revoke-enrollment-form-${token.id}`} onSubmit={onSubmit}>
           <label className="pc-label min-w-64 flex-1" htmlFor={`revoke-confirmation-${token.id}`}>Type {REVOKE_CONFIRMATION}
@@ -327,7 +402,21 @@ function tokenListError(caught: unknown) {
 
 function tokenCreateError(caught: unknown) {
   if (caught instanceof ApiError && caught.status === 403) return "Owner access is required to create an enrollment token.";
-  if (caught instanceof EnrollmentApiError && caught.status === 409) return "The enrollment token could not be created.";
+  if (caught instanceof EnrollmentApiError) {
+    switch (caught.kind) {
+      case "trust-not-ready":
+        return "Enrollment trust is not ready. Set up the enrollment trust panel (certificate and hostnames) before generating a token.";
+      case "trust-unavailable":
+        return "Enrollment trust is temporarily unavailable. Check the enrollment trust panel and try again.";
+      case "primary-url-required":
+        return "Enter the primary URL the node should connect to, for example https://primary.example:3443/.";
+      case "primary-url-invalid":
+        return "The primary URL is not valid. Use the form https://host:port.";
+      case "primary-url-not-in-cert":
+        return "This host is not covered by the enrollment certificate. Add it to the enrollment hostnames in the enrollment trust panel, then try again.";
+    }
+    if (caught.status === 409) return "The enrollment token could not be created.";
+  }
   return "The enrollment token could not be created. Try again.";
 }
 
@@ -335,4 +424,28 @@ function tokenRevokeError(caught: unknown) {
   if (caught instanceof ApiError && caught.status === 403) return "Owner access is required to revoke enrollment tokens.";
   if (caught instanceof EnrollmentApiError && caught.status === 409) return "The enrollment token could not be revoked.";
   return "The enrollment token could not be revoked. Try again.";
+}
+
+function isExpired(value: string) {
+  const at = Date.parse(value);
+  return Number.isFinite(at) && at <= Date.now();
+}
+
+function tokenDeleteError(caught: unknown) {
+  if (caught instanceof EnrollmentApiError) {
+    switch (caught.kind) {
+      case "token-active":
+        return "This token is still active. Revoke it before deleting it.";
+      case "token-in-use":
+        return "This token enrolled a node and cannot be deleted. Manage the node in the Nodes view.";
+      case "not-found":
+        return "This token no longer exists.";
+      case "forbidden":
+        return "Owner access is required to delete enrollment tokens.";
+      case "server":
+        return "Enrollment token deletion is temporarily unavailable. Try again.";
+    }
+  }
+  if (caught instanceof ApiError && caught.status === 403) return "Owner access is required to delete enrollment tokens.";
+  return "The enrollment token could not be deleted. Try again.";
 }

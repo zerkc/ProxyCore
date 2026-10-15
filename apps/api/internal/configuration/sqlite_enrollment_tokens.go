@@ -11,6 +11,18 @@ import (
 	"github.com/zerkc/ProxyCore/apps/api/internal/sqlitedb"
 )
 
+var (
+	// ErrEnrollmentTokenNotFound reports an unknown token or one owned by
+	// another user; the two are indistinguishable by design.
+	ErrEnrollmentTokenNotFound = errors.New("enrollment token not found")
+	// ErrEnrollmentTokenActive reports a token that is still redeemable and
+	// must be revoked before it can be deleted.
+	ErrEnrollmentTokenActive = errors.New("enrollment token is active")
+	// ErrEnrollmentTokenInUse reports a token that was consumed or that minted
+	// a node grant; its grant still authenticates the node.
+	ErrEnrollmentTokenInUse = errors.New("enrollment token is in use")
+)
+
 // SQLiteEnrollmentTokenStore is an unwired, writer-only token lifecycle store.
 // Even non-consuming checks take the writer, matching PG token serialization.
 type SQLiteEnrollmentTokenStore struct {
@@ -156,5 +168,64 @@ func (s *SQLiteEnrollmentTokenStore) RevokeEnrollmentToken(ctx context.Context, 
 		}
 		_, err = v.Conn().ExecContext(v.Context(), `update enrollment_tokens set revoked_at = coalesce(revoked_at,?) where id = ? and created_by_user_id = ?`, stamp, canonicalID, canonicalOwner)
 		return err
+	})
+}
+
+// DeleteEnrollmentToken removes an inactive token that has no grant. Lookup,
+// eligibility checks and the delete share one writer transaction.
+func (s *SQLiteEnrollmentTokenStore) DeleteEnrollmentToken(ctx context.Context, id, ownerID string, now time.Time) error {
+	if err := sqliteEnrollmentTokenWriter(s, ctx); err != nil {
+		return err
+	}
+	return s.writer.Write(ctx, func(v sqlitedb.WriteValue) error {
+		canonicalID, err := sqliteCertificateLookupID(id)
+		if err != nil {
+			return err
+		}
+		canonicalOwner, err := sqliteCertificateLookupID(ownerID)
+		if err != nil {
+			return err
+		}
+		stamp, err := sqliteEnrollmentTokenTime(now)
+		if err != nil {
+			return err
+		}
+		var expires string
+		var consumed, revoked *string
+		var granted int
+		err = v.Conn().QueryRowContext(v.Context(), `select t.expires_at,t.consumed_at,t.revoked_at,
+   exists(select 1 from enrollment_grants g where g.token_id = t.id)
+   from enrollment_tokens t where t.id = ? and t.created_by_user_id = ?`, canonicalID, canonicalOwner).Scan(&expires, &consumed, &revoked, &granted)
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrEnrollmentTokenNotFound
+		}
+		if err != nil {
+			return err
+		}
+		if _, err = sqlitedb.DecodeTimestamp(&expires); err != nil {
+			return err
+		}
+		switch {
+		case granted != 0:
+			return ErrEnrollmentTokenInUse
+		case revoked != nil:
+		case consumed != nil:
+			return ErrEnrollmentTokenInUse
+		case expires > stamp:
+			return ErrEnrollmentTokenActive
+		}
+		result, err := v.Conn().ExecContext(v.Context(), `delete from enrollment_tokens where id = ? and created_by_user_id = ?
+   and not exists(select 1 from enrollment_grants g where g.token_id = enrollment_tokens.id)`, canonicalID, canonicalOwner)
+		if err != nil {
+			return err
+		}
+		count, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if count != 1 {
+			return ErrEnrollmentTokenNotFound
+		}
+		return nil
 	})
 }

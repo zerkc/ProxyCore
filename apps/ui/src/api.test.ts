@@ -7,6 +7,7 @@ import {
   createEnrollmentToken,
   downloadEnrollmentTrustCA,
   draftEnrollment,
+  getEnrollmentTokenDefaults,
   encodeBackupPassphrase,
   exportBackup,
   getEnrollmentTrust,
@@ -15,6 +16,7 @@ import {
   previewEnrollment,
   recoverEnrollment,
   revokeEnrollmentToken,
+  deleteEnrollmentToken,
 } from "./api";
 
 const originalFetch = globalThis.fetch;
@@ -230,6 +232,26 @@ describe("enrollment workflow API client", () => {
         () => revokeEnrollmentToken("token-id", "replace-and-revoke"),
         status,
       );
+    }
+  });
+
+  it("deletes a token with DELETE and maps typed conflicts", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    await expect(deleteEnrollmentToken("token/id")).resolves.toBeUndefined();
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/enrollment/tokens/token%2Fid",
+      expect.objectContaining({ method: "DELETE", credentials: "include", redirect: "error" }),
+    );
+    for (const [code, kind] of [["TOKEN_ACTIVE", "token-active"], ["TOKEN_IN_USE", "token-in-use"]] as const) {
+      globalThis.fetch = vi.fn().mockResolvedValue(
+        new Response(JSON.stringify({ error: "x", code }), { status: 409 }),
+      ) as unknown as typeof fetch;
+      await expect(deleteEnrollmentToken("token-id")).rejects.toMatchObject({ status: 409, kind });
+    }
+    for (const [status, kind] of [[404, "not-found"], [403, "forbidden"], [503, "server"]] as const) {
+      globalThis.fetch = vi.fn().mockResolvedValue(errorResponse(status)) as unknown as typeof fetch;
+      await expect(deleteEnrollmentToken("token-id")).rejects.toMatchObject({ status, kind });
     }
   });
 
@@ -503,5 +525,60 @@ describe("backup API client", () => {
     expect(await failWith(409, "constructor")).toMatchObject({ kind: "conflict" });
     expect(await failWith(409, "primary snapshot denied")).toMatchObject({ kind: "conflict" });
     expect(await failWith(400, "primary certificate not trusted; load the primary CA")).toMatchObject({ kind: "bad-request" });
+  });
+});
+
+describe("self-contained enrollment token client", () => {
+  const v2 = "pcenr2_payload-must-not-appear";
+
+  it("sends only the keys that are set when drafting", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ draftId: "d" })));
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    await draftEnrollment(v2);
+    expect(fetchMock.mock.calls[0]![1]).toMatchObject({ body: JSON.stringify({ token: v2 }) });
+    await draftEnrollment(v2, "", undefined, "");
+    expect(fetchMock.mock.calls[1]![1]).toMatchObject({ body: JSON.stringify({ token: v2 }) });
+    await draftEnrollment("pcenr1_a_b", "https://primary.example:3443/");
+    expect(fetchMock.mock.calls[2]![1]).toMatchObject({
+      body: JSON.stringify({ token: "pcenr1_a_b", primaryURL: "https://primary.example:3443/" }),
+    });
+  });
+
+  it("creates tokens with or without a primary URL and keeps the signal-only form working", async () => {
+    const created = { id: "i", selector: "s", token: v2, expiresAt: "2030-01-01T00:00:00Z" };
+    const fetchMock = vi.fn().mockImplementation(async () => new Response(JSON.stringify(created), { status: 201 }));
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    await createEnrollmentToken();
+    await createEnrollmentToken(new AbortController().signal);
+    await createEnrollmentToken({ primaryUrl: " https://203.0.113.10:3443/ " });
+    await createEnrollmentToken({ primaryUrl: "" });
+    const bodies = fetchMock.mock.calls.map((call) => call[1].body);
+    expect(bodies).toEqual(["{}", "{}", JSON.stringify({ primaryUrl: "https://203.0.113.10:3443/" }), "{}"]);
+  });
+
+  it("loads the token defaults", async () => {
+    const defaults = { primaryUrl: "https://203.0.113.10:3443/", gatewayIPv4: "203.0.113.10", port: 3443, trustReady: true, hostCovered: true };
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify(defaults)));
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    await expect(getEnrollmentTokenDefaults()).resolves.toEqual(defaults);
+    expect(fetchMock.mock.calls[0]![0]).toBe("/api/enrollment/tokens/defaults");
+    expect(fetchMock.mock.calls[0]![1]).toMatchObject({ method: "GET" });
+  });
+
+  it("maps the creation error codes to kinds only for their exact status", async () => {
+    const failWith = (status: number, code: string) => {
+      globalThis.fetch = vi.fn().mockResolvedValue(
+        new Response(JSON.stringify({ error: "detail", code }), { status }),
+      ) as unknown as typeof fetch;
+      return createEnrollmentToken().catch((caught) => caught);
+    };
+    expect(await failWith(409, "ENROLLMENT_TRUST_NOT_READY")).toMatchObject({ kind: "trust-not-ready", status: 409 });
+    expect(await failWith(503, "ENROLLMENT_TRUST_UNAVAILABLE")).toMatchObject({ kind: "trust-unavailable" });
+    expect(await failWith(422, "PRIMARY_URL_REQUIRED")).toMatchObject({ kind: "primary-url-required" });
+    expect(await failWith(422, "PRIMARY_URL_INVALID")).toMatchObject({ kind: "primary-url-invalid" });
+    expect(await failWith(422, "PRIMARY_URL_NOT_IN_CERT")).toMatchObject({ kind: "primary-url-not-in-cert" });
+    expect(await failWith(409, "PRIMARY_URL_INVALID")).toMatchObject({ kind: "conflict" });
+    expect(await failWith(422, "constructor")).not.toMatchObject({ kind: "primary-url-invalid" });
+    expect((await failWith(422, "PRIMARY_URL_INVALID")).message).not.toContain("detail");
   });
 });

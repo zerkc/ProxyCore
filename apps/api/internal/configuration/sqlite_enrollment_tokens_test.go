@@ -624,3 +624,80 @@ func TestSQLiteEnrollmentTokenOneWrite(t *testing.T) {
 		t.Fatalf("denied operations must serialize too: %d", got)
 	}
 }
+
+func tokenGrant(t *testing.T, db *sql.DB) {
+	t.Helper()
+	settingsExec(t, db, `insert into enrollment_grants(attempt_id,token_id,installation_id,node_id,primary_id,primary_generation,node_ephemeral_public_key,sealed_bootstrap_payload,payload_hash,created_at,expires_at) values (?,?,?,?,?,1,'synthetic','synthetic','synthetic','0','2')`,
+		tokenOther, tokenID, tokenOther, tokenOther, tokenOwner)
+}
+
+func tokenCount(t *testing.T, db *sql.DB) int {
+	t.Helper()
+	var n int
+	if err := db.QueryRow(`select count(*) from enrollment_tokens`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+func TestSQLiteEnrollmentTokenDelete(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name  string
+		setup func(*testing.T, *sql.DB, *SQLiteEnrollmentTokenStore)
+		owner string
+		now   time.Time
+		want  error
+		left  int
+	}{
+		{"revoked", func(t *testing.T, _ *sql.DB, s *SQLiteEnrollmentTokenStore) {
+			if err := s.RevokeEnrollmentToken(ctx, tokenID, tokenOwner, tokenCreated); err != nil {
+				t.Fatal(err)
+			}
+		}, tokenOwner, tokenCreated, nil, 0},
+		{"expired", func(*testing.T, *sql.DB, *SQLiteEnrollmentTokenStore) {}, tokenOwner, tokenExpires.Add(time.Second), nil, 0},
+		{"active", func(*testing.T, *sql.DB, *SQLiteEnrollmentTokenStore) {}, tokenOwner, tokenCreated, ErrEnrollmentTokenActive, 1},
+		{"consumed", func(t *testing.T, _ *sql.DB, s *SQLiteEnrollmentTokenStore) {
+			if err := s.CheckEnrollmentToken(ctx, "selector", "synthetic-hash", tokenCreated, true); err != nil {
+				t.Fatal(err)
+			}
+		}, tokenOwner, tokenExpires.Add(time.Second), ErrEnrollmentTokenInUse, 1},
+		{"with grant", func(t *testing.T, db *sql.DB, s *SQLiteEnrollmentTokenStore) {
+			if err := s.RevokeEnrollmentToken(ctx, tokenID, tokenOwner, tokenCreated); err != nil {
+				t.Fatal(err)
+			}
+			tokenGrant(t, db)
+		}, tokenOwner, tokenCreated, ErrEnrollmentTokenInUse, 1},
+		{"wrong owner", func(t *testing.T, _ *sql.DB, s *SQLiteEnrollmentTokenStore) {
+			if err := s.RevokeEnrollmentToken(ctx, tokenID, tokenOwner, tokenCreated); err != nil {
+				t.Fatal(err)
+			}
+		}, tokenOther, tokenCreated, ErrEnrollmentTokenNotFound, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, s, _ := tokenFixture(t)
+			createToken(t, s)
+			tc.setup(t, db, s)
+			err := s.DeleteEnrollmentToken(ctx, tokenID, tc.owner, tc.now)
+			if !errors.Is(err, tc.want) || (tc.want == nil && err != nil) {
+				t.Fatalf("err=%v want=%v", err, tc.want)
+			}
+			if n := tokenCount(t, db); n != tc.left {
+				t.Fatalf("tokens left=%d want=%d", n, tc.left)
+			}
+		})
+	}
+	t.Run("second delete and unknown id", func(t *testing.T) {
+		db, s, _ := tokenFixture(t)
+		createToken(t, s)
+		if err := s.DeleteEnrollmentToken(ctx, tokenID, tokenOwner, tokenExpires.Add(time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.DeleteEnrollmentToken(ctx, tokenID, tokenOwner, tokenExpires.Add(time.Second)); !errors.Is(err, ErrEnrollmentTokenNotFound) {
+			t.Fatalf("second delete: %v", err)
+		}
+		if tokenCount(t, db) != 0 {
+			t.Fatal("token should be gone")
+		}
+	})
+}

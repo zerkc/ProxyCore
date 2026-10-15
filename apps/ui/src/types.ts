@@ -5,6 +5,14 @@ export type EnrollmentTokenCreation = {
   expiresAt: string;
 };
 
+export type EnrollmentTokenDefaults = {
+  primaryUrl: string;
+  gatewayIPv4: string;
+  port: number;
+  trustReady: boolean;
+  hostCovered: boolean;
+};
+
 export type EnrollmentTokenSummary = {
   id: string;
   selector: string;

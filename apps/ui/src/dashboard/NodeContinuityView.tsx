@@ -44,15 +44,16 @@ export function NodeContinuityView() {
 
   async function submitDraft(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!token.trim() || !primaryURL.trim()) {
-      setState({ kind: "entry", recoveryPrompt: state.kind === "entry" && state.recoveryPrompt, error: "Enter the enrollment token and PRIMARY URL." });
+    const selfContained = isSelfContainedToken(token);
+    if (!token.trim() || (!selfContained && !primaryURL.trim())) {
+      setState({ kind: "entry", recoveryPrompt: state.kind === "entry" && state.recoveryPrompt, error: !token.trim() ? "Enter the enrollment token." : "Enter the PRIMARY URL for this legacy token." });
       return;
     }
     const submittedToken = token;
     const controller = replaceActiveRequest();
     setState({ kind: "recovering" });
     try {
-      const draft = await draftEnrollment(submittedToken, primaryURL.trim(), controller.signal, caPem.trim() || undefined);
+      const draft = await draftEnrollment(submittedToken, primaryURL.trim() || undefined, controller.signal, caPem.trim() || undefined);
       if (!mounted.current || controller.signal.aborted) return;
       setToken("");
       setState({ kind: "preview", draft: sanitizeDraft(draft) });
@@ -102,6 +103,8 @@ function NodeHeader() {
   return <header className="border-b border-line/80 pb-5"><p className="pc-eyebrow pc-eyebrow-signal">node continuity</p><h2 id="node-continuity-title" className="pc-title mt-2 text-2xl text-mist">Connect this NODE</h2><p className="mt-3 max-w-2xl text-sm leading-6 text-mute">Review the authenticated PRIMARY snapshot before this installation becomes a NODE.</p></header>;
 }
 
+function isSelfContainedToken(token: string) { return token.trim().startsWith("pcenr2_"); }
+
 const MAX_CA_FILE_BYTES = 64 * 1024;
 
 function EntrySurface({ error, recoveryPrompt, token, primaryURL, caPem, onTokenChange, onPrimaryURLChange, onCaChange, onSubmit }: {
@@ -114,23 +117,28 @@ function EntrySurface({ error, recoveryPrompt, token, primaryURL, caPem, onToken
     if (!file || file.size > MAX_CA_FILE_BYTES) return;
     onCaChange(await file.text());
   }
+  const selfContained = isSelfContainedToken(token);
   return <section className="mt-8 space-y-5" aria-labelledby="node-continuity-title">
     <NodeHeader />
-    <p className="border-l-2 border-signal/70 pl-3 text-sm leading-6 text-mute">{recoveryPrompt ? "Please re-enter your enrollment token. Tokens are not stored on a NODE." : "Paste your enrollment token and PRIMARY URL to start a new preview."}</p>
+    <p className="border-l-2 border-signal/70 pl-3 text-sm leading-6 text-mute">{recoveryPrompt ? "Please re-enter your enrollment token. Tokens are not stored on a NODE." : "Paste your enrollment token to start a new preview. A current token already carries the PRIMARY address and certificate, so nothing else is needed."}</p>
     {error ? <p className="pc-toast-err" role="alert">{error}</p> : null}
     <form className="space-y-5" data-testid="node-enrollment-form" onSubmit={onSubmit}>
       <label className="pc-label" htmlFor="node-enrollment-token">Enrollment token
-        <textarea id="node-enrollment-token" className="pc-input min-h-24 resize-y font-mono" data-testid="node-enrollment-token" value={token} onInput={(event) => onTokenChange(event.currentTarget.value)} onChange={(event) => onTokenChange(event.currentTarget.value)} autoComplete="off" spellCheck={false} />
+        <textarea id="node-enrollment-token" className="pc-input min-h-24 resize-y break-all font-mono" data-testid="node-enrollment-token" value={token} onInput={(event) => onTokenChange(event.currentTarget.value)} onChange={(event) => onTokenChange(event.currentTarget.value)} autoComplete="off" spellCheck={false} />
       </label>
-      <label className="pc-label" htmlFor="node-primary-url">PRIMARY URL
-        <input id="node-primary-url" className="pc-input font-mono" data-testid="node-primary-url" value={primaryURL} onInput={(event) => onPrimaryURLChange(event.currentTarget.value)} onChange={(event) => onPrimaryURLChange(event.currentTarget.value)} placeholder="https://primary.example:3443/" aria-describedby="node-primary-url-help" autoComplete="off" spellCheck={false} />
-        <span id="node-primary-url-help" className="mt-1 block text-xs text-faint" data-testid="node-primary-url-help">Use the form https://&lt;host&gt;:&lt;port&gt;/ with an explicit port and a trailing slash.</span>
-      </label>
-      <label className="pc-label" htmlFor="node-primary-ca">PRIMARY CA certificate (optional)
-        <textarea id="node-primary-ca" className="pc-input min-h-24 resize-y font-mono" data-testid="node-primary-ca" value={caPem} onInput={(event) => onCaChange(event.currentTarget.value)} onChange={(event) => onCaChange(event.currentTarget.value)} placeholder="-----BEGIN CERTIFICATE-----" aria-describedby="node-primary-ca-help" autoComplete="off" spellCheck={false} />
-        <span id="node-primary-ca-help" className="mt-1 block text-xs text-faint" data-testid="node-primary-ca-help">Needed when the PRIMARY uses a self-signed or private CA. Download it from the PRIMARY's enrollment trust panel, then paste it or load the file. It is trusted for this PRIMARY only, and loading a new one replaces the previous CA for the same address.</span>
-      </label>
-      <input type="file" accept=".pem,.crt,.cer" className="pc-input" data-testid="node-primary-ca-file" aria-label="Load PRIMARY CA certificate file" onChange={(event) => void loadCaFile(event)} />
+      {selfContained || !token.trim() ? null : <p className="text-xs text-faint" data-testid="node-legacy-token-notice">This looks like a legacy token. Enter the PRIMARY URL below; add the CA certificate if the PRIMARY uses a private CA.</p>}
+      <details className="space-y-5 border-y border-line/80 py-3" data-testid="node-advanced-token" open={!selfContained}>
+        <summary className="cursor-pointer text-sm text-mute">Advanced / legacy token</summary>
+        <label className="pc-label mt-4 block" htmlFor="node-primary-url">PRIMARY URL{selfContained ? " (optional)" : ""}
+          <input id="node-primary-url" className="pc-input font-mono" data-testid="node-primary-url" value={primaryURL} onInput={(event) => onPrimaryURLChange(event.currentTarget.value)} onChange={(event) => onPrimaryURLChange(event.currentTarget.value)} placeholder="https://primary.example:3443/" aria-describedby="node-primary-url-help" autoComplete="off" spellCheck={false} />
+          <span id="node-primary-url-help" className="mt-1 block text-xs text-faint" data-testid="node-primary-url-help">{selfContained ? "Not needed for this token. If set, it must match the address inside the token." : "Use the form https://<host>:<port>/ with an explicit port and a trailing slash."}</span>
+        </label>
+        <label className="pc-label mt-4 block" htmlFor="node-primary-ca">PRIMARY CA certificate (optional)
+          <textarea id="node-primary-ca" className="pc-input min-h-24 resize-y font-mono" data-testid="node-primary-ca" value={caPem} onInput={(event) => onCaChange(event.currentTarget.value)} onChange={(event) => onCaChange(event.currentTarget.value)} placeholder="-----BEGIN CERTIFICATE-----" aria-describedby="node-primary-ca-help" autoComplete="off" spellCheck={false} />
+          <span id="node-primary-ca-help" className="mt-1 block text-xs text-faint" data-testid="node-primary-ca-help">Needed for legacy tokens when the PRIMARY uses a self-signed or private CA. Download it from the PRIMARY's enrollment trust panel, then paste it or load the file. It is trusted for this PRIMARY only, and loading a new one replaces the previous CA for the same address.</span>
+        </label>
+        <input type="file" accept=".pem,.crt,.cer" className="pc-input mt-4" data-testid="node-primary-ca-file" aria-label="Load PRIMARY CA certificate file" onChange={(event) => void loadCaFile(event)} />
+      </details>
       <button type="submit" className="pc-btn" data-testid="node-draft-submit">Preview enrollment</button>
     </form>
   </section>;

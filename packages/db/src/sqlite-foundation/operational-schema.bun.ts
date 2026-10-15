@@ -30,7 +30,7 @@ const reject = (sql: string) => assert.throws(() => db.exec(sql), /constraint|ca
 try {
   migrateSQLite(db);
   const ledger = query("SELECT * FROM proxycore_schema_migrations ORDER BY version");
-  assert.equal(ledger.length, 7);
+  assert.equal(ledger.length, 9);
   assert.equal(ledger[5]!.name, "enrollment_product");
   assert.equal(ledger[3]!.name, "operational_product");
   assert.deepEqual(query("SELECT name FROM sqlite_schema WHERE type='table' ORDER BY name").map((r) => r.name), ["applied_snapshots", "apply_jobs", "audit_events", "certificates", "cluster_keys", "config_revisions", "dns_records", "enrolled_nodes", "enrollment_attempts", "enrollment_grants", "enrollment_tokens", "forwarding_rules", "health_observations", "installation_identity", "installation_settings", "internal_ca", "internal_ca_enrollment_state", "node_credentials", "node_snapshot_acks", "node_state", "operational_artifacts", "primary_trust_anchors", "provider_connections", "proxycore_schema_migrations", "resolver_pools", "secrets", "sessions", "standalone_archives", "stream_routes", "sync_attempts", "users", "zones"]);

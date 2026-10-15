@@ -38,7 +38,7 @@ func enrollmentColumns() map[string][]certificateColumn {
 		"enrollment_attempts": {pk("id", 1), literal("state", "'draft'"), text("primary_url"), optional("expected_primary_id"), optional("verified_primary_id"), optional("verified_primary_node_id"), integer("verified_leadership_generation", true), optional("verified_primary_tls_spki_sha256"), optional("verified_primary_ca_fingerprint"), optional("preview_digest"), text("local_node_ip"), optional("archive_id"), text("ephemeral_private_key_wrapped"), optional("bootstrap_payload"), optional("node_credential_secret_id"), optional("cluster_key_id"), optional("initial_snapshot_hash"), optional("initial_snapshot_revision_id"), optional("initial_apply_job_id"), optional("failure_code"), optional("confirmed_at"), text("created_at"), text("updated_at")},
 		"enrollment_tokens":   {pk("id", 1), text("token_selector"), text("token_hash"), text("hash_version"), text("created_by_user_id"), text("created_at"), text("expires_at"), optional("consumed_at"), optional("consumed_by_attempt_id"), optional("revoked_at")},
 		"node_credentials":    {pk("id", 1), text("node_id"), text("credential_hash"), text("hash_version"), text("created_at"), optional("last_authenticated_at"), optional("revoked_at")},
-		"enrolled_nodes":      {pk("node_id", 1), text("installation_id"), text("primary_id"), optional("display_name"), text("credential_id"), text("enrolled_at"), optional("revoked_at"), text("created_by_attempt_id")},
+		"enrolled_nodes":      {pk("node_id", 1), text("installation_id"), text("primary_id"), optional("display_name"), text("credential_id"), text("enrolled_at"), optional("revoked_at"), text("created_by_attempt_id"), optional("unlinked_at"), optional("last_seen_at"), optional("ingress_ipv4"), optional("ingress_ipv6")},
 		"enrollment_grants":   {pk("attempt_id", 1), text("token_id"), text("installation_id"), text("node_id"), text("primary_id"), integer("primary_generation", false), text("node_ephemeral_public_key"), text("sealed_bootstrap_payload"), text("payload_hash"), text("created_at"), text("expires_at"), optional("verified_preview_digest")},
 		"node_snapshot_acks":  {pk("node_id", 1), pk("content_hash", 2), integer("snapshot_version", false), integer("replication_version", false), text("revision_id"), integer("leadership_generation", false), text("applied_at"), text("received_at")},
 		"sync_attempts":       {pk("id", 1), text("node_id"), text("trigger"), literal("status", "'queued'"), optional("source_primary_id"), integer("leadership_generation", true), integer("snapshot_version", true), integer("replication_version", true), optional("content_hash"), optional("revision_id"), optional("apply_job_id"), optional("result_code"), optional("started_at"), optional("finished_at"), text("created_at"), text("updated_at")},
@@ -65,7 +65,7 @@ func TestEnrollmentMetadata(t *testing.T) {
 			t.Fatalf("%s columns=%#v want %#v", table, actual, expected)
 		}
 	}
-	if total != 84 {
+	if total != 88 {
 		t.Fatal("canonical column count", total)
 	}
 	enrollmentMetadata(t, db)
@@ -109,6 +109,11 @@ func enrollmentMetadata(t *testing.T, db *sql.DB) {
 			t.Fatal("not STRICT", table)
 		}
 		for _, col := range cols {
+			// unlinked_at arrives with migration 008; fixtures that stop at the
+			// enrollment migration (v6) legitimately lack it.
+			if (col.name == "unlinked_at" || col.name == "last_seen_at") && !strings.Contains(ddl, col.name) {
+				continue
+			}
 			if strings.HasSuffix(col.name, "_at") && !strings.Contains(ddl, col.name+" TEXT COLLATE BINARY") {
 				t.Fatal("clock collation", table, col.name)
 			}
@@ -263,7 +268,12 @@ func enrollmentInsert(t *testing.T, db *sql.DB, engine string) {
 		for _, table := range enrollmentTables {
 			var cols, placeholders []string
 			values := enrollmentValues(table, engine)
-			for i, c := range enrollmentColumns()[table] {
+			present := len(values)
+			if err := v.Conn().QueryRowContext(v.Context(), "SELECT count(*) FROM pragma_table_info(?)", table).Scan(&present); err != nil {
+				return err
+			}
+			values = values[:present]
+			for i, c := range enrollmentColumns()[table][:present] {
 				cols = append(cols, `"`+c.name+`"`)
 				placeholders = append(placeholders, "?")
 				if strings.HasSuffix(c.name, "_at") && c.name != "expires_at" {
@@ -280,6 +290,17 @@ func enrollmentInsert(t *testing.T, db *sql.DB, engine string) {
 		t.Fatal("writer clock calls", calls)
 	}
 }
+
+// enrollmentPresentColumns counts the table's columns in db. Fixtures that stop
+// at the enrollment migration (v6) lack the trailing unlinked_at column that
+// migration 008 appends to enrolled_nodes.
+func enrollmentPresentColumns(t *testing.T, db *sql.DB, table string) int {
+	t.Helper()
+	var n int
+	writeOK(t, db.QueryRow("SELECT count(*) FROM pragma_table_info(?)", table).Scan(&n))
+	return n
+}
+
 func enrollmentRead(t *testing.T, db *sql.DB, engine string) {
 	t.Helper()
 	for _, table := range enrollmentTables {
@@ -288,7 +309,7 @@ func enrollmentRead(t *testing.T, db *sql.DB, engine string) {
 		if !rows.Next() {
 			t.Fatal("missing cross-engine row", engine, table)
 		}
-		expected := enrollmentValues(table, engine)
+		expected := enrollmentValues(table, engine)[:enrollmentPresentColumns(t, db, table)]
 		actual := make([]any, len(expected))
 		pointers := make([]any, len(expected))
 		for i := range actual {

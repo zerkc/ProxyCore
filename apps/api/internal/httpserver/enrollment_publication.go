@@ -21,6 +21,8 @@ type EnrollmentSnapshotPublicationHandlerOptions struct {
 	Identity    syncpublication.SnapshotIdentityReader
 	Certificate IdentityProofCertificateProvider
 	MaxBytes    int
+	// Heartbeat, when set, records each successfully authenticated pull.
+	Heartbeat NodeHeartbeatSink
 }
 
 // EnrollmentSnapshotPublicationHandler serves the immutable latest applied
@@ -30,6 +32,7 @@ type EnrollmentSnapshotPublicationHandler struct {
 	identity    syncpublication.SnapshotIdentityReader
 	certificate IdentityProofCertificateProvider
 	maxBytes    int
+	heartbeat   NodeHeartbeatSink
 }
 
 func NewEnrollmentSnapshotPublicationHandler(opts EnrollmentSnapshotPublicationHandlerOptions) *EnrollmentSnapshotPublicationHandler {
@@ -39,6 +42,7 @@ func NewEnrollmentSnapshotPublicationHandler(opts EnrollmentSnapshotPublicationH
 	}
 	return &EnrollmentSnapshotPublicationHandler{
 		store: opts.Store, identity: opts.Identity, certificate: opts.Certificate, maxBytes: maxBytes,
+		heartbeat: opts.Heartbeat,
 	}
 }
 
@@ -129,8 +133,13 @@ func (h *EnrollmentSnapshotPublicationHandler) ServeHTTP(w http.ResponseWriter, 
 		MaxBytes: h.maxBytes,
 	})
 	result, err := publisher.Publish(r.Context(), syncpublication.SnapshotRequest{Credential: canonicalBearer, After: after})
+	if state.authenticated {
+		recordNodeHeartbeat(r.Context(), h.heartbeat, state.principalNodeID, r)
+	}
 	if err != nil {
 		switch {
+		case state.revoked && state.unlinked:
+			writeSnapshotPublicationUnlinked(w)
 		case state.revoked:
 			writeSnapshotPublicationError(w, http.StatusGone)
 		case state.authenticated && !state.resultReturned:
@@ -218,9 +227,14 @@ func parseSnapshotAuthorization(value string) (string, bool) {
 }
 
 type snapshotPublicationAuthState struct {
-	revoked        bool
+	revoked bool
+	// unlinked is true only when the primary explicitly unlinked the node AND
+	// the caller proved it holds the credential secret.
+	unlinked       bool
 	authenticated  bool
 	resultReturned bool
+	// principalNodeID is the node proven by a successful authentication.
+	principalNodeID string
 }
 
 type observingSnapshotPublicationStore struct {
@@ -235,9 +249,11 @@ func (s *observingSnapshotPublicationStore) ReadSnapshotPublication(ctx context.
 	original := request.Authenticate
 	request.Authenticate = func(presented string, record configuration.SnapshotPublicationCredentialRecord) (configuration.SnapshotPublicationPrincipal, error) {
 		s.state.revoked = record.CredentialRevokedAt != nil || record.NodeRevokedAt != nil
+		s.state.unlinked = nodeUnlinkedForSecretHolder(presented, record)
 		principal, err := original(presented, record)
 		if err == nil {
 			s.state.authenticated = true
+			s.state.principalNodeID = principal.NodeID
 		}
 		return principal, err
 	}
@@ -249,6 +265,32 @@ func (s *observingSnapshotPublicationStore) ReadSnapshotPublication(ctx context.
 func setSnapshotPublicationHeaders(w http.ResponseWriter) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
+}
+
+// NodeUnlinkedCode is the machine-readable code of the 410 answer a node gets
+// after its primary explicitly unlinked it. Other 410s never carry it.
+const NodeUnlinkedCode = "NODE_UNLINKED"
+
+// nodeUnlinkedForSecretHolder reports whether record is an explicitly unlinked
+// node AND presented is the node's real credential secret. The check ignores
+// revocation on purpose (an unlinked credential is always revoked) but still
+// verifies identity and hash, so an unknown or guessed credential never
+// learns the unlink state.
+func nodeUnlinkedForSecretHolder(presented string, record configuration.SnapshotPublicationCredentialRecord) bool {
+	if record.NodeUnlinkedAt == nil {
+		return false
+	}
+	_, err := syncpublication.AuthenticateNodeCredential(presented, &syncpublication.NodeCredentialRecord{
+		ID: record.ID, NodeID: record.NodeID, Hash: record.CredentialHash, HashVersion: record.HashVersion,
+	})
+	return err == nil
+}
+
+func writeSnapshotPublicationUnlinked(w http.ResponseWriter) {
+	setSnapshotPublicationHeaders(w)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusGone)
+	_, _ = w.Write([]byte(`{"error":"node unlinked","code":"` + NodeUnlinkedCode + `"}`))
 }
 
 func writeSnapshotPublicationError(w http.ResponseWriter, status int) {

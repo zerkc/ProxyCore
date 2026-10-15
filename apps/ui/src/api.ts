@@ -2,11 +2,13 @@ import type {
   EnrollmentHostnameConfig,
   EnrollmentTrust,
   EnrollmentTrustDownload,
+  TopologyNodeList,
 } from "./dashboard/types";
 import type {
   ConfirmResult,
   DraftPreview,
   EnrollmentTokenCreation,
+  EnrollmentTokenDefaults,
   EnrollmentTokenSummary,
   RecoverableState,
   TopologyConversionResult,
@@ -16,6 +18,7 @@ export type {
   ConfirmResult,
   DraftPreview,
   EnrollmentTokenCreation,
+  EnrollmentTokenDefaults,
   EnrollmentTokenSummary,
   RecoverableState,
   TopologyConversionResult,
@@ -45,7 +48,14 @@ export type EnrollmentApiErrorKind =
   | "invalid-response"
   | "payload-too-large"
   | "untrusted-certificate"
-  | "invalid-ca";
+  | "invalid-ca"
+  | "trust-not-ready"
+  | "trust-unavailable"
+  | "primary-url-required"
+  | "primary-url-invalid"
+  | "primary-url-not-in-cert"
+  | "token-active"
+  | "token-in-use";
 
 export class EnrollmentApiError extends ApiError {
   constructor(
@@ -140,23 +150,41 @@ const ENROLLMENT_RESPONSE_LIMIT_BYTES = 64 * 1024;
 
 type EnrollmentOperation =
   | "create-token"
+  | "token-defaults"
   | "list-tokens"
   | "revoke-token"
+  | "delete-token"
   | "draft"
   | "preview"
   | "confirm"
   | "recover";
 
 export async function createEnrollmentToken(
+  options?: { primaryUrl?: string } | AbortSignal,
   signal?: AbortSignal,
 ): Promise<EnrollmentTokenCreation> {
+  // Backwards compatible: the first argument used to be the abort signal.
+  const resolvedOptions = options instanceof AbortSignal ? undefined : options;
+  const resolvedSignal = options instanceof AbortSignal ? options : signal;
+  const primaryUrl = resolvedOptions?.primaryUrl?.trim();
   const body = await enrollmentRequest<unknown>(
     "create-token",
     "/api/enrollment/tokens",
-    { method: "POST", body: "{}" },
-    signal,
+    { method: "POST", body: JSON.stringify(primaryUrl ? { primaryUrl } : {}) },
+    resolvedSignal,
   );
   return normalizeTokenCreation(body);
+}
+
+export function getEnrollmentTokenDefaults(
+  signal?: AbortSignal,
+): Promise<EnrollmentTokenDefaults> {
+  return enrollmentRequest<EnrollmentTokenDefaults>(
+    "token-defaults",
+    "/api/enrollment/tokens/defaults",
+    { method: "GET" },
+    signal,
+  );
 }
 
 export function listEnrollmentTokens(
@@ -184,9 +212,22 @@ export function revokeEnrollmentToken(
   );
 }
 
+/** Deletes a revoked or expired token that never minted a node. */
+export function deleteEnrollmentToken(
+  id: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  return enrollmentRequest<void>(
+    "delete-token",
+    `/api/enrollment/tokens/${encodeURIComponent(id)}`,
+    { method: "DELETE" },
+    signal,
+  );
+}
+
 export function draftEnrollment(
   token: string,
-  primaryURL: string,
+  primaryURL?: string,
   signal?: AbortSignal,
   caPem?: string,
 ): Promise<DraftPreview> {
@@ -195,7 +236,11 @@ export function draftEnrollment(
     "/api/topology/enrollment/draft",
     {
       method: "POST",
-      body: JSON.stringify({ token, primaryURL, ...(caPem ? { caPem } : {}) }),
+      body: JSON.stringify({
+        token,
+        ...(primaryURL ? { primaryURL } : {}),
+        ...(caPem ? { caPem } : {}),
+      }),
     },
     signal,
   );
@@ -294,6 +339,8 @@ async function enrollmentRequest<T>(
     }
     const known = draftTrustErrorKind(operation, response.status, text);
     if (known) throw new EnrollmentApiError(response.status, known, draftTrustErrorMessages[known]);
+    const tokenKnown = tokenCreateErrorKind(operation, response.status, text);
+    if (tokenKnown) throw new EnrollmentApiError(response.status, tokenKnown.kind, tokenKnown.message);
     throw enrollmentStatusError(operation, response.status);
   }
   if (response.status === 204) return undefined as T;
@@ -381,6 +428,34 @@ const draftTrustErrorMessages = {
   "invalid-ca": "The CA certificate is not valid.",
 } as const;
 
+// Token creation reports its failures with a stable machine code; only these
+// code/status pairs are read, everything else stays discarded.
+const tokenCreateErrors: Record<string, { status: number; kind: EnrollmentApiErrorKind; message: string }> = {
+  ENROLLMENT_TRUST_NOT_READY: { status: 409, kind: "trust-not-ready", message: "Enrollment trust is not ready." },
+  ENROLLMENT_TRUST_UNAVAILABLE: { status: 503, kind: "trust-unavailable", message: "Enrollment trust is unavailable." },
+  PRIMARY_URL_REQUIRED: { status: 422, kind: "primary-url-required", message: "A primary URL is required." },
+  PRIMARY_URL_INVALID: { status: 422, kind: "primary-url-invalid", message: "The primary URL is not valid." },
+  PRIMARY_URL_NOT_IN_CERT: { status: 422, kind: "primary-url-not-in-cert", message: "The primary URL host is not covered by the enrollment certificate." },
+};
+
+const tokenDeleteErrors: Record<string, { status: number; kind: EnrollmentApiErrorKind; message: string }> = {
+  TOKEN_ACTIVE: { status: 409, kind: "token-active", message: "The enrollment token is still active; revoke it first." },
+  TOKEN_IN_USE: { status: 409, kind: "token-in-use", message: "The enrollment token minted a node and cannot be deleted." },
+};
+
+function tokenCreateErrorKind(operation: EnrollmentOperation, status: number, text: string) {
+  if (operation !== "create-token" && operation !== "delete-token") return undefined;
+  const table = operation === "create-token" ? tokenCreateErrors : tokenDeleteErrors;
+  try {
+    const parsed = JSON.parse(text) as { code?: unknown };
+    if (typeof parsed.code !== "string" || !Object.hasOwn(table, parsed.code)) return undefined;
+    const known = table[parsed.code]!;
+    return known.status === status ? known : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function draftTrustErrorKind(operation: EnrollmentOperation, status: number, text: string) {
   if (operation !== "draft") return undefined;
   try {
@@ -417,6 +492,11 @@ function enrollmentStatusError(operation: EnrollmentOperation, status: number) {
       conflict: "The enrollment token could not be created.",
       server: "Enrollment token creation is temporarily unavailable.",
     },
+    "token-defaults": {
+      unauthorized: "Sign in again to load enrollment defaults.",
+      forbidden: "Owner access is required to load enrollment defaults.",
+      server: "Enrollment defaults are temporarily unavailable.",
+    },
     "list-tokens": {
       unauthorized: "Sign in again to view enrollment tokens.",
       forbidden: "Owner access is required to view enrollment tokens.",
@@ -427,6 +507,13 @@ function enrollmentStatusError(operation: EnrollmentOperation, status: number) {
       forbidden: "Owner access is required to revoke enrollment tokens.",
       conflict: "The enrollment token could not be revoked.",
       server: "Enrollment token revocation is temporarily unavailable.",
+    },
+    "delete-token": {
+      unauthorized: "Sign in again to delete an enrollment token.",
+      forbidden: "Owner access is required to delete enrollment tokens.",
+      "not-found": "The enrollment token no longer exists.",
+      conflict: "The enrollment token could not be deleted.",
+      server: "Enrollment token deletion is temporarily unavailable.",
     },
     draft: {
       "bad-request": "The enrollment draft request is invalid.",
@@ -501,6 +588,8 @@ export type TopologyApiErrorKind =
   | "bad-request"
   | "generation-mismatch"
   | "invalid-transition"
+  | "not-found"
+  | "not-primary"
   | "unavailable"
   | "network"
   | "unknown";
@@ -571,6 +660,59 @@ async function topologyRequest(
     throw new TopologyApiError(status, kind, `Topology request failed (${status})`);
   }
   return (await response.json().catch(() => ({ ok: true }))) as TopologyConversionResult;
+}
+
+async function topologyNodesRequest<T>(
+  path: string,
+  method: "GET" | "POST",
+  signal?: AbortSignal,
+): Promise<T> {
+  let response: Response;
+  try {
+    response = await fetch(path, {
+      method,
+      credentials: "include",
+      cache: "no-store",
+      ...(method === "POST" ? { headers: { "content-type": "application/json" }, body: "{}" } : {}),
+      ...(signal ? { signal } : {}),
+    });
+  } catch {
+    throw new TopologyApiError(0, "network", "Topology service could not be reached.");
+  }
+  if (!response.ok) {
+    const body = (await response.json().catch(() => ({}))) as { code?: unknown };
+    const status = response.status;
+    const kind: TopologyApiErrorKind =
+      status === 401
+        ? "unauthorized"
+        : status === 403
+          ? "forbidden"
+          : status === 404
+            ? "not-found"
+            : status === 409 && body.code === "TOPOLOGY_NOT_PRIMARY"
+              ? "not-primary"
+              : status === 409
+                ? "invalid-transition"
+                : status >= 500
+                  ? "unavailable"
+                  : "unknown";
+    throw new TopologyApiError(status, kind, `Topology nodes request failed (${status})`);
+  }
+  return (await response.json().catch(() => undefined)) as T;
+}
+
+/** Lists the nodes enrolled with this primary. Only primary roles may call it. */
+export async function listTopologyNodes(signal?: AbortSignal): Promise<TopologyNodeList> {
+  const body = await topologyNodesRequest<Partial<TopologyNodeList> | undefined>("/api/topology/nodes", "GET", signal);
+  if (!body || typeof body.serverTime !== "string" || !Array.isArray(body.nodes)) {
+    throw new TopologyApiError(200, "unknown", "Topology nodes response was malformed.");
+  }
+  return { serverTime: body.serverTime, nodes: body.nodes };
+}
+
+/** Unlinks one enrolled node: its credential is revoked and it is told so on its next pull. */
+export function unlinkTopologyNode(nodeId: string, signal?: AbortSignal): Promise<{ nodeId: string; unlinkedAt: string }> {
+  return topologyNodesRequest(`/api/topology/nodes/${encodeURIComponent(nodeId)}/unlink`, "POST", signal);
 }
 
 export type BackupApiErrorKind =

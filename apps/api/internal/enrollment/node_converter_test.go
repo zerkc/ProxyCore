@@ -406,3 +406,32 @@ func waitForConverterResult(t *testing.T, result <-chan error) error {
 		return nil
 	}
 }
+
+func TestNodeConverterReEnrollsUnlinkedNodeAndClearsOverlayOnCommit(t *testing.T) {
+	oldKey := uuid.New()
+	archive := &converterArchiveFake{}
+	enqueuer := &converterEnqueuerFake{}
+	service := newConverterIdentityServiceWithKey(t, domain.TopologyRoleNode, &oldKey)
+	converter := newTestNodeConverter(archive, enqueuer, service, &converterWaiterFake{
+		statuses: []syncapply.ApplyJobTerminal{{Status: syncapply.ApplyTerminalStatusApplied}},
+	})
+	if converter.CanEnrollAsNode() {
+		t.Fatal("a linked node must not be eligible")
+	}
+	service.SetNodeUnlinked(true)
+	if !converter.CanEnrollAsNode() {
+		t.Fatal("an explicitly unlinked node must be eligible")
+	}
+	newKey := uuid.New()
+	result, err := converter.Convert(context.Background(), NodeConversionInput{Envelope: converterEnvelope(t), LocalNodeID: service.Current().NodeID, ClusterKeyID: &newKey})
+	if err != nil {
+		t.Fatalf("Convert: %v", err)
+	}
+	current := service.Current()
+	if current.Role != domain.TopologyRoleNode || current.ClusterKeyID == nil || *current.ClusterKeyID != newKey {
+		t.Fatalf("identity=%+v", current)
+	}
+	if current.NodeUnlinked || result.Identity.NodeUnlinked || converter.CanEnrollAsNode() {
+		t.Fatalf("overlay must be cleared once re-enrolled: %+v", current)
+	}
+}

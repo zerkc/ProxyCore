@@ -266,13 +266,13 @@ func sqlitePublicationTime(key *string) (*time.Time, error) {
 
 func sqlitePublicationCredential(v sqlitedb.WriteValue, id string) (SnapshotPublicationCredentialRecord, error) {
 	var record SnapshotPublicationCredentialRecord
-	var credentialRevoked, nodeRevoked *string
+	var credentialRevoked, nodeRevoked, nodeUnlinked *string
 	if err := v.Conn().QueryRowContext(v.Context(), `select c.id, c.node_id, c.credential_hash, c.hash_version,
-			c.revoked_at, n.revoked_at, n.primary_id
+			c.revoked_at, n.revoked_at, n.primary_id, n.unlinked_at
 		from node_credentials c
 		join enrolled_nodes n on n.credential_id = c.id and n.node_id = c.node_id
 		where c.id = ?`, id).Scan(&record.ID, &record.NodeID, &record.CredentialHash, &record.HashVersion,
-		&credentialRevoked, &nodeRevoked, &record.PrimaryID); err != nil {
+		&credentialRevoked, &nodeRevoked, &record.PrimaryID, &nodeUnlinked); err != nil {
 		return SnapshotPublicationCredentialRecord{}, err
 	}
 	var err error
@@ -280,6 +280,9 @@ func sqlitePublicationCredential(v sqlitedb.WriteValue, id string) (SnapshotPubl
 		return SnapshotPublicationCredentialRecord{}, err
 	}
 	if record.NodeRevokedAt, err = sqlitePublicationTime(nodeRevoked); err != nil {
+		return SnapshotPublicationCredentialRecord{}, err
+	}
+	if record.NodeUnlinkedAt, err = sqlitePublicationTime(nodeUnlinked); err != nil {
 		return SnapshotPublicationCredentialRecord{}, err
 	}
 	return record, nil

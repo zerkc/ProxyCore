@@ -32,6 +32,12 @@ type NodeSyncProgress struct {
 	ConsecutiveFailures int
 	// LastError is a sanitized, fixed-vocabulary message, never raw error text.
 	LastError string
+	// Unlinked is true once the primary explicitly answered NODE_UNLINKED. It
+	// is set only from that authoritative signal, never from a store, network
+	// or startup error, and cleared by re-enrollment (BindNodeSync).
+	Unlinked bool
+	// UnlinkedAt is when the node first learned it was unlinked.
+	UnlinkedAt time.Time
 }
 
 // NodeSyncState is binding plus progress.

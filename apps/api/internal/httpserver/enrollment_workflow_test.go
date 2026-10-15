@@ -14,10 +14,12 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/zerkc/ProxyCore/apps/api/internal/acme"
 	"github.com/zerkc/ProxyCore/apps/api/internal/domain"
 	"github.com/zerkc/ProxyCore/apps/api/internal/enrollment"
 	"github.com/zerkc/ProxyCore/apps/api/internal/httpserver"
 	replicationsnapshot "github.com/zerkc/ProxyCore/apps/api/internal/snapshot"
+	syncpublication "github.com/zerkc/ProxyCore/apps/api/internal/sync"
 )
 
 func TestEnrollmentWorkflowDraftReturnsOnlyRedactedPreview(t *testing.T) {
@@ -147,4 +149,121 @@ func workflowTestEnvelope(t *testing.T) *replicationsnapshot.Envelope {
 	}
 	envelope.ContentHash = hash
 	return envelope
+}
+
+type v2DraftFixture struct {
+	handler    http.Handler
+	cache      *enrollment.DraftCache
+	fetched    int
+	fetchToken string
+	fetchCA    string
+	caPEM      string
+	token      string
+	selector   string
+}
+
+func newV2DraftFixture(t *testing.T) *v2DraftFixture {
+	t.Helper()
+	ca, err := acme.CreateInternalCA(30)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secret := bytes.Repeat([]byte{0x42}, 32)
+	f := &v2DraftFixture{selector: "0123456789abcdef0123456789abcdef", caPEM: ca.CertificatePEM}
+	f.token, err = enrollment.EncodeTokenV2(f.selector, secret, "https://primary.example:3443/", ca.CertificatePEM)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.cache = enrollment.NewDraftCache(enrollment.DraftCacheOptions{})
+	envelope := workflowTestEnvelope(t)
+	f.handler = httpserver.NewEnrollmentIdentityMux(httpserver.EnrollmentIdentityHandlerOptions{
+		Certificate: func(context.Context) (*x509.Certificate, error) {
+			return &x509.Certificate{DNSNames: []string{"primary.example"}}, nil
+		},
+		Workflow: &httpserver.EnrollmentWorkflowHandlerOptions{
+			Cache:       f.cache,
+			VerifyToken: func(context.Context, string) error { return nil },
+			FetchSnapshot: func(ctx context.Context, _ string, token string) (*replicationsnapshot.Envelope, error) {
+				f.fetched++
+				f.fetchToken = token
+				f.fetchCA, _ = syncpublication.TrustOverrideFor(ctx, "https://primary.example:3443")
+				return envelope, nil
+			},
+			Validator: snapshotValidatorFunc(func(context.Context, replicationsnapshot.Envelope) replicationsnapshot.ValidationResult {
+				return replicationsnapshot.ValidationResult{OK: true}
+			}),
+			Identity: func(context.Context) (httpserver.EnrollmentLocalIdentity, error) {
+				return httpserver.EnrollmentLocalIdentity{InstallationID: domain.NewInstallationID(), NodeID: domain.NewNodeID()}, nil
+			},
+			LocalIngress: func(context.Context) (domain.Ingress, error) { return domain.Ingress{IPv4: "192.0.2.7"}, nil },
+		},
+	})
+	return f
+}
+
+func (f *v2DraftFixture) draft(t *testing.T, body map[string]string) *httptest.ResponseRecorder {
+	t.Helper()
+	raw, _ := json.Marshal(body)
+	req := httptest.NewRequest(http.MethodPost, httpserver.EnrollmentDraftPath, bytes.NewReader(raw))
+	req.Host = "primary.example:3443"
+	req.TLS = &tls.ConnectionState{Version: tls.VersionTLS13, HandshakeComplete: true, ServerName: "primary.example"}
+	response := httptest.NewRecorder()
+	f.handler.ServeHTTP(response, req)
+	return response
+}
+
+func TestEnrollmentWorkflowDraftFromV2TokenAlone(t *testing.T) {
+	f := newV2DraftFixture(t)
+	response := f.draft(t, map[string]string{"token": f.token})
+	if response.Code != http.StatusOK || f.fetched != 1 {
+		t.Fatalf("status=%d fetched=%d body=%s", response.Code, f.fetched, response.Body.String())
+	}
+	// The primary only ever sees the v1 spelling of selector+secret.
+	wantWire := "pcenr1_" + f.selector + "_" + base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x42}, 32))
+	if f.fetchToken != wantWire {
+		t.Fatalf("wire token = %q", f.fetchToken)
+	}
+	// The embedded CA is the request-scoped trust anchor, and is retained on
+	// the draft so confirm/exchange and the recorded anchor use the same CA.
+	if f.fetchCA != strings.TrimSpace(f.caPEM)+"\n" {
+		t.Fatalf("trust override = %q", f.fetchCA)
+	}
+	draft, ok := f.cache.GetBySelector(f.selector)
+	if !ok || draft.PrimaryCAPEM != f.fetchCA || draft.PrimaryURL != "https://primary.example:3443/" {
+		t.Fatalf("draft ok=%v url=%q caSet=%v", ok, draft.PrimaryURL, draft.PrimaryCAPEM != "")
+	}
+}
+
+func TestEnrollmentWorkflowDraftV2AcceptsMatchingAndRejectsMismatchingInput(t *testing.T) {
+	f := newV2DraftFixture(t)
+	if response := f.draft(t, map[string]string{"token": f.token, "primaryURL": "https://primary.example:3443/", "caPem": f.caPEM}); response.Code != http.StatusOK {
+		t.Fatalf("matching input status=%d body=%s", response.Code, response.Body.String())
+	}
+	other, err := acme.CreateInternalCA(30)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, body := range map[string]map[string]string{
+		"different url": {"token": f.token, "primaryURL": "https://other.example:3443/"},
+		"different ca":  {"token": f.token, "caPem": other.CertificatePEM},
+		"garbage ca":    {"token": f.token, "caPem": "junk"},
+	} {
+		before := f.fetched
+		response := f.draft(t, body)
+		if response.Code != http.StatusBadRequest || f.fetched != before {
+			t.Fatalf("%s: status=%d fetched=%d body=%s", name, response.Code, f.fetched-before, response.Body.String())
+		}
+	}
+}
+
+func TestEnrollmentWorkflowDraftV1StillRequiresPrimaryURL(t *testing.T) {
+	f := newV2DraftFixture(t)
+	response := f.draft(t, map[string]string{"token": workflowTestToken()})
+	if response.Code != http.StatusBadRequest || f.fetched != 0 {
+		t.Fatalf("status=%d fetched=%d", response.Code, f.fetched)
+	}
+	response = f.draft(t, map[string]string{"token": workflowTestToken(), "primaryURL": "https://primary.example:3443/"})
+	if response.Code != http.StatusOK || f.fetched != 1 || f.fetchCA != "" {
+		t.Fatalf("v1 status=%d fetched=%d ca=%q", response.Code, f.fetched, f.fetchCA)
+	}
 }

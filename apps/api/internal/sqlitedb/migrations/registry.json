@@ -40,5 +40,17 @@
     "name": "primary_trust",
     "file": "007_primary_trust.sql",
     "checksum": "ae55789cb3cf5f0920c9cd482fc899257c5bce88991694d3237bb313d98071b2"
+  },
+  {
+    "version": 8,
+    "name": "node_unlink",
+    "file": "008_node_unlink.sql",
+    "checksum": "d3782bbdfc18d49d662b994015f1743484e7dbe001b9691a71a591710ca00cb0"
+  },
+  {
+    "version": 9,
+    "name": "node_heartbeat",
+    "file": "009_node_heartbeat.sql",
+    "checksum": "d05cda7a29fcbb6626b646892f2b3cbe9cab77c4be308ddc3c824020a3ab5358"
   }
 ]

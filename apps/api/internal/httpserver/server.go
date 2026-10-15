@@ -31,8 +31,13 @@ type Server struct {
 	updaterClient    UpdaterClient
 	identitySvc      *identity.Service
 	enrollmentTokens EnrollmentTokenAuthority
-	backupExporter   BackupExporter
-	backupImporter   BackupImporter
+	// selfContainedTokens makes token creation mint v2 tokens that embed the
+	// primary URL and enrollment CA (and refuse when they are unavailable).
+	selfContainedTokens bool
+	nodeUnlinker        NodeUnlinker
+	nodeLister          NodeLister
+	backupExporter      BackupExporter
+	backupImporter      BackupImporter
 	// enrollmentWorkflow serves the NODE enrollment workflow routes on the
 	// main API for owner sessions. Nil means the workflow is unavailable.
 	enrollmentWorkflow *enrollmentWorkflowHandler
@@ -90,6 +95,12 @@ func WithEnrollmentTokenAuthority(authority EnrollmentTokenAuthority) Option {
 	return func(s *Server) {
 		s.enrollmentTokens = authority
 	}
+}
+
+// WithSelfContainedEnrollmentTokens enables v2 (URL+CA carrying) tokens at
+// creation time. Production wiring always sets it.
+func WithSelfContainedEnrollmentTokens() Option {
+	return func(s *Server) { s.selfContainedTokens = true }
 }
 
 func WithBackup(exporter BackupExporter, importer BackupImporter) Option {
@@ -185,7 +196,11 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET "+enrollmentTrustSettingsAliasCAPEM, s.handleDownloadEnrollmentCA)
 	s.mux.HandleFunc("POST "+EnrollmentTokensPath, s.handleCreateEnrollmentToken)
 	s.mux.HandleFunc("GET "+EnrollmentTokensPath, s.handleListEnrollmentTokens)
+	s.mux.HandleFunc("GET "+EnrollmentTokensPath+"/defaults", s.handleEnrollmentTokenDefaults)
 	s.mux.HandleFunc("POST "+EnrollmentTokensPath+"/{id}/revoke", s.handleRevokeEnrollmentToken)
+	s.mux.HandleFunc("DELETE "+EnrollmentTokensPath+"/{id}", s.handleDeleteEnrollmentToken)
+	s.mux.HandleFunc("GET "+TopologyNodesPath, s.handleListNodes)
+	s.mux.HandleFunc("POST "+TopologyNodesPath+"/{id}/unlink", s.handleUnlinkNode)
 	s.mux.HandleFunc("POST "+TopologyPromotePath, s.handleTopologyPromote)
 	s.mux.HandleFunc("POST "+TopologyDemotePath, s.handleTopologyDemote)
 	s.mux.HandleFunc("GET "+TopologySyncPath, s.handleTopologySyncStatus)
@@ -344,17 +359,11 @@ func (s *Server) requireUser(w http.ResponseWriter, r *http.Request, roles ...au
 	if !ok {
 		return auth.User{}, false
 	}
-	if s.isOrdinaryMutation(r) {
-		if s.identityService() != nil && !s.identityWritable() {
-			writeConfigError(w, &httpError{
-				status:  http.StatusForbidden,
-				message: "Configuration writes are disabled for this topology identity",
-				code:    "TOPOLOGY_READ_ONLY",
-			})
-			return auth.User{}, false
-		}
-	}
-	if s.config != nil {
+	readOnlyIdentity := s.identityService() != nil && !s.identityWritable()
+	// Auth/role/topology-read-only checks already ran in requireAuthenticatedUser.
+	// A non-writable identity (NODE) must never initialize ingress: that can
+	// write configuration and enqueue an apply job.
+	if s.config != nil && !readOnlyIdentity {
 		if err := s.initializeIngressSideEffect(r, user); err != nil {
 			writeConfigError(w, err)
 			return auth.User{}, false
@@ -426,6 +435,14 @@ func (s *Server) requireAuthenticatedUser(w http.ResponseWriter, r *http.Request
 	}
 	if len(roles) > 0 && !roleAllowed(user.Role, roles) {
 		writeConfigError(w, &httpError{status: http.StatusForbidden, message: "Permission denied"})
+		return auth.User{}, false
+	}
+	if s.isOrdinaryMutation(r) && s.identityService() != nil && !s.identityWritable() && !nodeReadOnlyExempt(r) {
+		writeConfigError(w, &httpError{
+			status:  http.StatusForbidden,
+			message: "Configuration writes are disabled for this topology identity",
+			code:    "TOPOLOGY_READ_ONLY",
+		})
 		return auth.User{}, false
 	}
 	return user, true

@@ -19,6 +19,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/zerkc/ProxyCore/apps/api/internal/acme"
 	"github.com/zerkc/ProxyCore/apps/api/internal/cluster"
 	"github.com/zerkc/ProxyCore/apps/api/internal/configuration"
 	"github.com/zerkc/ProxyCore/apps/api/internal/domain"
@@ -639,5 +640,35 @@ func TestPrimaryTrustResolverAdaptsTheStoreForTheTransport(t *testing.T) {
 	}
 	if _, ok, err := primaryTrustResolver(nil)(context.Background(), "https://primary.example:3443"); ok || err != nil {
 		t.Fatalf("nil reader ok=%v err=%v, want no trust", ok, err)
+	}
+}
+
+func TestWireEnrollmentWorkflowDependenciesRoutesEveryTokenVersionByToken(t *testing.T) {
+	ca, err := acme.CreateInternalCA(30)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secret := bytes.Repeat([]byte{0x42}, 32)
+	v1 := "pcenr1_" + strings.Repeat("a", 32) + "_" + base64.RawURLEncoding.EncodeToString(secret)
+	v2, err := enrollment.EncodeTokenV2(strings.Repeat("a", 32), secret, "https://primary.example:3443/", ca.CertificatePEM)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var paths []string
+	client := syncpublication.NewSnapshotClient(syncpublication.SnapshotClientOptions{
+		CanonicalizeURL: func(string) (string, error) { return "https://primary.example:3443/", nil },
+		HTTPClient: &http.Client{Transport: snapshotRoundTripperMain(func(request *http.Request) (*http.Response, error) {
+			paths = append(paths, request.Method+" "+request.URL.Path)
+			return &http.Response{StatusCode: http.StatusOK, ProtoMajor: 2, Body: io.NopCloser(bytes.NewReader([]byte("not-an-envelope"))), Header: make(http.Header)}, nil
+		})},
+	})
+	workflow := httpserver.EnrollmentWorkflowHandlerOptions{}
+	wireEnrollmentWorkflowDependencies(&workflow, client, nil)
+	for _, token := range []string{v1, v2} {
+		_, _ = workflow.FetchSnapshot(context.Background(), "https://primary.example:3443/", token)
+	}
+	want := "POST /api/topology/sync/snapshot-by-token"
+	if len(paths) != 2 || paths[0] != want || paths[1] != want {
+		t.Fatalf("paths = %v, want both %q", paths, want)
 	}
 }

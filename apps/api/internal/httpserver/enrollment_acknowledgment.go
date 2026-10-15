@@ -52,6 +52,8 @@ type EnrollmentSnapshotAcknowledgementHandlerOptions struct {
 	Identity    syncpublication.SnapshotIdentityReader
 	Certificate IdentityProofCertificateProvider
 	Now         func() time.Time
+	// Heartbeat, when set, records each accepted acknowledgement.
+	Heartbeat NodeHeartbeatSink
 }
 
 // EnrollmentSnapshotAcknowledgementHandler records the exact latest applied
@@ -64,6 +66,7 @@ type EnrollmentSnapshotAcknowledgementHandler struct {
 	identity    syncpublication.SnapshotIdentityReader
 	certificate IdentityProofCertificateProvider
 	now         func() time.Time
+	heartbeat   NodeHeartbeatSink
 }
 
 // American-spelling aliases are intentionally additive; the persisted
@@ -91,6 +94,7 @@ func NewEnrollmentSnapshotAcknowledgementHandler(opts EnrollmentSnapshotAcknowle
 	return &EnrollmentSnapshotAcknowledgementHandler{
 		store: opts.Store, authorizer: authorizer, publication: publication,
 		identity: opts.Identity, certificate: opts.Certificate, now: now,
+		heartbeat: opts.Heartbeat,
 	}
 }
 
@@ -221,6 +225,7 @@ func (h *EnrollmentSnapshotAcknowledgementHandler) ServeHTTP(w http.ResponseWrit
 		writeSnapshotAcknowledgementError(w, http.StatusForbidden)
 		return
 	}
+	recordNodeHeartbeat(r.Context(), h.heartbeat, state.principalNodeID, r)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -289,6 +294,7 @@ func acknowledgementAuthenticator(state *acknowledgementAuthState) configuration
 		if state != nil {
 			state.checked = true
 			state.revoked = record.CredentialRevokedAt != nil || record.NodeRevokedAt != nil
+			state.unlinked = nodeUnlinkedForSecretHolder(presented, record)
 		}
 		principal, err := syncpublication.AuthenticateNodeCredential(presented, &syncpublication.NodeCredentialRecord{
 			ID: record.ID, NodeID: record.NodeID, Hash: record.CredentialHash,
@@ -314,11 +320,17 @@ type acknowledgementAuthState struct {
 	checked         bool
 	authenticated   bool
 	revoked         bool
+	unlinked        bool
 	principalNodeID string
 }
 
 func writeSnapshotAcknowledgementStoreError(w http.ResponseWriter, err error, state *acknowledgementAuthState) {
 	switch {
+	case state != nil && state.revoked && state.unlinked:
+		setSnapshotAcknowledgementHeaders(w)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusGone)
+		_, _ = w.Write([]byte(`{"error":"node unlinked","code":"` + NodeUnlinkedCode + `"}`))
 	case errors.Is(err, configuration.ErrSnapshotAcknowledgementRevoked), state != nil && state.revoked:
 		writeSnapshotAcknowledgementError(w, http.StatusGone)
 	case errors.Is(err, configuration.ErrSnapshotAcknowledgementUnavailable):

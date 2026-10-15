@@ -126,6 +126,60 @@ func TestNodeSyncerReportsCredentialRejectedWhenNoLocalCredential(t *testing.T) 
 	if !errors.As(err, &failure) || failure.Code != "credential_rejected" || len(client.fetched) != 0 {
 		t.Fatalf("err=%v fetched=%v", err, client.fetched)
 	}
+	if len(store.saved) == 0 || store.saved[len(store.saved)-1].Unlinked {
+		t.Fatalf("a missing local credential must never mark the node unlinked: %+v", store.saved)
+	}
+}
+
+type unlinkedSyncClient struct{ fetches int }
+
+func (c *unlinkedSyncClient) FetchSnapshotIfChanged(context.Context, string, []byte, string) (syncpublication.SnapshotFetchResult, error) {
+	c.fetches++
+	return syncpublication.SnapshotFetchResult{}, syncpublication.ErrSnapshotClientUnlinked
+}
+
+func (c *unlinkedSyncClient) AcknowledgeSnapshot(context.Context, string, []byte, string, string, time.Time) error {
+	return nil
+}
+
+func TestNodeSyncerMirrorsExplicitUnlinkIntoIdentityAndRestoresItOnRestart(t *testing.T) {
+	applied := strings.Repeat("a", 64)
+	newDeps := func(store *fakeSyncStore, service *identity.Service, client *unlinkedSyncClient) nodeSyncDependencies {
+		return nodeSyncDependencies{
+			Store: store, Identity: service, Client: client, Converter: noopResyncer{}, Validator: acceptAllValidator{},
+			LoadCredential: func(context.Context, string) ([]byte, error) {
+				return bytes.Repeat([]byte{0x21}, syncpublication.NodeCredentialSecretBytes), nil
+			},
+		}
+	}
+	store := &fakeSyncStore{state: configuration.NodeSyncState{
+		NodeSyncBinding:  configuration.NodeSyncBinding{PrimaryURL: "https://primary.example:3443", CredentialID: uuid.NewString()},
+		NodeSyncProgress: configuration.NodeSyncProgress{AppliedHash: applied, PrimaryHash: applied},
+	}}
+	service := nodeSyncTestIdentity(t)
+	client := &unlinkedSyncClient{}
+	if service.Current().NodeUnlinked {
+		t.Fatal("identity starts linked")
+	}
+	if err := newNodeSyncer(newDeps(store, service, client)).RunOnce(context.Background()); err == nil {
+		t.Fatal("expected node_unlinked failure")
+	}
+	last := store.saved[len(store.saved)-1]
+	if !last.Unlinked || !service.Current().NodeUnlinked || client.fetches != 1 {
+		t.Fatalf("saved=%+v overlay=%v fetches=%d", last, service.Current().NodeUnlinked, client.fetches)
+	}
+
+	// Restart: new identity cache and syncer over the persisted state. The
+	// overlay is restored and the primary is not contacted.
+	store.state.NodeSyncProgress = last
+	restarted := nodeSyncTestIdentity(t)
+	restartClient := &unlinkedSyncClient{}
+	if err := newNodeSyncer(newDeps(store, restarted, restartClient)).RunOnce(context.Background()); err == nil {
+		t.Fatal("expected node_unlinked failure after restart")
+	}
+	if !restarted.Current().NodeUnlinked || restartClient.fetches != 0 {
+		t.Fatalf("overlay=%v fetches=%d", restarted.Current().NodeUnlinked, restartClient.fetches)
+	}
 }
 
 func TestNodeSyncerFetchesWithStoredCredentialAndAcknowledges(t *testing.T) {

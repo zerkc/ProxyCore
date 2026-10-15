@@ -68,3 +68,53 @@ func TestCommitNodeEnrollmentSetsRoleAndClusterKey(t *testing.T) {
 		t.Fatalf("key changed: %v", cur.ClusterKeyID)
 	}
 }
+
+func TestUnlinkedNodeMayReEnrollButLinkedNodeStaysRefused(t *testing.T) {
+	key := uuid.New()
+	for _, test := range []struct {
+		name     string
+		role     domain.TopologyRole
+		unlinked bool
+		want     bool
+	}{
+		{"linked node with key", domain.TopologyRoleNode, false, false},
+		{"unlinked node with key", domain.TopologyRoleNode, true, true},
+		{"overlay is meaningless on primary-with-nodes", domain.TopologyRolePrimaryWithNodes, true, false},
+		{"overlay is meaningless on unknown role", domain.TopologyRole("bogus"), true, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := (Identity{Role: test.role, ClusterKeyID: &key, NodeUnlinked: test.unlinked}).CanEnrollAsNode(); got != test.want {
+				t.Fatalf("CanEnrollAsNode()=%t want %t", got, test.want)
+			}
+		})
+	}
+}
+
+func TestCommitNodeEnrollmentAllowsUnlinkedNodeOnlyWhileOverlayIsSet(t *testing.T) {
+	store := newFakeStore()
+	key := uuid.New()
+	store.seed(Identity{InstallationID: domain.NewInstallationID(), NodeID: domain.NewNodeID(), Role: domain.TopologyRoleNode,
+		LeadershipGeneration: 2, LatestKnownGeneration: 2, ClusterKeyID: &key})
+	svc := NewService(store)
+	if _, err := svc.Load(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	next := uuid.New()
+	if _, err := svc.CommitNodeEnrollment(t.Context(), &next, 3); err == nil {
+		t.Fatal("linked node must be refused")
+	}
+	svc.SetNodeUnlinked(true)
+	got, err := svc.CommitNodeEnrollment(t.Context(), &next, 3)
+	if err != nil || got.ClusterKeyID == nil || *got.ClusterKeyID != next {
+		t.Fatalf("unlinked re-enroll: %+v err=%v", got, err)
+	}
+	// Service.Load replaces the cache: the overlay never survives it on its
+	// own, so a failed store read cannot leave a node marked unlinked.
+	svc.SetNodeUnlinked(true)
+	if _, err := svc.Load(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if svc.Current().NodeUnlinked {
+		t.Fatal("Load must not carry the overlay")
+	}
+}

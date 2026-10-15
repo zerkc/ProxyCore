@@ -138,6 +138,8 @@ func (s *sqliteStack) options(cfg config.Config) []httpserver.Option {
 		httpserver.WithDefaultIngress(domain.Ingress{IPv4: cfg.ProxyIngressIPv4, IPv6: cfg.ProxyIngressIPv6}),
 		httpserver.WithIdentityService(s.identity),
 		httpserver.WithEnrollmentTokenAuthority(s.tokenAuthority),
+		httpserver.WithNodeUnlinker(s.phase2),
+		httpserver.WithNodeLister(s.phase2),
 	}
 }
 

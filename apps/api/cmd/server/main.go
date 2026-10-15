@@ -129,6 +129,9 @@ func runServerWithNodeConverter(ctx context.Context, cfg config.Config, logger *
 	}
 	defer stack.Close()
 	options = append(options, stack.options(cfg)...)
+	// Tokens minted here are self-contained (v2): they carry the primary URL
+	// and enrollment CA so a node joins with the token alone.
+	options = append(options, httpserver.WithSelfContainedEnrollmentTokens())
 	phase2Store = stack.phase2
 	identitySvc = stack.identity
 	identityResult = stack.identityResult
@@ -141,6 +144,7 @@ func runServerWithNodeConverter(ctx context.Context, cfg config.Config, logger *
 	snapshotClient = syncpublication.NewSnapshotClient(syncpublication.SnapshotClientOptions{
 		CanonicalizeURL: enrollment.CanonicalizePrimaryURL,
 		HTTPClient:      primaryTrustHTTPClient(primaryTrust),
+		Ingress:         func() (string, string) { return cfg.ProxyIngressIPv4, cfg.ProxyIngressIPv6 },
 	})
 	nodeConverter = buildNodeConverter(enableNodeConverter, stack.phase2, identitySvc, logger)
 	if nodeConverter != nil {
@@ -208,7 +212,13 @@ func runServerWithNodeConverter(ctx context.Context, cfg config.Config, logger *
 			}
 		}
 		workflow.RecordSyncBinding = func(ctx context.Context, binding configuration.NodeSyncBinding, appliedHash string) error {
-			return nodeSyncStore.BindNodeSync(ctx, binding, appliedHash, time.Now().UTC())
+			if err := nodeSyncStore.BindNodeSync(ctx, binding, appliedHash, time.Now().UTC()); err != nil {
+				return err
+			}
+			// Re-enrollment cleared any unlinked state; do not wait out the
+			// loop's MaxBackoff sleep before resuming. Nil-safe.
+			nodeSyncer.Wake()
+			return nil
 		}
 		options = append(options, httpserver.WithEnrollmentWorkflow(workflow))
 	}
@@ -230,11 +240,17 @@ func runServerWithNodeConverter(ctx context.Context, cfg config.Config, logger *
 			Now:              time.Now,
 		}
 		var err error
+		// One throttled sink is shared so a pull and its acknowledgement
+		// collapse into a single heartbeat write.
+		var heartbeat httpserver.NodeHeartbeatSink
+		if sink, ok := any(phase2Store).(httpserver.NodeHeartbeatSink); ok && phase2Store != nil {
+			heartbeat = httpserver.NewThrottledNodeHeartbeat(sink, 0, nil)
+		}
 		publicationOptions := httpserver.EnrollmentSnapshotPublicationHandlerOptions{
-			Store: phase2Store, Identity: identitySvc,
+			Store: phase2Store, Identity: identitySvc, Heartbeat: heartbeat,
 		}
 		acknowledgementOptions := httpserver.EnrollmentSnapshotAcknowledgementHandlerOptions{
-			Store: phase2Store, Identity: identitySvc,
+			Store: phase2Store, Identity: identitySvc, Heartbeat: heartbeat,
 		}
 		// A missing grant store or an unusable service makes the route answer
 		// the same uniform denial instead of revealing installation state.
@@ -542,8 +558,7 @@ func wireEnrollmentWorkflowDependencies(workflow *httpserver.EnrollmentWorkflowH
 		workflow.FetchSnapshot = func(ctx context.Context, primaryURL, credential string) (*snapshot.Envelope, error) {
 			var body []byte
 			var err error
-			_, _, isEnrollmentToken := httpserver.ParseHTTPEnrollmentToken(credential)
-			if isEnrollmentToken && strings.HasPrefix(credential, "pcenr1_") {
+			if enrollment.IsTokenCredential(credential) {
 				body, err = client.FetchSnapshotByToken(ctx, primaryURL, credential)
 			} else {
 				body, err = client.FetchSnapshot(ctx, primaryURL, []byte(credential))

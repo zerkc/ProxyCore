@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/google/uuid"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -117,6 +118,7 @@ func (s *tokenHTTPAuthStore) CompletePasswordChange(context.Context, string, str
 // uses the PostgreSQL implementation supplied by configuration.
 type tokenHTTPEnrollmentStore struct {
 	records map[string]tokenHTTPEnrollmentRecord
+	granted map[string]bool
 }
 
 type tokenHTTPEnrollmentRecord struct {
@@ -126,7 +128,7 @@ type tokenHTTPEnrollmentRecord struct {
 }
 
 func newTokenHTTPEnrollmentStore() *tokenHTTPEnrollmentStore {
-	return &tokenHTTPEnrollmentStore{records: map[string]tokenHTTPEnrollmentRecord{}}
+	return &tokenHTTPEnrollmentStore{records: map[string]tokenHTTPEnrollmentRecord{}, granted: map[string]bool{}}
 }
 func (s *tokenHTTPEnrollmentStore) CreateEnrollmentToken(_ context.Context, id, selector, hash, _ string, ownerID string, createdAt, expiresAt time.Time) (domain.TopologyRole, error) {
 	s.records[id] = tokenHTTPEnrollmentRecord{id: id, selector: selector, hash: hash, owner: ownerID, createdAt: createdAt, expiresAt: expiresAt}
@@ -154,6 +156,24 @@ func (s *tokenHTTPEnrollmentStore) RevokeEnrollmentToken(_ context.Context, id, 
 		record.revokedAt = &now
 		s.records[id] = record
 	}
+	return nil
+}
+
+func (s *tokenHTTPEnrollmentStore) DeleteEnrollmentToken(_ context.Context, id, ownerID string, now time.Time) error {
+	record, ok := s.records[id]
+	if !ok || record.owner != ownerID {
+		return enrollment.ErrTokenNotFound
+	}
+	switch {
+	case s.granted[id]:
+		return enrollment.ErrTokenInUse
+	case record.revokedAt != nil:
+	case record.consumedAt != nil:
+		return enrollment.ErrTokenInUse
+	case record.expiresAt.After(now):
+		return enrollment.ErrTokenActive
+	}
+	delete(s.records, id)
 	return nil
 }
 
@@ -235,6 +255,93 @@ func TestEnrollmentTokenRoutesRequireOwnerAndConfirmation(t *testing.T) {
 	srv.Handler().ServeHTTP(confirmed, confirmedRequest)
 	if confirmed.Code != http.StatusNoContent {
 		t.Fatalf("confirmed revoke status/body=%d %s", confirmed.Code, confirmed.Body.String())
+	}
+}
+
+func TestEnrollmentTokenDeleteRoute(t *testing.T) {
+	authStore := newTokenHTTPAuthStore()
+	authService := auth.NewService(authStore, auth.ServiceOptions{SessionTTL: time.Hour})
+	tokenStore := newTokenHTTPEnrollmentStore()
+	authority := httpserver.NewEnrollmentTokenAuthority(tokenStore, nil, httpserver.EnrollmentTokenAuthorityOptions{})
+	srv := httpserver.New(config.Config{UIDist: t.TempDir(), SessionCookieName: "proxycore_session", SessionTTL: time.Hour}, nil,
+		httpserver.WithAuthService(authService), httpserver.WithEnrollmentTokenAuthority(authority))
+
+	del := func(id string, cookie *http.Cookie) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodDelete, httpserver.EnrollmentTokensPath+"/"+id, nil)
+		if cookie != nil {
+			req.AddCookie(cookie)
+		}
+		srv.Handler().ServeHTTP(rec, req)
+		return rec
+	}
+	if rec := del(uuid.NewString(), nil); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated status=%d", rec.Code)
+	}
+	owner, err := authService.Bootstrap(context.Background(), "owner", "correct horse battery staple")
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, err := authService.Login(context.Background(), owner.Username, "correct horse battery staple")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cookie := &http.Cookie{Name: "proxycore_session", Value: session.Token}
+
+	now := time.Now().UTC()
+	past := now.Add(-time.Hour)
+	future := now.Add(time.Hour)
+	seed := func(expires time.Time, consumed, revoked bool, granted bool, ownerID string) string {
+		id := uuid.NewString()
+		record := tokenHTTPEnrollmentRecord{id: id, selector: id, owner: ownerID, createdAt: past, expiresAt: expires}
+		if consumed {
+			record.consumedAt = &past
+		}
+		if revoked {
+			record.revokedAt = &past
+		}
+		tokenStore.records[id] = record
+		tokenStore.granted[id] = granted
+		return id
+	}
+	revokedID := seed(future, false, true, false, owner.ID)
+	expiredID := seed(past, false, false, false, owner.ID)
+	activeID := seed(future, false, false, false, owner.ID)
+	grantedID := seed(past, true, true, true, owner.ID)
+	foreignID := seed(past, false, true, false, "someone-else")
+
+	for _, tc := range []struct {
+		name, id string
+		status   int
+		code     string
+	}{
+		{"revoked", revokedID, http.StatusNoContent, ""},
+		{"expired", expiredID, http.StatusNoContent, ""},
+		{"active", activeID, http.StatusConflict, "TOKEN_ACTIVE"},
+		{"granted", grantedID, http.StatusConflict, "TOKEN_IN_USE"},
+		{"foreign owner", foreignID, http.StatusNotFound, ""},
+		{"unknown", uuid.NewString(), http.StatusNotFound, ""},
+		{"second delete", revokedID, http.StatusNotFound, ""},
+		{"invalid id", "not-a-uuid", http.StatusNotFound, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := del(tc.id, cookie)
+			if rec.Code != tc.status || rec.Header().Get("Cache-Control") != "no-store" {
+				t.Fatalf("status=%d cache=%q body=%s", rec.Code, rec.Header().Get("Cache-Control"), rec.Body.String())
+			}
+			if tc.code != "" && topologyReadOnlyCode(t, rec.Body.Bytes()) != tc.code {
+				t.Fatalf("code body=%s", rec.Body.String())
+			}
+			if tc.status == http.StatusNoContent && rec.Body.Len() != 0 {
+				t.Fatalf("204 carried a body: %s", rec.Body.String())
+			}
+		})
+	}
+	if _, ok := tokenStore.records[activeID]; !ok {
+		t.Fatal("active token must survive")
+	}
+	if _, ok := tokenStore.records[grantedID]; !ok {
+		t.Fatal("granted token must survive")
 	}
 }
 

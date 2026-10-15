@@ -15,7 +15,7 @@ import { WorkerWakeup } from "./poller";
 /** Last migration in apps/api/internal/sqlitedb/migrations/registry.json. The Go API
  * owns migration; a test keeps this aligned with the registry (the worker image does
  * not ship apps/api). */
-export const EXPECTED_SQLITE_SCHEMA_VERSION = 7;
+export const EXPECTED_SQLITE_SCHEMA_VERSION = 9;
 
 export type WorkerRuntimeConfig = {
   sqlitePath: string;

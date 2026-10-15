@@ -48,6 +48,9 @@ var (
 	failApply              = &NodeSyncFailure{"apply_failed", "The primary's snapshot could not be applied."}
 	failAcknowledge        = &NodeSyncFailure{"acknowledge_failed", "The primary did not accept the acknowledgement."}
 	failStore              = &NodeSyncFailure{"state_unavailable", "The node's sync state could not be saved."}
+	// failUnlinked is produced only from the primary's explicit NODE_UNLINKED
+	// answer, or from the persisted unlinked state it created.
+	failUnlinked = &NodeSyncFailure{"node_unlinked", "The primary unlinked this node; it keeps serving its last configuration. Re-enroll it or convert it to a primary."}
 )
 
 // NodeSyncFetch reads the primary's latest snapshot, conditional on after (the
@@ -75,6 +78,11 @@ type NodeSyncOptions struct {
 	Now        func() time.Time
 	// Jitter returns a value in [0,1); the delay is scaled by 0.8 + 0.4*value.
 	Jitter func() float64
+	// OnUnlinked is called with true when the node is known unlinked: after
+	// the explicit signal was persisted, or when persisted state says so (so a
+	// restart restores it). It is never called with a value derived from an
+	// error. Optional.
+	OnUnlinked func(unlinked bool)
 	// Logf receives non-sensitive operational lines.
 	Logf func(format string, args ...any)
 }
@@ -85,6 +93,8 @@ type NodeSyncer struct {
 	opts NodeSyncOptions
 	run  gosync.Mutex
 	wait func(context.Context, time.Duration) error
+	// wake interrupts the inter-cycle sleep (buffered 1, never blocks senders).
+	wake chan struct{}
 
 	mu        gosync.Mutex
 	nextDelay time.Duration
@@ -109,7 +119,7 @@ func NewNodeSyncer(opts NodeSyncOptions) *NodeSyncer {
 	if opts.Logf == nil {
 		opts.Logf = func(string, ...any) {}
 	}
-	return &NodeSyncer{opts: opts, wait: nodeSyncWait, nextDelay: opts.Interval}
+	return &NodeSyncer{opts: opts, wait: nodeSyncWait, wake: make(chan struct{}, 1), nextDelay: opts.Interval}
 }
 
 func nodeSyncWait(ctx context.Context, d time.Duration) error {
@@ -135,9 +145,39 @@ func (s *NodeSyncer) Run(ctx context.Context) {
 		case errors.As(err, &failure):
 			s.opts.Logf("node sync cycle failed: %s", failure.Code)
 		}
-		if s.wait(ctx, s.delay()) != nil {
+		if s.waitOrWake(ctx, s.delay()) != nil {
 			return
 		}
+	}
+}
+
+// Wake makes a sleeping Run loop start its next cycle now (for example after
+// re-enrollment cleared an unlinked state). It is nil-safe and never blocks;
+// repeated wakes coalesce.
+func (s *NodeSyncer) Wake() {
+	if s == nil || s.wake == nil {
+		return
+	}
+	select {
+	case s.wake <- struct{}{}:
+	default:
+	}
+}
+
+// waitOrWake sleeps for d through the wait seam, returning early (nil) on
+// Wake and ctx.Err() when ctx is cancelled.
+func (s *NodeSyncer) waitOrWake(ctx context.Context, d time.Duration) error {
+	sleepCtx, cancel := context.WithCancel(ctx)
+	done := make(chan error, 1)
+	go func() { done <- s.wait(sleepCtx, d) }()
+	select {
+	case err := <-done:
+		cancel()
+		return err
+	case <-s.wake:
+		cancel()
+		<-done
+		return ctx.Err()
 	}
 }
 
@@ -183,13 +223,29 @@ func (s *NodeSyncer) RunOnce(ctx context.Context) error {
 		return ErrNodeSyncUnbound
 	}
 
+	if state.Unlinked {
+		// Authoritative and persisted: make no primary request at all. The
+		// loop only wakes every MaxBackoff to re-read local state, so a
+		// re-enrollment (which clears the flag) resumes polling by itself.
+		s.setDelay(s.opts.MaxBackoff)
+		s.notifyUnlinked(true)
+		return failUnlinked
+	}
+
 	now := s.opts.Now().UTC()
 	state.LastAttemptAt = now
 	failure := s.cycle(ctx, &state)
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
-	if failure != nil {
+	if failure == failUnlinked {
+		state.Unlinked = true
+		state.UnlinkedAt = now
+		state.ConsecutiveFailures = 0
+		state.LastError = failure.Message
+		state.NextAttemptAt = now.Add(s.opts.MaxBackoff)
+		s.setDelay(s.opts.MaxBackoff)
+	} else if failure != nil {
 		state.ConsecutiveFailures++
 		state.LastError = failure.Message
 		delay := s.backoff(state.ConsecutiveFailures)
@@ -210,10 +266,19 @@ func (s *NodeSyncer) RunOnce(ctx context.Context) error {
 		}
 		return failStore
 	}
+	if failure == failUnlinked {
+		s.notifyUnlinked(true)
+	}
 	if failure != nil {
 		return failure
 	}
 	return nil
+}
+
+func (s *NodeSyncer) notifyUnlinked(unlinked bool) {
+	if s.opts.OnUnlinked != nil {
+		s.opts.OnUnlinked(unlinked)
+	}
 }
 
 // cycle mutates state in memory and returns the sanitized failure, if any.
@@ -263,6 +328,9 @@ func (s *NodeSyncer) cycle(ctx context.Context, state *configuration.NodeSyncSta
 	if s.opts.Acknowledge != nil && state.AppliedHash != "" && state.AckedHash != state.AppliedHash &&
 		state.PrimaryHash == state.AppliedHash && !state.PrimaryAppliedAt.IsZero() {
 		if err := s.opts.Acknowledge(ctx, *state, state.AppliedHash, state.PrimaryAppliedAt); err != nil {
+			if errors.Is(err, ErrSnapshotClientUnlinked) {
+				return failUnlinked
+			}
 			return failAcknowledge
 		}
 		state.AckedHash = state.AppliedHash
@@ -272,6 +340,8 @@ func (s *NodeSyncer) cycle(ctx context.Context, state *configuration.NodeSyncSta
 
 func classifyNodeSyncFetchError(err error) *NodeSyncFailure {
 	switch {
+	case errors.Is(err, ErrSnapshotClientUnlinked):
+		return failUnlinked
 	case errors.Is(err, ErrSnapshotClientUnauthorized), errors.Is(err, ErrSnapshotClientGone):
 		return failCredentialRejected
 	case errors.Is(err, ErrSnapshotClientNotFound):

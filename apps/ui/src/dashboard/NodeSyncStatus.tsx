@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { NodeUnlinkedBanner } from "./NodeUnlinkedBanner";
 import { getTopologySync, retryTopologySync, shortHash, TopologySyncError } from "./topologySync";
 import type { TopologyRole, TopologySyncStatus } from "./types";
 
@@ -70,6 +71,7 @@ export function NodeSyncStatus({ role }: { role?: TopologyRole }) {
         <p className="pc-eyebrow pc-eyebrow-signal">configuration sync</p>
         <h2 id="node-sync-title" className="pc-title mt-2 text-2xl text-mist">{isNode ? "Sync with PRIMARY" : "Published configuration"}</h2>
       </header>
+      {isNode && status?.unlinked === true ? <NodeUnlinkedBanner {...(status.unlinkedAt ? { unlinkedAt: status.unlinkedAt } : {})} /> : null}
       {error ? <p className="pc-toast-err" role="alert">{error}</p> : null}
       {loadFailed && !status ? <p className="text-sm text-faint" role="status">Sync status is unavailable.</p> : null}
       {status ? (isNode ? <NodeBody status={status} busy={busy} onSync={() => void syncNow()} /> : <PrimaryBody status={status} />) : null}

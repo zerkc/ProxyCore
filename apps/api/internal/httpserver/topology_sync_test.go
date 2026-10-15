@@ -229,3 +229,30 @@ func TestPromoteClearsNodeSyncBinding(t *testing.T) {
 		t.Fatalf("progress rows after promote = %d err=%v", n, err)
 	}
 }
+
+func TestTopologySyncStatusExposesUnlinkedOnlyWhenPersisted(t *testing.T) {
+	f := newTopologySyncFixture(t, "")
+	f.becomeNode(t)
+	f.bind(t, hashOf("a"), hashOf("a"))
+	body := decodeBody(t, doJSON(t, f.env.Handler, http.MethodGet, httpserver.TopologySyncPath, nil, f.owner))
+	if body["unlinked"] != false || body["unlinkedAt"] != nil {
+		t.Fatalf("linked node body=%v", body)
+	}
+
+	state, _, err := f.store.LoadNodeSyncState(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.Unlinked, state.UnlinkedAt = true, time.Unix(1_800_000_500, 0).UTC()
+	state.LastError = "The primary unlinked this node."
+	if err := f.store.SaveNodeSyncProgress(context.Background(), state.NodeSyncProgress); err != nil {
+		t.Fatal(err)
+	}
+	body = decodeBody(t, doJSON(t, f.env.Handler, http.MethodGet, httpserver.TopologySyncPath, nil, f.owner))
+	if body["unlinked"] != true || body["bound"] != true || body["appliedHash"] != hashOf("a") {
+		t.Fatalf("unlinked node body=%v", body)
+	}
+	if at, _ := body["unlinkedAt"].(string); !strings.HasPrefix(at, "2027-01-") {
+		t.Fatalf("unlinkedAt=%v", body["unlinkedAt"])
+	}
+}

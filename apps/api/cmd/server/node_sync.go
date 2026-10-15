@@ -99,6 +99,14 @@ func newNodeSyncer(deps nodeSyncDependencies) *syncpublication.NodeSyncer {
 		Interval: deps.Interval,
 		Role:     func() domain.TopologyRole { return deps.Identity.Current().Role },
 		Logf:     logf,
+		// Mirror the persisted unlinked state into the live identity so an
+		// unlinked NODE may re-enroll; only ever set true (the converter
+		// clears it once the re-enrollment commits).
+		OnUnlinked: func(unlinked bool) {
+			if unlinked {
+				deps.Identity.SetNodeUnlinked(true)
+			}
+		},
 		Fetch: func(ctx context.Context, state configuration.NodeSyncState, after string) (syncpublication.SnapshotFetchResult, error) {
 			var result syncpublication.SnapshotFetchResult
 			err := withBearer(ctx, state.CredentialID, func(bearer []byte) error {

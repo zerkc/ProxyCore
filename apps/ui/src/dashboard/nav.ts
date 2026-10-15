@@ -28,6 +28,13 @@ export const dashboardNav = [
     icon: "continuity",
   },
   {
+    href: "/dashboard/nodes",
+    id: "nodes",
+    label: "nodes",
+    title: "linked nodes",
+    icon: "nodes",
+  },
+  {
     href: "/dashboard/ingress",
     id: "ingress",
     label: "ingress",
