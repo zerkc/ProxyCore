@@ -211,8 +211,13 @@ grep -q 'BEGIN CERTIFICATE' "$BODY" && record PASS "trust CA is a PEM" "fingerpr
 expect "trust CA alias" 200 "$(req primary GET /api/settings/enrollment-trust/ca)" "GET /api/settings/enrollment-trust/ca"
 expect "token defaults after trust" 200 "$(req primary GET /api/enrollment/tokens/defaults)" "GET /api/enrollment/tokens/defaults"
 jqexpect "token defaults trustReady" '.trustReady == true'
+# Ingress was saved through PUT /api/settings above, so the default primary URL
+# must come from that persisted advertised address (https on the TLS port).
+jqexpect "token defaults primaryUrl from advertised ingress" '(.primaryUrl|type=="string") and (.primaryUrl|test("^https://[^/]+:3443/$")) and .gatewayIPv4 == "192.0.2.10"'
+# The enrollment leaf only covers $PRIMARY_ALIAS, so the (now non-empty)
+# default address is refused as uncovered rather than as missing.
 expect "token without primaryUrl" 422 "$(req primary POST /api/enrollment/tokens '{}')" "POST /api/enrollment/tokens {}"
-jqexpect "token PRIMARY_URL_REQUIRED" '.code == "PRIMARY_URL_REQUIRED"'
+jqexpect "token default PRIMARY_URL_NOT_IN_CERT" '.code == "PRIMARY_URL_NOT_IN_CERT"'
 expect "token host not in cert" 422 "$(req primary POST /api/enrollment/tokens '{"primaryUrl":"https://elsewhere.example:3443/"}')" "POST /api/enrollment/tokens (foreign host)"
 jqexpect "token PRIMARY_URL_NOT_IN_CERT" '.code == "PRIMARY_URL_NOT_IN_CERT"'
 expect "token create" 201 "$(req primary POST /api/enrollment/tokens "{\"primaryUrl\":\"$PRIMARY_URL\"}")" "POST /api/enrollment/tokens {primaryUrl}"
