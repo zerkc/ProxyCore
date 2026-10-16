@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -22,7 +23,95 @@ var (
 	// the final NODE transition after a successful apply.
 	ErrNodeConversionDenied      = errors.New("node conversion denied")
 	errNodeConversionUnavailable = errors.New("node conversion dependencies are unavailable")
+	// ErrNodeConversionUnavailable is returned when a Convert dependency is nil.
+	ErrNodeConversionUnavailable = errNodeConversionUnavailable
+	// ErrNodeConversionImport marks a failure of the archive/import stage.
+	ErrNodeConversionImport = errors.New("node conversion import failed")
+	// ErrNodeConversionApplyWait marks a failure while waiting for the apply.
+	ErrNodeConversionApplyWait = errors.New("node conversion apply wait failed")
 )
+
+// NodeConversionStageError labels a Convert failure with its stage while
+// keeping the underlying error reachable through Unwrap.
+type NodeConversionStageError struct {
+	stage  string
+	marker error
+	Err    error
+}
+
+func (e *NodeConversionStageError) Error() string {
+	if e == nil {
+		return ""
+	}
+	if e.stage == "" {
+		return e.Err.Error()
+	}
+	return fmt.Sprintf("node conversion %s: %v", e.stage, e.Err)
+}
+
+func (e *NodeConversionStageError) Unwrap() error { return e.Err }
+
+func (e *NodeConversionStageError) Is(target error) bool { return e != nil && target == e.marker }
+
+// NewNodeConversionImportError wraps err as an import-stage failure.
+func NewNodeConversionImportError(err error) error {
+	return &NodeConversionStageError{stage: "import", marker: ErrNodeConversionImport, Err: err}
+}
+
+// NamedError pairs a stable, log-safe name with a package sentinel.
+type NamedError struct {
+	Name string
+	Err  error
+}
+
+// KnownCauseSentinels lists the sentinels the enrollment flow can surface,
+// with the names used by RedactedCause.
+func KnownCauseSentinels() []NamedError {
+	return []NamedError{
+		{"context.Canceled", context.Canceled},
+		{"context.DeadlineExceeded", context.DeadlineExceeded},
+		{"ErrBootstrapPersistence", ErrBootstrapPersistence},
+		{"ErrBootstrapDenied", ErrBootstrapDenied},
+		{"ErrNodeConversionAborted", ErrNodeConversionAborted},
+		{"ErrNodeConversionDenied", ErrNodeConversionDenied},
+		{"ErrNodeConversionImport", ErrNodeConversionImport},
+		{"ErrNodeConversionApplyWait", ErrNodeConversionApplyWait},
+		{"ErrNodeConversionUnavailable", errNodeConversionUnavailable},
+		{"ErrInvalidDraft", ErrInvalidDraft},
+		{"ErrInvalidPrimaryURL", ErrInvalidPrimaryURL},
+		{"ErrEnrollmentIneligible", identity.ErrEnrollmentIneligible},
+		{"ErrInvalidTransition", identity.ErrInvalidTransition},
+		{"ErrGenerationMismatch", identity.ErrGenerationMismatch},
+		{"ErrIdentityNotLoaded", identity.ErrIdentityNotLoaded},
+		{"ErrIdentityNotFound", identity.ErrNotFound},
+		{"ErrApplyWaitTimeout", configuration.ErrApplyWaitTimeout},
+	}
+}
+
+// RedactedCause renders an error as matched sentinel names plus the Go type
+// chain along the Unwrap path. It never includes error text, so tokens, keys,
+// payloads or URLs inside wrapped messages cannot reach a log.
+func RedactedCause(err error, extra ...NamedError) string {
+	if err == nil {
+		return "sentinels:none|types:none"
+	}
+	var names []string
+	for _, known := range append(KnownCauseSentinels(), extra...) {
+		if known.Err != nil && errors.Is(err, known.Err) {
+			names = append(names, known.Name)
+		}
+	}
+	if len(names) == 0 {
+		names = []string{"none"}
+	}
+	var chain []string
+	current := err
+	for depth := 0; current != nil && depth < 8; depth++ {
+		chain = append(chain, fmt.Sprintf("%T", current))
+		current = errors.Unwrap(current)
+	}
+	return "sentinels:" + strings.Join(names, ",") + "|types:" + strings.Join(chain, ">")
+}
 
 // NodeConverter orchestrates the bounded archive/import/apply/identity
 // sequence. Its dependencies are ports or existing phase services; it does
@@ -145,20 +234,28 @@ func (c *NodeConverter) CanEnrollAsNode() bool {
 // Convert archives and queues the validated envelope, waits for exact
 // terminal apply success, and only then commits the local NODE role.
 func (c *NodeConverter) Convert(ctx context.Context, in NodeConversionInput) (NodeConversionResult, error) {
-	if c == nil || c.importer == nil || c.identity == nil || c.applyWaiter == nil || in.Envelope == nil {
+	if c == nil {
+		return NodeConversionResult{}, errNodeConversionUnavailable
+	}
+	if missing := c.missingDependencies(in.Envelope == nil); len(missing) > 0 {
+		c.reject("unavailable", "missing="+strings.Join(missing, ","), errNodeConversionUnavailable)
 		return NodeConversionResult{}, errNodeConversionUnavailable
 	}
 	if ctx == nil {
+		c.reject("context_done", "context=nil", context.Canceled)
 		return NodeConversionResult{}, context.Canceled
 	}
 	if err := ctx.Err(); err != nil {
+		c.reject("context_done", "", err)
 		return NodeConversionResult{}, err
 	}
 
 	// Defence in depth behind the confirm handler's per-request gate: refuse
 	// an ineligible identity before archiving or applying anything.
-	if !c.identity.Current().CanEnrollAsNode() {
-		return NodeConversionResult{}, &NodeConversionDeniedError{Cause: identity.ErrEnrollmentIneligible}
+	if current := c.identity.Current(); !current.CanEnrollAsNode() {
+		denied := &NodeConversionDeniedError{Cause: identity.ErrEnrollmentIneligible}
+		c.reject("identity_ineligible", fmt.Sprintf("role=%s key_present=%t inner=%s", current.Role, current.ClusterKeyID != nil, RedactedCause(identity.ErrEnrollmentIneligible)), denied)
+		return NodeConversionResult{}, denied
 	}
 
 	imported, err := c.importer.Import(ctx, in.Envelope, replicationsnapshot.ImporterInput{
@@ -168,7 +265,9 @@ func (c *NodeConverter) Convert(ctx context.Context, in NodeConversionInput) (No
 		ArchiveTTL:          in.ArchiveTTL,
 	})
 	if err != nil {
-		return NodeConversionResult{}, fmt.Errorf("node conversion import: %w", err)
+		wrapped := NewNodeConversionImportError(err)
+		c.reject("import_failed", "", wrapped)
+		return NodeConversionResult{}, wrapped
 	}
 	c.logger("node conversion apply queued archive=%s job=%s", imported.ArchiveID, imported.ApplyJobID)
 
@@ -177,21 +276,27 @@ func (c *NodeConverter) Convert(ctx context.Context, in NodeConversionInput) (No
 		Clock:   c.now,
 	})
 	if err != nil {
-		return NodeConversionResult{}, err
+		wrapped := &NodeConversionStageError{marker: ErrNodeConversionApplyWait, Err: err}
+		c.reject("apply_wait_failed", fmt.Sprintf("archive=%s job=%s", imported.ArchiveID, imported.ApplyJobID), wrapped)
+		return NodeConversionResult{}, wrapped
 	}
 	if terminal.Status != configuration.ApplyTerminalStatusApplied {
 		c.logger("node conversion apply terminal status=%s archive=%s job=%s", terminal.Status, imported.ArchiveID, imported.ApplyJobID)
-		return NodeConversionResult{}, &NodeConversionAbortedError{
+		aborted := &NodeConversionAbortedError{
 			Status:     terminal.Status,
 			ArchiveID:  imported.ArchiveID,
 			ApplyJobID: imported.ApplyJobID,
 		}
+		c.reject("apply_not_applied", fmt.Sprintf("status=%s failure=%s archive=%s job=%s", terminal.Status, terminalFailureReason(terminal.FailureCode), imported.ArchiveID, imported.ApplyJobID), aborted)
+		return NodeConversionResult{}, aborted
 	}
 
 	postTransition, err := c.identity.CommitNodeEnrollment(ctx, in.ClusterKeyID, in.Envelope.Transient.LeadershipGeneration)
 	if err != nil {
 		c.logger("node conversion identity transition denied archive=%s job=%s", imported.ArchiveID, imported.ApplyJobID)
-		return NodeConversionResult{}, &NodeConversionDeniedError{Cause: err}
+		denied := &NodeConversionDeniedError{Cause: err}
+		c.reject("identity_commit_denied", fmt.Sprintf("archive=%s job=%s inner=%s", imported.ArchiveID, imported.ApplyJobID, RedactedCause(err)), denied)
+		return NodeConversionResult{}, denied
 	}
 	// The node is linked again: drop the unlinked overlay that allowed this
 	// re-enrollment so a linked node is refused like any other.
@@ -213,6 +318,47 @@ func (c *NodeConverter) Convert(ctx context.Context, in NodeConversionInput) (No
 		Identity:    postTransition,
 		NodeLineage: lineage,
 	}, nil
+}
+
+// missingDependencies names the nil dependencies that make Convert refuse.
+func (c *NodeConverter) missingDependencies(envelopeMissing bool) []string {
+	var missing []string
+	if c.importer == nil {
+		missing = append(missing, "importer")
+	}
+	if c.identity == nil {
+		missing = append(missing, "identity")
+	}
+	if c.applyWaiter == nil {
+		missing = append(missing, "apply_waiter")
+	}
+	if envelopeMissing {
+		missing = append(missing, "envelope")
+	}
+	return missing
+}
+
+// terminalFailureReason projects an apply job's failure code into a log-safe
+// token. The worker stores free text there, so only known stable messages map
+// to a name; anything else is reduced to its length.
+func terminalFailureReason(code *string) string {
+	if code == nil || *code == "" {
+		return "none"
+	}
+	switch *code {
+	case "superseded by a newer import of the same snapshot":
+		return "superseded"
+	}
+	return fmt.Sprintf("unclassified(len=%d)", len(*code))
+}
+
+// reject records one redacted failure line: a stable reason code, optional
+// non-sensitive detail and the cause rendered by RedactedCause.
+func (c *NodeConverter) reject(reason, detail string, cause error) {
+	if detail != "" {
+		detail += " "
+	}
+	c.logger("node conversion rejected reason=%s %scause=%s", reason, detail, RedactedCause(cause))
 }
 
 // NodeResyncInput is one continuous-sync import for an installation that is
@@ -245,18 +391,26 @@ const nodeSyncArchiveTTL = 7 * 24 * time.Hour
 // cluster key were fixed at enrollment, and a primary that changed generation
 // needs a fresh enrollment, not a silent re-anchor.
 func (c *NodeConverter) Resync(ctx context.Context, in NodeResyncInput) (NodeResyncResult, error) {
-	if c == nil || c.importer == nil || c.identity == nil || c.applyWaiter == nil || in.Envelope == nil {
+	if c == nil {
+		return NodeResyncResult{}, errNodeConversionUnavailable
+	}
+	if missing := c.missingDependencies(in.Envelope == nil); len(missing) > 0 {
+		c.rejectResync("unavailable", "missing="+strings.Join(missing, ","), errNodeConversionUnavailable)
 		return NodeResyncResult{}, errNodeConversionUnavailable
 	}
 	if ctx == nil {
+		c.rejectResync("context_done", "context=nil", context.Canceled)
 		return NodeResyncResult{}, context.Canceled
 	}
 	if err := ctx.Err(); err != nil {
+		c.rejectResync("context_done", "", err)
 		return NodeResyncResult{}, err
 	}
 	current := c.identity.Current()
 	if current.Role != domain.TopologyRoleNode || current.ClusterKeyID == nil {
-		return NodeResyncResult{}, &NodeConversionDeniedError{Cause: identity.ErrEnrollmentIneligible}
+		denied := &NodeConversionDeniedError{Cause: identity.ErrEnrollmentIneligible}
+		c.rejectResync("resync_denied", fmt.Sprintf("role=%s key_present=%t", current.Role, current.ClusterKeyID != nil), denied)
+		return NodeResyncResult{}, denied
 	}
 	if in.ArchiveTTL <= 0 {
 		in.ArchiveTTL = nodeSyncArchiveTTL
@@ -269,6 +423,7 @@ func (c *NodeConverter) Resync(ctx context.Context, in NodeResyncInput) (NodeRes
 		ArchiveReason:       nodeSyncArchiveReason,
 	})
 	if err != nil {
+		c.rejectResync("import_failed", "", NewNodeConversionImportError(err))
 		return NodeResyncResult{}, fmt.Errorf("node resync import: %w", err)
 	}
 	terminal, err := configuration.WaitForTerminalApply(ctx, c.applyWaiter, imported.ApplyJobID, configuration.ApplyWaitOptions{
@@ -276,13 +431,24 @@ func (c *NodeConverter) Resync(ctx context.Context, in NodeResyncInput) (NodeRes
 		Clock:   c.now,
 	})
 	if err != nil {
+		c.rejectResync("apply_wait_failed", fmt.Sprintf("archive=%s job=%s", imported.ArchiveID, imported.ApplyJobID), &NodeConversionStageError{marker: ErrNodeConversionApplyWait, Err: err})
 		return NodeResyncResult{}, err
 	}
 	if terminal.Status != configuration.ApplyTerminalStatusApplied {
 		c.logger("node resync apply terminal status=%s job=%s", terminal.Status, imported.ApplyJobID)
-		return NodeResyncResult{}, &NodeConversionAbortedError{
+		aborted := &NodeConversionAbortedError{
 			Status: terminal.Status, ArchiveID: imported.ArchiveID, ApplyJobID: imported.ApplyJobID,
 		}
+		c.rejectResync("apply_not_applied", fmt.Sprintf("status=%s failure=%s archive=%s job=%s", terminal.Status, terminalFailureReason(terminal.FailureCode), imported.ArchiveID, imported.ApplyJobID), aborted)
+		return NodeResyncResult{}, aborted
 	}
 	return NodeResyncResult{ArchiveID: imported.ArchiveID, ApplyJobID: imported.ApplyJobID}, nil
+}
+
+// rejectResync is the Resync twin of reject.
+func (c *NodeConverter) rejectResync(reason, detail string, cause error) {
+	if detail != "" {
+		detail += " "
+	}
+	c.logger("node resync rejected reason=%s %scause=%s", reason, detail, RedactedCause(cause))
 }

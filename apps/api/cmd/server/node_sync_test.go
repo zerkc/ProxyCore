@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"log"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -219,5 +221,65 @@ func TestNodeSyncerFetchesWithStoredCredentialAndAcknowledges(t *testing.T) {
 	}
 	if len(store.saved) == 0 || store.saved[len(store.saved)-1].AckedHash != applied {
 		t.Fatalf("saved = %+v", store.saved)
+	}
+}
+
+type denyValidator struct{}
+
+func (denyValidator) Validate(context.Context, replicationsnapshot.Envelope) replicationsnapshot.ValidationResult {
+	return replicationsnapshot.ValidationResult{OK: false, Issues: []replicationsnapshot.ValidationIssue{{Code: "NO_KEY"}, {Code: "BAD"}}}
+}
+
+type failingResyncer struct{ err error }
+
+func (r failingResyncer) Resync(context.Context, enrollment.NodeResyncInput) (enrollment.NodeResyncResult, error) {
+	return enrollment.NodeResyncResult{}, r.err
+}
+
+func TestNodeSyncApplyLogsRedactedReasonAndCause(t *testing.T) {
+	const secret = "SECRET-pcenr2_TOKEN-payload"
+	var lines []string
+	logf := func(format string, args ...any) { lines = append(lines, fmt.Sprintf(format, args...)) }
+	service := nodeSyncTestIdentity(t)
+
+	denied := nodeSyncApply(nodeSyncDependencies{Identity: service, Validator: denyValidator{}, Converter: noopResyncer{}}, logf)
+	if err := denied(context.Background(), &replicationsnapshot.Envelope{}); err == nil {
+		t.Fatal("validator denial must fail")
+	}
+	failing := nodeSyncApply(nodeSyncDependencies{Identity: service, Validator: acceptAllValidator{},
+		Converter: failingResyncer{fmt.Errorf("resync %s: %w", secret, enrollment.ErrNodeConversionAborted)}}, logf)
+	if err := failing(context.Background(), &replicationsnapshot.Envelope{}); err == nil {
+		t.Fatal("resync failure must propagate")
+	}
+	if err := failing(context.Background(), nil); err == nil {
+		t.Fatal("nil envelope must fail")
+	}
+	out := strings.Join(lines, "\n")
+	for _, want := range []string{"reason=snapshot_denied", "issues=2", "reason=resync_failed", "ErrNodeConversionAborted", "*fmt.wrapError", "reason=envelope_nil"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("log missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, secret) || strings.Contains(out, "pcenr2_") {
+		t.Fatalf("log leaks secret:\n%s", out)
+	}
+}
+
+func TestNodeSyncerLogsCredentialLoadFailureCause(t *testing.T) {
+	store := &fakeSyncStore{state: configuration.NodeSyncState{
+		NodeSyncBinding:  configuration.NodeSyncBinding{PrimaryURL: "https://primary.example:3443", CredentialID: uuid.NewString()},
+		NodeSyncProgress: configuration.NodeSyncProgress{AppliedHash: strings.Repeat("a", 64), PrimaryHash: strings.Repeat("a", 64)},
+	}}
+	var buf bytes.Buffer
+	syncer := newNodeSyncer(nodeSyncDependencies{
+		Store: store, Identity: nodeSyncTestIdentity(t), Client: &recordingSyncClient{}, Converter: noopResyncer{},
+		Validator:      acceptAllValidator{},
+		LoadCredential: func(context.Context, string) ([]byte, error) { return nil, errors.New("vault said SECRET") },
+		Logger:         log.New(&buf, "", 0),
+	})
+	_ = syncer.RunOnce(context.Background())
+	out := buf.String()
+	if !strings.Contains(out, "credential unavailable stage=load") || !strings.Contains(out, "*errors.errorString") || strings.Contains(out, "SECRET") {
+		t.Fatalf("log = %q", out)
 	}
 }

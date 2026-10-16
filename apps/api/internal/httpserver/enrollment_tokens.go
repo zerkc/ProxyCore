@@ -238,6 +238,7 @@ func (s *Server) handleCreateEnrollmentToken(w http.ResponseWriter, r *http.Requ
 	}
 	created, err := s.enrollmentTokens.Create(r.Context(), user, route)
 	if err != nil {
+		noteCause(r.Context(), "token_create", err)
 		writeJSON(w, http.StatusConflict, map[string]any{"error": "enrollment token could not be created"})
 		return
 	}
@@ -387,6 +388,7 @@ func (s *Server) handleListEnrollmentTokens(w http.ResponseWriter, r *http.Reque
 	}
 	tokens, err := s.enrollmentTokens.List(r.Context(), user.ID)
 	if err != nil {
+		noteCause(r.Context(), "token_list", err)
 		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "enrollment tokens unavailable"})
 		return
 	}

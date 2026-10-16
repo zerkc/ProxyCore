@@ -41,6 +41,7 @@ func (s *Server) handleGetEnrollmentTrust(w http.ResponseWriter, r *http.Request
 	}
 	trust, err := store.LoadEnrollmentTLSTrust(r.Context())
 	if err != nil {
+		noteCause(r.Context(), "trust_load", err)
 		writeConfigError(w, &httpError{status: http.StatusServiceUnavailable, message: enrollmentTrustUnavailableMessage, code: "ENROLLMENT_TRUST_UNAVAILABLE"})
 		return
 	}
@@ -58,6 +59,7 @@ func (s *Server) handleDownloadEnrollmentCA(w http.ResponseWriter, r *http.Reque
 	}
 	trust, err := store.LoadEnrollmentTLSTrust(r.Context())
 	if err != nil {
+		noteCause(r.Context(), "trust_load", err)
 		writeConfigError(w, &httpError{status: http.StatusServiceUnavailable, message: enrollmentTrustUnavailableMessage, code: "ENROLLMENT_TRUST_UNAVAILABLE"})
 		return
 	}

@@ -14,6 +14,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/zerkc/ProxyCore/apps/api/internal/cluster"
+	"github.com/zerkc/ProxyCore/apps/api/internal/configuration"
 	"github.com/zerkc/ProxyCore/apps/api/internal/domain"
 	"github.com/zerkc/ProxyCore/apps/api/internal/enrollment"
 	"github.com/zerkc/ProxyCore/apps/api/internal/httpserver"
@@ -38,7 +39,7 @@ func (f *confirmFixture) withLogger(logger *log.Logger, accept httpserver.Enroll
 				return replicationsnapshot.ValidationResult{OK: true}
 			}),
 			Identity: func(context.Context) (httpserver.EnrollmentLocalIdentity, error) {
-				return httpserver.EnrollmentLocalIdentity{InstallationID: f.localInstall, NodeID: f.localNode, Role: f.localRole}, nil
+				return httpserver.EnrollmentLocalIdentity{InstallationID: f.localInstall, NodeID: f.localNode, Role: f.localRole, ClusterKeyID: f.localKeyID}, nil
 			},
 			LocalIngress:   func(context.Context) (domain.Ingress, error) { return domain.Ingress{IPv4: "192.0.2.7"}, nil },
 			Converter:      fakeConverter{f},
@@ -46,6 +47,9 @@ func (f *confirmFixture) withLogger(logger *log.Logger, accept httpserver.Enroll
 			AcceptGrant:    accept,
 			LoadClusterKEK: f.loadKEK,
 			Logger:         logger,
+			RecordSyncBinding: func(context.Context, configuration.NodeSyncBinding, string) error {
+				return f.bindErr
+			},
 		},
 	})
 }
@@ -121,4 +125,115 @@ func TestConfirmNilLoggerStillRejectsGenerically(t *testing.T) {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
 	_ = uuid.Nil
+}
+
+func TestConfirmLogsStepReasonStatusAndRedactedCauseForEveryFailure(t *testing.T) {
+	key := uuid.NewString()
+	cases := []struct {
+		name   string
+		status int
+		want   []string
+		setup  func(f *confirmFixture)
+	}{
+		{"role ineligible", http.StatusConflict, []string{"step=eligibility", "reason=role_ineligible", "role=primary-with-nodes"}, func(f *confirmFixture) {
+			f.localRole, f.localKeyID = domain.TopologyRolePrimaryWithNodes, key
+		}},
+		{"bound node not unlinked", http.StatusConflict, []string{"step=eligibility", "reason=node_not_unlinked"}, func(f *confirmFixture) {
+			f.localRole, f.localKeyID = domain.TopologyRoleNode, key
+		}},
+		{"identity mismatch", http.StatusConflict, []string{"step=identity", "reason=identity_mismatch"}, func(f *confirmFixture) {
+			f.localNode = domain.NewNodeID()
+		}},
+		{"exchange unavailable", http.StatusServiceUnavailable, []string{"step=exchange", "reason=exchange_unavailable", "ErrExchangeUnavailable"}, func(f *confirmFixture) {
+			f.exchangeErr = fmt.Errorf("dial %s: %w", f.token, syncpublication.ErrExchangeUnavailable)
+		}},
+		{"exchange rate limited", http.StatusTooManyRequests, []string{"step=exchange", "reason=exchange_rate_limited"}, func(f *confirmFixture) {
+			f.exchangeErr = fmt.Errorf("limit %s: %w", f.token, syncpublication.ErrExchangeRateLimited)
+		}},
+		{"exchange denied has cause", http.StatusConflict, []string{"step=exchange", "reason=exchange_denied", "status=409", "ErrExchangeDenied", "*fmt.wrapError"}, func(f *confirmFixture) {
+			f.exchangeErr = fmt.Errorf("primary said %s: %w", f.token, syncpublication.ErrExchangeDenied)
+		}},
+		{"accept persistence", http.StatusServiceUnavailable, []string{"step=accept", "reason=accept_persistence_failed", "ErrBootstrapPersistence"}, func(f *confirmFixture) {
+			f.acceptErrs = []error{fmt.Errorf("raw detail %s: %w", f.token, enrollment.ErrBootstrapPersistence)}
+		}},
+		{"accept denied cause", http.StatusConflict, []string{"step=accept", "reason=accept_denied", "ErrBootstrapDenied"}, func(f *confirmFixture) {
+			f.acceptErrs = []error{fmt.Errorf("raw detail %s: %w", f.token, enrollment.ErrBootstrapDenied)}
+		}},
+		{"kek load", http.StatusServiceUnavailable, []string{"step=kek_load", "reason=kek_load_failed", "*errors.errorString"}, func(f *confirmFixture) {
+			f.loadErr = errors.New("read-back failed " + f.token)
+		}},
+		{"record sync", http.StatusServiceUnavailable, []string{"step=record_sync", "reason=record_sync_failed", "*errors.errorString"}, func(f *confirmFixture) {
+			f.bindErr = errors.New("disk full " + f.token)
+		}},
+		{"convert aborted", http.StatusConflict, []string{"step=convert", "reason=convert_failed", "class=aborted", "ErrNodeConversionAborted"}, func(f *confirmFixture) {
+			f.convertErr = fmt.Errorf("apply %s: %w", f.token, enrollment.ErrNodeConversionAborted)
+		}},
+		{"convert denied", http.StatusConflict, []string{"step=convert", "class=denied"}, func(f *confirmFixture) {
+			f.convertErr = enrollment.ErrNodeConversionDenied
+		}},
+		{"convert canceled", http.StatusConflict, []string{"step=convert", "class=canceled", "context.Canceled"}, func(f *confirmFixture) {
+			f.convertErr = fmt.Errorf("x %s: %w", f.token, context.Canceled)
+		}},
+		{"convert deadline", http.StatusConflict, []string{"step=convert", "class=deadline"}, func(f *confirmFixture) {
+			f.convertErr = context.DeadlineExceeded
+		}},
+		{"convert import", http.StatusConflict, []string{"step=convert", "class=import", "ErrNodeConversionImport"}, func(f *confirmFixture) {
+			f.convertErr = enrollment.NewNodeConversionImportError(errors.New("import " + f.token))
+		}},
+		{"convert unknown", http.StatusConflict, []string{"step=convert", "class=other", "*errors.errorString"}, func(f *confirmFixture) {
+			f.convertErr = errors.New("weird " + f.token)
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newConfirmFixture(t, true)
+			var buf bytes.Buffer
+			tc.setup(f)
+			f.withLogger(log.New(&buf, "", 0), nil)
+			rec := f.confirm()
+			if rec.Code != tc.status {
+				t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+			}
+			out := buf.String()
+			for _, want := range tc.want {
+				if !strings.Contains(out, want) {
+					t.Fatalf("log missing %q:\n%s", want, out)
+				}
+			}
+			if !strings.Contains(out, fmt.Sprintf("status=%d", tc.status)) {
+				t.Fatalf("log missing status:\n%s", out)
+			}
+			for _, secret := range []string{f.token, "pcenr1_", "raw detail", "read-back failed", "disk full", "weird", "primary said"} {
+				if strings.Contains(out, secret) {
+					t.Fatalf("log leaks %q:\n%s", secret, out)
+				}
+			}
+		})
+	}
+}
+
+func TestConfirmLogsSuccessLine(t *testing.T) {
+	f := newConfirmFixture(t, true)
+	var buf bytes.Buffer
+	f.withLogger(log.New(&buf, "", 0), nil)
+	if rec := f.confirm(); rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	out := buf.String()
+	if !strings.Contains(out, "enrollment confirm committed role=node generation=1") || strings.Contains(out, f.token) {
+		t.Fatalf("log = %s", out)
+	}
+}
+
+func TestConfirmLogsNonCauseRejections(t *testing.T) {
+	f := newConfirmFixture(t, true)
+	var buf bytes.Buffer
+	f.withLogger(log.New(&buf, "", 0), nil)
+	f.cache.DeleteByID(f.draftID)
+	if rec := f.confirm(); rec.Code != http.StatusGone {
+		t.Fatalf("status=%d", rec.Code)
+	}
+	if out := buf.String(); !strings.Contains(out, "step=draft_lookup") || !strings.Contains(out, "reason=draft_expired") || !strings.Contains(out, "status=410") {
+		t.Fatalf("log = %s", out)
+	}
 }

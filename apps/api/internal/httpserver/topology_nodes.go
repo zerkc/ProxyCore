@@ -62,6 +62,7 @@ func (s *Server) handleUnlinkNode(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, configuration.ErrEnrolledNodeNotFound):
 		writeJSON(w, http.StatusNotFound, map[string]any{"error": "node not found"})
 	case err != nil:
+		noteCause(r.Context(), "node_unlink", err)
 		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "node unlink unavailable"})
 	default:
 		writeJSON(w, http.StatusOK, nodeUnlinkResponse{NodeID: nodeID, UnlinkedAt: unlinkedAt.UTC()})
@@ -115,6 +116,7 @@ func (s *Server) handleListNodes(w http.ResponseWriter, r *http.Request) {
 	}
 	records, err := s.nodeLister.ListEnrolledNodes(r.Context())
 	if err != nil {
+		noteCause(r.Context(), "node_list", err)
 		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "node list unavailable"})
 		return
 	}

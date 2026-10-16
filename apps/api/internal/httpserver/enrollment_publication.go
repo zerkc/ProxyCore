@@ -89,6 +89,7 @@ func (h *EnrollmentSnapshotPublicationHandler) ServeHTTP(w http.ResponseWriter, 
 	}
 	current, err := h.identity.SnapshotPublicationIdentity()
 	if err != nil {
+		noteCause(r.Context(), "publication_identity", err)
 		writeSnapshotPublicationError(w, http.StatusNotFound)
 		return
 	}
@@ -137,6 +138,7 @@ func (h *EnrollmentSnapshotPublicationHandler) ServeHTTP(w http.ResponseWriter, 
 		recordNodeHeartbeat(r.Context(), h.heartbeat, state.principalNodeID, r)
 	}
 	if err != nil {
+		noteCause(r.Context(), "publish", err)
 		switch {
 		case state.revoked && state.unlinked:
 			writeSnapshotPublicationUnlinked(w)

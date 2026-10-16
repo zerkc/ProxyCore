@@ -165,6 +165,7 @@ func (h *EnrollmentSnapshotByTokenHandler) readSnapshot(ctx context.Context, tok
 
 	material, err := h.clusterKeyLoader(ctx)
 	if err != nil || material == nil {
+		noteCause(ctx, "cluster_key_load", err)
 		return nil, ErrSnapshotByTokenUnavailable
 	}
 	defer material.Destroy()
@@ -197,6 +198,7 @@ func (h *EnrollmentSnapshotByTokenHandler) readSnapshot(ctx context.Context, tok
 		case errors.Is(err, ErrSnapshotByTokenDenied):
 			return nil, ErrSnapshotByTokenDenied
 		default:
+			noteCause(ctx, "read_publication", err)
 			return nil, ErrSnapshotByTokenUnavailable
 		}
 	}

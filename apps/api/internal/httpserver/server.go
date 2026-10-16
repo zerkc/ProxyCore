@@ -135,7 +135,7 @@ func New(cfg config.Config, logger *log.Logger, opts ...Option) *Server {
 }
 
 func (s *Server) Handler() http.Handler {
-	return s.mux
+	return RequestLogMiddleware(s.log, s.mux)
 }
 
 // identityService returns the wired identity service, or nil if the server
