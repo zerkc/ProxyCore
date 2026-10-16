@@ -121,6 +121,24 @@ func (s *SQLiteKeyStore) loadByID(ctx context.Context, q sqliteKeyQuerier, id uu
 	return s.unwrap.decrypt(id, purpose, wrapped, version)
 }
 
+// loadByIDAnyState reads the row with the given id whether or not it is
+// retired. found=false means no row; retired reports retired_at being set.
+func (s *SQLiteKeyStore) loadByIDAnyState(ctx context.Context, q sqliteKeyQuerier, id uuid.UUID) (material KeyMaterial, retired, found bool, err error) {
+	var purpose, wrapped string
+	var version int
+	var retiredAt sql.NullString
+	scanErr := q.QueryRowContext(ctx, `select purpose, wrapped_kek, wrapping_key_version, retired_at
+		from cluster_keys where id = ?`, id.String()).Scan(&purpose, &wrapped, &version, &retiredAt)
+	if errors.Is(scanErr, sql.ErrNoRows) {
+		return KeyMaterial{}, false, false, nil
+	}
+	if scanErr != nil {
+		return KeyMaterial{}, false, true, ErrClusterKeyDenied
+	}
+	material, err = s.unwrap.decrypt(id, purpose, wrapped, version)
+	return material, retiredAt.Valid, true, err
+}
+
 // loadOldest reads the oldest unretired KEK. found=false means no active row.
 func (s *SQLiteKeyStore) loadOldest(ctx context.Context, q sqliteKeyQuerier) (material KeyMaterial, found bool, err error) {
 	var idText, purpose, wrapped string

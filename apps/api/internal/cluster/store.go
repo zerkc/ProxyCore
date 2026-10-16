@@ -17,8 +17,25 @@ const (
 
 var (
 	ErrClusterKeyDenied = errors.New("cluster key denied")
-	clusterKeyRedacted  = "[cluster key material redacted]"
+
+	// Causes of an ImportInWrite denial. Each satisfies
+	// errors.Is(err, ErrClusterKeyDenied) so existing callers keep working,
+	// and carries no key material or row identifiers.
+	ErrClusterKeyMaterialMismatch = clusterKeyDenial("active cluster key id holds different material")
+	ErrClusterKeyRetiredMismatch  = clusterKeyDenial("retired cluster key id holds different material")
+	ErrClusterKeyUnwrapFailed     = clusterKeyDenial("stored cluster key cannot be unwrapped")
+	ErrClusterKeyInsertFailed     = clusterKeyDenial("cluster key insert failed")
+
+	clusterKeyRedacted = "[cluster key material redacted]"
 )
+
+// clusterKeyDenial is a cause-specific denial that still matches
+// ErrClusterKeyDenied under errors.Is.
+type clusterKeyDenial string
+
+func (e clusterKeyDenial) Error() string { return "cluster key denied: " + string(e) }
+
+func (e clusterKeyDenial) Is(target error) bool { return target == ErrClusterKeyDenied }
 
 // KeyMaterial owns one plaintext cluster KEK and must be destroyed by its
 // caller as soon as the bootstrap envelope has been sealed.
