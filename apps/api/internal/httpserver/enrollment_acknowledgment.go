@@ -185,6 +185,7 @@ func (h *EnrollmentSnapshotAcknowledgementHandler) ServeHTTP(w http.ResponseWrit
 	}
 	current, err := h.identity.SnapshotPublicationIdentity()
 	if err != nil {
+		noteCause(r.Context(), "ack_identity", err)
 		writeSnapshotAcknowledgementError(w, http.StatusServiceUnavailable)
 		return
 	}
@@ -218,6 +219,7 @@ func (h *EnrollmentSnapshotAcknowledgementHandler) ServeHTTP(w http.ResponseWrit
 		err = h.recordThroughPublication(r.Context(), request.NodeID, request.ContentHash, appliedAt, h.now().UTC(), credentialID, canonicalBearer, authenticate)
 	}
 	if err != nil {
+		noteCause(r.Context(), "ack_record", err)
 		writeSnapshotAcknowledgementStoreError(w, err, state)
 		return
 	}
@@ -246,6 +248,7 @@ func (h *EnrollmentSnapshotAcknowledgementHandler) recordThroughPublication(
 		Authenticate:        authenticate,
 	})
 	if err != nil {
+		noteCause(ctx, "ack_read_publication", err)
 		return configuration.ErrSnapshotAcknowledgementDenied
 	}
 	if publication.Principal.NodeID != nodeID || publication.Snapshot.ContentHash != contentHash ||

@@ -162,6 +162,7 @@ func (h *EnrollmentGrantExchangeHandler) ServeHTTP(w http.ResponseWriter, r *htt
 	}
 	response, err := h.issuer.IssueGrant(r.Context(), request)
 	if err != nil || len(response.SealedBootstrapPayload) == 0 {
+		noteCause(r.Context(), "issue_grant", err)
 		writeGrantExchangeStatus(w, http.StatusUnauthorized, grantExchangeDenied)
 		return
 	}

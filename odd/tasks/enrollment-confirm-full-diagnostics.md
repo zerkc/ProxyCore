@@ -21,9 +21,13 @@ After v0.6.4 a real node was linked (TLS listener went ineligible at 05:50:19) y
 - [x] T2 redacted cause class for dependency errors
 - [x] T3 NodeConverter.Convert step logging
 - [x] T4 tests incl. no-leak checks
+- [x] T5 request logging middleware for every endpoint + endpoint cause audit
+- [ ] T6 node sync cycle and Resync redacted cause logging
 
 ## Route
 Delegated direct: one writer (httpserver + enrollment packages, 2+ non-trivial files).
 
 ## Progress / evidence
 - T1-T4 (commit: see git log "fix(enrollment): log reason, step and redacted cause at every workflow exit"): every reject goes through `reject(op, step, reason, status, message, detail)` in enrollment_workflow.go; `enrollment.RedactedCause` (sentinel names + %T chain, never err.Error()) is shared; NodeConverter.Convert logs `node conversion rejected reason=... cause=...` on every exit; typed stage errors (`ErrNodeConversionImport`, `ErrNodeConversionApplyWait`, `ErrNodeConversionUnavailable`) let the handler log `class=`. Tests: enrollment_workflow_log_test.go, node_converter_log_test.go (RED observed before implementation, GREEN after, no-leak assertions). HTTP responses unchanged.
+
+- T5: `httpserver/request_log.go` adds `RequestLogMiddleware` (wired in `Server.Handler()`): `http <METHOD> <route> status= dur= bytes= [err="..."] [cause=[...]]`; route = mux pattern or segment-redacted path, no query/headers/bodies, error text truncated to 200 and secret-redacted, health/static only on >=400, panics recovered and logged by type. `noteCause(ctx, step, err)` attaches a redacted sentinel+type-chain cause to that line; added at handlers that hid the cause: enrollment_tokens.go, topology_nodes.go, enrollment_trust.go, enrollment_grant_exchange.go, enrollment_publication.go, enrollment_acknowledgment.go, enrollment_snapshot_by_token.go (one-line additions, responses unchanged). Config/user/certificate handlers already forward the error text in the response so the middleware captures it. Tests: request_log_test.go (table, passthrough, panic, real router), request_log_internal_test.go.
