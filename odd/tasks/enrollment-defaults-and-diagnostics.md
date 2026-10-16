@@ -22,7 +22,7 @@ Make primary enrollment usable from the UI and diagnosable when it fails on a re
 
 ## Tasks
 - [x] T1 backend defaults from persisted ingress (+ Go test)
-- [ ] T2 UI warning guard (+ UI test)
+- [x] T2 UI warning guard (+ UI test)
 - [ ] T3 diagnostic reason codes (+ Go tests asserting no secret leakage)
 - [ ] T4 e2e assertion
 
@@ -31,6 +31,7 @@ Delegated direct: one writer (2+ non-trivial files across Go, TS, shell).
 
 ## Progress / evidence
 - T1: RED observed (primaryUrl empty with persisted 198.51.100.7), GREEN after gatewayIngress(ctx); httpserver tests pass; two legacy subtests moved to a no-persisted-ingress backend wrapper.
+- T2: RED observed (warning shown with empty primaryUrl), GREEN after guard; EnrollmentTokenPanel.test.tsx 23 passed.
 
 ## Next step
 Writer implements T1-T4; focused verification; work-unit commits on this branch.

@@ -320,6 +320,13 @@ describe("EnrollmentTokenPanel", () => {
       expect(host.textContent).toContain("enrollment hostnames");
     });
 
+    it("does not warn about host coverage when there is no default address", async () => {
+      queueFetch(jsonResponse([]), defaultsResponse({ primaryUrl: "", gatewayIPv4: "", hostCovered: false }));
+      const container = await mount(panel());
+      const warnings = container.findAll((element) => element.getAttribute("data-testid") === "enrollment-token-host-warning");
+      expect(warnings.length).toBe(0);
+    });
+
     const errorCases: Array<[string, number, string]> = [
       ["ENROLLMENT_TRUST_NOT_READY", 409, "enrollment trust panel"],
       ["ENROLLMENT_TRUST_UNAVAILABLE", 503, "temporarily unavailable"],
