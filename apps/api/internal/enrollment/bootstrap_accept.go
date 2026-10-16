@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
+	"log"
 	"time"
 
 	"github.com/google/uuid"
@@ -45,6 +46,9 @@ type BootstrapAcceptorOptions struct {
 	Keys            *cluster.SQLiteKeyStore
 	MasterKeyBase64 string
 	Now             func() time.Time
+	// Logger receives one redacted reason-code line per rejection. Nil is a
+	// no-op. Only stable reason codes are ever logged, never payload material.
+	Logger *log.Logger
 }
 
 // BootstrapAcceptor opens a sealed bootstrap payload and persists the cluster
@@ -55,6 +59,7 @@ type BootstrapAcceptor struct {
 	keys   *cluster.SQLiteKeyStore
 	master string
 	now    func() time.Time
+	logger *log.Logger
 
 	// Test seams; nil in production.
 	afterKEKWrite  func() error
@@ -67,7 +72,16 @@ func NewBootstrapAcceptor(opts BootstrapAcceptorOptions) *BootstrapAcceptor {
 	if now == nil {
 		now = time.Now
 	}
-	return &BootstrapAcceptor{db: opts.DB, writer: opts.Writer, keys: opts.Keys, master: opts.MasterKeyBase64, now: now}
+	return &BootstrapAcceptor{db: opts.DB, writer: opts.Writer, keys: opts.Keys, master: opts.MasterKeyBase64, now: now, logger: opts.Logger}
+}
+
+// deny logs a stable reason code (never payload material) and returns
+// ErrBootstrapDenied.
+func (a *BootstrapAcceptor) deny(reason string) error {
+	if a != nil && a.logger != nil {
+		a.logger.Printf("enrollment bootstrap rejected reason=%s", reason)
+	}
+	return ErrBootstrapDenied
 }
 
 // Accept verifies payloadHash (hex SHA-256 of sealed), opens the envelope with
@@ -77,15 +91,15 @@ func NewBootstrapAcceptor(opts BootstrapAcceptorOptions) *BootstrapAcceptor {
 // zeroed before return, including on error paths.
 func (a *BootstrapAcceptor) Accept(ctx context.Context, recipient *BootstrapRecipient, binding BootstrapBinding, sealed []byte, payloadHash string) (AcceptedBootstrap, error) {
 	if a == nil || a.db == nil || a.writer == nil || a.keys == nil || a.master == "" || ctx == nil || recipient == nil || len(sealed) == 0 {
-		return AcceptedBootstrap{}, ErrBootstrapDenied
+		return AcceptedBootstrap{}, a.deny("invalid_input")
 	}
 	sum := sha256.Sum256(sealed)
 	if subtle.ConstantTimeCompare([]byte(hex.EncodeToString(sum[:])), []byte(payloadHash)) != 1 {
-		return AcceptedBootstrap{}, ErrBootstrapDenied
+		return AcceptedBootstrap{}, a.deny("hash_mismatch")
 	}
 	grant, err := recipient.OpenBootstrap(binding, sealed)
 	if err != nil {
-		return AcceptedBootstrap{}, ErrBootstrapDenied
+		return AcceptedBootstrap{}, a.deny("open_failed")
 	}
 	defer grant.Destroy()
 	if a.onGrant != nil {
@@ -93,15 +107,15 @@ func (a *BootstrapAcceptor) Accept(ctx context.Context, recipient *BootstrapReci
 	}
 	expiresAt := time.Unix(grant.Metadata.ExpiresAtUnix, 0).UTC()
 	if !expiresAt.After(a.now()) {
-		return AcceptedBootstrap{}, ErrBootstrapDenied
+		return AcceptedBootstrap{}, a.deny("grant_expired")
 	}
 	credentialID, err := uuid.Parse(grant.Metadata.CredentialID)
 	if err != nil {
-		return AcceptedBootstrap{}, ErrBootstrapDenied
+		return AcceptedBootstrap{}, a.deny("bad_credential_id")
 	}
 	keyID, err := uuid.Parse(grant.Metadata.ClusterKeyID)
 	if err != nil || keyID == uuid.Nil || credentialID == uuid.Nil {
-		return AcceptedBootstrap{}, ErrBootstrapDenied
+		return AcceptedBootstrap{}, a.deny("bad_key_id")
 	}
 
 	credential := grant.Secrets.NodeCredential.CopyBytes()
@@ -124,8 +138,14 @@ func (a *BootstrapAcceptor) Accept(ctx context.Context, recipient *BootstrapReci
 		return a.putCredentialInWrite(v, credentialID.String(), credential)
 	})
 	if err != nil {
-		if errors.Is(err, cluster.ErrClusterKeyDenied) || errors.Is(err, ErrBootstrapDenied) {
-			return AcceptedBootstrap{}, ErrBootstrapDenied
+		switch {
+		case errors.Is(err, cluster.ErrClusterKeyDenied):
+			return AcceptedBootstrap{}, a.deny("key_conflict")
+		case errors.Is(err, ErrBootstrapDenied):
+			return AcceptedBootstrap{}, a.deny("credential_conflict")
+		}
+		if a.logger != nil {
+			a.logger.Printf("enrollment bootstrap rejected reason=persist_failed")
 		}
 		return AcceptedBootstrap{}, ErrBootstrapPersistence
 	}

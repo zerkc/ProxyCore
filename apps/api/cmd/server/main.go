@@ -192,6 +192,7 @@ func runServerWithNodeConverter(ctx context.Context, cfg config.Config, logger *
 	if workflowReady {
 		workflow = httpserver.EnrollmentWorkflowHandlerOptions{
 			Cache:    draftCache,
+			Logger:   logger,
 			Identity: localEnrollmentIdentityProvider(identitySvc),
 			LocalIngress: func(context.Context) (domain.Ingress, error) {
 				return domain.Ingress{IPv4: cfg.ProxyIngressIPv4, IPv6: cfg.ProxyIngressIPv6}, nil
@@ -592,6 +593,7 @@ func wireEnrollmentGrantExchange(workflow *httpserver.EnrollmentWorkflowHandlerO
 	})
 	acceptor := enrollment.NewBootstrapAcceptor(enrollment.BootstrapAcceptorOptions{
 		DB: stack.db, Writer: stack.writer, Keys: stack.keys, MasterKeyBase64: masterKeyBase64,
+		Logger: workflow.Logger,
 	})
 	keys := stack.keys
 	workflow.ExchangeGrant = client.Exchange

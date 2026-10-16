@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -58,6 +59,9 @@ type EnrollmentWorkflowHandlerOptions struct {
 	RecordPrimaryTrust EnrollmentPrimaryTrustRecorder
 	ArchiveTTL         time.Duration
 	ApplyWaitTimeout   time.Duration
+	// Logger receives redacted reason codes for confirm rejections. Nil is a
+	// no-op; nothing but stable codes is ever logged.
+	Logger *log.Logger
 }
 
 type enrollmentDraftRequest struct {

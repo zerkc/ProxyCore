@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -161,6 +162,7 @@ type enrollmentWorkflowHandler struct {
 	archiveTTL       time.Duration
 	applyWaitTimeout time.Duration
 	certificate      IdentityProofCertificateProvider
+	logger           *log.Logger
 	// trustedTransport is set only for the main API mount, where an owner
 	// session authenticates the caller and TLS terminates at a proxy. The
 	// dedicated enrollment listener never sets it.
@@ -181,7 +183,15 @@ func newEnrollmentWorkflowHandler(opts EnrollmentWorkflowHandlerOptions, certifi
 		validator: opts.Validator, identity: opts.Identity, localIngress: opts.LocalIngress,
 		converter: opts.Converter, exchangeGrant: opts.ExchangeGrant, acceptGrant: opts.AcceptGrant,
 		loadClusterKEK: opts.LoadClusterKEK, recordSync: opts.RecordSyncBinding, recordTrust: opts.RecordPrimaryTrust, archiveTTL: archiveTTL, applyWaitTimeout: applyWaitTimeout,
-		certificate: certificate,
+		certificate: certificate, logger: opts.Logger,
+	}
+}
+
+// logReject records a stable reason code for a confirm rejection. It never
+// takes error text, tokens or payloads, so nothing sensitive can reach the log.
+func (h *enrollmentWorkflowHandler) logReject(reason string) {
+	if h.logger != nil {
+		h.logger.Printf("enrollment confirm rejected reason=%s", reason)
 	}
 }
 
@@ -418,6 +428,7 @@ func (h *enrollmentWorkflowHandler) handleConfirm(w http.ResponseWriter, r *http
 	}
 	binding, exchangeRequest, ok := h.confirmBinding(request.DraftID, draft, local, &recipient)
 	if !ok {
+		h.logReject("binding_invalid")
 		writeIdentityProofError(w, http.StatusConflict, "enrollment grant denied")
 		return
 	}
@@ -440,12 +451,14 @@ func (h *enrollmentWorkflowHandler) handleConfirm(w http.ResponseWriter, r *http
 			writeIdentityProofError(w, http.StatusServiceUnavailable, "enrollment workflow unavailable")
 			return
 		}
+		h.logReject("accept_denied")
 		writeIdentityProofError(w, http.StatusConflict, "enrollment grant denied")
 		return
 	}
 	// 3. strict validation with the KEK the grant just delivered
 	keyID, err := uuid.Parse(accepted.ClusterKeyID)
 	if err != nil {
+		h.logReject("cluster_key_id_invalid")
 		writeIdentityProofError(w, http.StatusConflict, "enrollment grant denied")
 		return
 	}
@@ -583,6 +596,14 @@ func (h *enrollmentWorkflowHandler) writeExchangeFailure(w http.ResponseWriter, 
 	case errors.Is(err, syncpublication.ErrExchangeUnavailable):
 		writeIdentityProofError(w, http.StatusServiceUnavailable, "enrollment workflow unavailable")
 	default: // denied, invalid and anything unknown fail closed
+		switch {
+		case errors.Is(err, syncpublication.ErrExchangeDenied):
+			h.logReject("exchange_denied")
+		case errors.Is(err, syncpublication.ErrExchangeInvalid):
+			h.logReject("exchange_invalid")
+		default:
+			h.logReject("exchange_unknown")
+		}
 		h.cache.DeleteByID(draftID)
 		writeIdentityProofError(w, http.StatusConflict, "enrollment grant denied")
 	}
