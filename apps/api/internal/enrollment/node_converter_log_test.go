@@ -144,3 +144,78 @@ func TestNodeConverterLogsIdentityCommitDenialWithoutLeaking(t *testing.T) {
 		t.Fatalf("log leaks the cluster key id: %s", out)
 	}
 }
+
+func TestNodeConverterResyncLogsEveryFailureClass(t *testing.T) {
+	code := "worker said " + converterSecret
+	key := uuid.New()
+	cases := []struct {
+		name  string
+		build func(t *testing.T, sink *converterLogSink) (*NodeConverter, NodeResyncInput)
+		want  []string
+	}{
+		{"denied for standalone role", func(t *testing.T, sink *converterLogSink) (*NodeConverter, NodeResyncInput) {
+			service := newConverterIdentityService(t, domain.TopologyRoleStandalone)
+			c := newTestNodeConverter(&converterArchiveFake{}, &converterEnqueuerFake{}, service, &converterWaiterFake{})
+			c.logger = sink.logf
+			return c, NodeResyncInput{Envelope: converterEnvelope(t)}
+		}, []string{"node resync rejected", "reason=resync_denied", "role=standalone", "key_present=false"}},
+		{"unavailable", func(t *testing.T, sink *converterLogSink) (*NodeConverter, NodeResyncInput) {
+			c := NewNodeConverter(NodeConverterOptions{Logger: sink.logf})
+			return c, NodeResyncInput{Envelope: converterEnvelope(t)}
+		}, []string{"reason=unavailable", "missing=importer,identity,apply_waiter"}},
+		{"import failed", func(t *testing.T, sink *converterLogSink) (*NodeConverter, NodeResyncInput) {
+			service := newConverterIdentityServiceWithKey(t, domain.TopologyRoleNode, &key)
+			enq := &converterEnqueuerFake{}
+			archive := &failingArchive{}
+			c := NewNodeConverter(NodeConverterOptions{
+				Importer: replicationsnapshot.NewImporter(archive, enq, func() time.Time { return time.Now() }),
+				Archive:  archive, Identity: service, ApplyWaiter: &converterWaiterFake{}, ApplyEnqueuer: enq, Logger: sink.logf,
+			})
+			return c, NodeResyncInput{Envelope: converterEnvelope(t), LocalNodeID: service.Current().NodeID}
+		}, []string{"reason=import_failed", "ErrNodeConversionImport"}},
+		{"apply wait timeout", func(t *testing.T, sink *converterLogSink) (*NodeConverter, NodeResyncInput) {
+			service := newConverterIdentityServiceWithKey(t, domain.TopologyRoleNode, &key)
+			waitErr := &syncapply.ApplyWaitTimeoutError{Last: syncapply.ApplyJobTerminal{Status: "running"}}
+			c := newTestNodeConverter(&converterArchiveFake{}, &converterEnqueuerFake{}, service, &converterWaiterFake{err: waitErr})
+			c.logger = sink.logf
+			return c, NodeResyncInput{Envelope: converterEnvelope(t), LocalNodeID: service.Current().NodeID}
+		}, []string{"reason=apply_wait_failed", "ErrApplyWaitTimeout"}},
+		{"apply terminal failed with free-text code", func(t *testing.T, sink *converterLogSink) (*NodeConverter, NodeResyncInput) {
+			service := newConverterIdentityServiceWithKey(t, domain.TopologyRoleNode, &key)
+			c := newTestNodeConverter(&converterArchiveFake{}, &converterEnqueuerFake{}, service, &converterWaiterFake{
+				statuses: []syncapply.ApplyJobTerminal{{Status: "failed", FailureCode: &code}},
+			})
+			c.logger = sink.logf
+			return c, NodeResyncInput{Envelope: converterEnvelope(t), LocalNodeID: service.Current().NodeID}
+		}, []string{"reason=apply_not_applied", "status=failed", "failure=unclassified(len="}},
+		{"apply terminal superseded", func(t *testing.T, sink *converterLogSink) (*NodeConverter, NodeResyncInput) {
+			service := newConverterIdentityServiceWithKey(t, domain.TopologyRoleNode, &key)
+			known := "superseded by a newer import of the same snapshot"
+			c := newTestNodeConverter(&converterArchiveFake{}, &converterEnqueuerFake{}, service, &converterWaiterFake{
+				statuses: []syncapply.ApplyJobTerminal{{Status: "failed", FailureCode: &known}},
+			})
+			c.logger = sink.logf
+			return c, NodeResyncInput{Envelope: converterEnvelope(t), LocalNodeID: service.Current().NodeID}
+		}, []string{"failure=superseded"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			sink := &converterLogSink{}
+			c, in := tc.build(t, sink)
+			if _, err := c.Resync(context.Background(), in); err == nil {
+				t.Fatal("Resync must fail")
+			}
+			out := sink.text()
+			for _, want := range tc.want {
+				if !strings.Contains(out, want) {
+					t.Fatalf("log missing %q:\n%s", want, out)
+				}
+			}
+			for _, secret := range []string{converterSecret, "worker said", "disk said", key.String()} {
+				if strings.Contains(out, secret) {
+					t.Fatalf("log leaks %q:\n%s", secret, out)
+				}
+			}
+		})
+	}
+}

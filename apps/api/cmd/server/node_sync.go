@@ -80,6 +80,7 @@ func newNodeSyncer(deps nodeSyncDependencies) *syncpublication.NodeSyncer {
 	withBearer := func(ctx context.Context, credentialID string, use func(bearer []byte) error) error {
 		secret, err := deps.LoadCredential(ctx, credentialID)
 		if err != nil {
+			logf("node sync credential unavailable stage=load cause=%s", enrollment.RedactedCause(err))
 			// No usable local credential: the node cannot authenticate and the
 			// only remedy is a fresh enrollment.
 			return syncpublication.ErrSnapshotClientUnauthorized
@@ -87,6 +88,7 @@ func newNodeSyncer(deps nodeSyncDependencies) *syncpublication.NodeSyncer {
 		defer clear(secret)
 		credential, err := syncpublication.NewNodeCredential(credentialID, secret)
 		if err != nil {
+			logf("node sync credential unavailable stage=build cause=%s", enrollment.RedactedCause(err))
 			return syncpublication.ErrSnapshotClientUnauthorized
 		}
 		defer credential.Destroy()
@@ -116,26 +118,7 @@ func newNodeSyncer(deps nodeSyncDependencies) *syncpublication.NodeSyncer {
 			})
 			return result, err
 		},
-		Apply: func(ctx context.Context, envelope *replicationsnapshot.Envelope) error {
-			if envelope == nil {
-				return errNodeSyncSnapshotDenied
-			}
-			// Same gate as enrollment confirm: the node's own KEK must open
-			// every replicated secret before anything is written.
-			if result := deps.Validator.Validate(ctx, *envelope); !result.OK || len(result.Issues) != 0 {
-				return errNodeSyncSnapshotDenied
-			}
-			current := deps.Identity.Current()
-			var ingress domain.Ingress
-			if deps.Ingress != nil {
-				ingress = deps.Ingress()
-			}
-			_, err := deps.Converter.Resync(ctx, enrollment.NodeResyncInput{
-				Envelope: envelope, LocalNodeID: current.NodeID, LocalInstallId: current.InstallationID,
-				LocalIngress: ingress, ApplyWaitTimeout: nodeSyncApplyWaitBudget,
-			})
-			return err
-		},
+		Apply: nodeSyncApply(deps, logf),
 		Acknowledge: func(ctx context.Context, state configuration.NodeSyncState, contentHash string, appliedAt time.Time) error {
 			nodeID := string(deps.Identity.Current().NodeID)
 			return withBearer(ctx, state.CredentialID, func(bearer []byte) error {
@@ -143,4 +126,36 @@ func newNodeSyncer(deps nodeSyncDependencies) *syncpublication.NodeSyncer {
 			})
 		},
 	})
+}
+
+// nodeSyncApply validates one verified envelope with the node's own KEK and
+// resyncs it. Every refusal is logged with a stable reason and a redacted
+// cause (sentinel names and type chain, never error text) because the sync
+// loop itself only sees a generic apply failure.
+func nodeSyncApply(deps nodeSyncDependencies, logf func(string, ...any)) syncpublication.NodeSyncApply {
+	return func(ctx context.Context, envelope *replicationsnapshot.Envelope) error {
+		if envelope == nil {
+			logf("node sync apply rejected reason=envelope_nil")
+			return errNodeSyncSnapshotDenied
+		}
+		// Same gate as enrollment confirm: the node's own KEK must open
+		// every replicated secret before anything is written.
+		if result := deps.Validator.Validate(ctx, *envelope); !result.OK || len(result.Issues) != 0 {
+			logf("node sync apply rejected reason=snapshot_denied ok=%t issues=%d", result.OK, len(result.Issues))
+			return errNodeSyncSnapshotDenied
+		}
+		current := deps.Identity.Current()
+		var ingress domain.Ingress
+		if deps.Ingress != nil {
+			ingress = deps.Ingress()
+		}
+		_, err := deps.Converter.Resync(ctx, enrollment.NodeResyncInput{
+			Envelope: envelope, LocalNodeID: current.NodeID, LocalInstallId: current.InstallationID,
+			LocalIngress: ingress, ApplyWaitTimeout: nodeSyncApplyWaitBudget,
+		})
+		if err != nil {
+			logf("node sync apply rejected reason=resync_failed cause=%s", enrollment.RedactedCause(err))
+		}
+		return err
+	}
 }

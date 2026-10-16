@@ -3,7 +3,9 @@ package sync
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math/rand/v2"
+	"strings"
 	gosync "sync"
 	"time"
 
@@ -98,6 +100,9 @@ type NodeSyncer struct {
 
 	mu        gosync.Mutex
 	nextDelay time.Duration
+
+	diagMu gosync.Mutex
+	diag   string
 }
 
 func NewNodeSyncer(opts NodeSyncOptions) *NodeSyncer {
@@ -143,7 +148,7 @@ func (s *NodeSyncer) Run(ctx context.Context) {
 		switch {
 		case err == nil:
 		case errors.As(err, &failure):
-			s.opts.Logf("node sync cycle failed: %s", failure.Code)
+			s.opts.Logf("node sync cycle failed: %s%s", failure.Code, s.takeDiagnostic())
 		}
 		if s.waitOrWake(ctx, s.delay()) != nil {
 			return
@@ -207,6 +212,7 @@ func (s *NodeSyncer) RunOnce(ctx context.Context) error {
 		return ErrNodeSyncBusy
 	}
 	defer s.run.Unlock()
+	s.takeDiagnostic() // drop a diagnostic left by an earlier uncollected cycle
 	s.setDelay(s.opts.Interval)
 
 	if s.opts.Role() != domain.TopologyRoleNode {
@@ -217,6 +223,7 @@ func (s *NodeSyncer) RunOnce(ctx context.Context) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
+		s.noteDiagnostic("store_load", err)
 		return failStore
 	}
 	if !bound {
@@ -264,6 +271,7 @@ func (s *NodeSyncer) RunOnce(ctx context.Context) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
+		s.noteDiagnostic("store_save", err)
 		return failStore
 	}
 	if failure == failUnlinked {
@@ -281,11 +289,71 @@ func (s *NodeSyncer) notifyUnlinked(unlinked bool) {
 	}
 }
 
+// noteDiagnostic records the step and redacted cause of the failure the
+// current cycle is about to return. It stores only sentinel names and the Go
+// type chain, never error text, so nothing sensitive can reach a log.
+func (s *NodeSyncer) noteDiagnostic(step string, err error) {
+	detail := " step=" + step
+	if err != nil {
+		detail += " cause=" + redactedSyncCause(err)
+	}
+	s.diagMu.Lock()
+	s.diag = detail
+	s.diagMu.Unlock()
+}
+
+func (s *NodeSyncer) takeDiagnostic() string {
+	s.diagMu.Lock()
+	defer s.diagMu.Unlock()
+	detail := s.diag
+	s.diag = ""
+	return detail
+}
+
+var nodeSyncCauseSentinels = []struct {
+	name string
+	err  error
+}{
+	{"context.Canceled", context.Canceled},
+	{"context.DeadlineExceeded", context.DeadlineExceeded},
+	{"ErrSnapshotClientUnlinked", ErrSnapshotClientUnlinked},
+	{"ErrSnapshotClientUnauthorized", ErrSnapshotClientUnauthorized},
+	{"ErrSnapshotClientGone", ErrSnapshotClientGone},
+	{"ErrSnapshotClientNotFound", ErrSnapshotClientNotFound},
+	{"ErrSnapshotClientUnavailable", ErrSnapshotClientUnavailable},
+	{"ErrSnapshotClientInvalid", ErrSnapshotClientInvalid},
+	{"ErrSnapshotClientUntrusted", ErrSnapshotClientUntrusted},
+	{"ErrNodeCredentialDenied", ErrNodeCredentialDenied},
+	{"ErrApplyWaitTimeout", configuration.ErrApplyWaitTimeout},
+	{"ErrNodeSyncUnbound", configuration.ErrNodeSyncUnbound},
+}
+
+// redactedSyncCause renders matched sentinel names plus the %T chain along
+// Unwrap. It is the sync package's twin of enrollment.RedactedCause (which
+// this package cannot import without a cycle).
+func redactedSyncCause(err error) string {
+	var names []string
+	for _, known := range nodeSyncCauseSentinels {
+		if errors.Is(err, known.err) {
+			names = append(names, known.name)
+		}
+	}
+	if len(names) == 0 {
+		names = []string{"none"}
+	}
+	var chain []string
+	for current, depth := err, 0; current != nil && depth < 8; current, depth = errors.Unwrap(current), depth+1 {
+		chain = append(chain, fmt.Sprintf("%T", current))
+	}
+	return "sentinels:" + strings.Join(names, ",") + "|types:" + strings.Join(chain, ">")
+}
+
 // cycle mutates state in memory and returns the sanitized failure, if any.
 func (s *NodeSyncer) cycle(ctx context.Context, state *configuration.NodeSyncState) *NodeSyncFailure {
 	after := state.AppliedHash
 	fetched, err := s.opts.Fetch(ctx, *state, after)
 	if err != nil {
+		s.noteDiagnostic("fetch", err)
 		return classifyNodeSyncFetchError(err)
 	}
 	if fetched.NotModified {
@@ -294,6 +362,7 @@ func (s *NodeSyncer) cycle(ctx context.Context, state *configuration.NodeSyncSta
 			hash = after
 		}
 		if hash == "" || (after != "" && hash != after) {
+			s.noteDiagnostic("not_modified_mismatch", nil)
 			return failPrimaryInvalid
 		}
 		state.PrimaryHash = hash
@@ -302,10 +371,16 @@ func (s *NodeSyncer) cycle(ctx context.Context, state *configuration.NodeSyncSta
 		}
 	} else {
 		envelope, err := replicationsnapshot.Unmarshal(fetched.Body)
-		if err != nil || envelope.VerifyHash() != nil {
+		if err != nil {
+			s.noteDiagnostic("unmarshal", err)
+			return failIntegrity
+		}
+		if hashErr := envelope.VerifyHash(); hashErr != nil {
+			s.noteDiagnostic("hash", hashErr)
 			return failIntegrity
 		}
 		if fetched.ContentHash != "" && fetched.ContentHash != envelope.ContentHash {
+			s.noteDiagnostic("hash_header_mismatch", nil)
 			return failIntegrity
 		}
 		state.PrimaryHash = envelope.ContentHash
@@ -316,9 +391,11 @@ func (s *NodeSyncer) cycle(ctx context.Context, state *configuration.NodeSyncSta
 			// Record what the primary offers before the (possibly slow) apply,
 			// so the node reports itself outdated while it is catching up.
 			if err := s.opts.Store.SaveNodeSyncProgress(ctx, state.NodeSyncProgress); err != nil && ctx.Err() == nil {
+				s.noteDiagnostic("store", err)
 				return failStore
 			}
 			if err := s.opts.Apply(ctx, &envelope); err != nil {
+				s.noteDiagnostic("apply", err)
 				return failApply
 			}
 			state.AppliedHash = envelope.ContentHash
@@ -331,6 +408,7 @@ func (s *NodeSyncer) cycle(ctx context.Context, state *configuration.NodeSyncSta
 			if errors.Is(err, ErrSnapshotClientUnlinked) {
 				return failUnlinked
 			}
+			s.noteDiagnostic("acknowledge", err)
 			return failAcknowledge
 		}
 		state.AckedHash = state.AppliedHash

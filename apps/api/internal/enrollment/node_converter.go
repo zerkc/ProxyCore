@@ -287,7 +287,7 @@ func (c *NodeConverter) Convert(ctx context.Context, in NodeConversionInput) (No
 			ArchiveID:  imported.ArchiveID,
 			ApplyJobID: imported.ApplyJobID,
 		}
-		c.reject("apply_not_applied", fmt.Sprintf("status=%s archive=%s job=%s", terminal.Status, imported.ArchiveID, imported.ApplyJobID), aborted)
+		c.reject("apply_not_applied", fmt.Sprintf("status=%s failure=%s archive=%s job=%s", terminal.Status, terminalFailureReason(terminal.FailureCode), imported.ArchiveID, imported.ApplyJobID), aborted)
 		return NodeConversionResult{}, aborted
 	}
 
@@ -338,6 +338,20 @@ func (c *NodeConverter) missingDependencies(envelopeMissing bool) []string {
 	return missing
 }
 
+// terminalFailureReason projects an apply job's failure code into a log-safe
+// token. The worker stores free text there, so only known stable messages map
+// to a name; anything else is reduced to its length.
+func terminalFailureReason(code *string) string {
+	if code == nil || *code == "" {
+		return "none"
+	}
+	switch *code {
+	case "superseded by a newer import of the same snapshot":
+		return "superseded"
+	}
+	return fmt.Sprintf("unclassified(len=%d)", len(*code))
+}
+
 // reject records one redacted failure line: a stable reason code, optional
 // non-sensitive detail and the cause rendered by RedactedCause.
 func (c *NodeConverter) reject(reason, detail string, cause error) {
@@ -377,18 +391,26 @@ const nodeSyncArchiveTTL = 7 * 24 * time.Hour
 // cluster key were fixed at enrollment, and a primary that changed generation
 // needs a fresh enrollment, not a silent re-anchor.
 func (c *NodeConverter) Resync(ctx context.Context, in NodeResyncInput) (NodeResyncResult, error) {
-	if c == nil || c.importer == nil || c.identity == nil || c.applyWaiter == nil || in.Envelope == nil {
+	if c == nil {
+		return NodeResyncResult{}, errNodeConversionUnavailable
+	}
+	if missing := c.missingDependencies(in.Envelope == nil); len(missing) > 0 {
+		c.rejectResync("unavailable", "missing="+strings.Join(missing, ","), errNodeConversionUnavailable)
 		return NodeResyncResult{}, errNodeConversionUnavailable
 	}
 	if ctx == nil {
+		c.rejectResync("context_done", "context=nil", context.Canceled)
 		return NodeResyncResult{}, context.Canceled
 	}
 	if err := ctx.Err(); err != nil {
+		c.rejectResync("context_done", "", err)
 		return NodeResyncResult{}, err
 	}
 	current := c.identity.Current()
 	if current.Role != domain.TopologyRoleNode || current.ClusterKeyID == nil {
-		return NodeResyncResult{}, &NodeConversionDeniedError{Cause: identity.ErrEnrollmentIneligible}
+		denied := &NodeConversionDeniedError{Cause: identity.ErrEnrollmentIneligible}
+		c.rejectResync("resync_denied", fmt.Sprintf("role=%s key_present=%t", current.Role, current.ClusterKeyID != nil), denied)
+		return NodeResyncResult{}, denied
 	}
 	if in.ArchiveTTL <= 0 {
 		in.ArchiveTTL = nodeSyncArchiveTTL
@@ -401,6 +423,7 @@ func (c *NodeConverter) Resync(ctx context.Context, in NodeResyncInput) (NodeRes
 		ArchiveReason:       nodeSyncArchiveReason,
 	})
 	if err != nil {
+		c.rejectResync("import_failed", "", NewNodeConversionImportError(err))
 		return NodeResyncResult{}, fmt.Errorf("node resync import: %w", err)
 	}
 	terminal, err := configuration.WaitForTerminalApply(ctx, c.applyWaiter, imported.ApplyJobID, configuration.ApplyWaitOptions{
@@ -408,13 +431,24 @@ func (c *NodeConverter) Resync(ctx context.Context, in NodeResyncInput) (NodeRes
 		Clock:   c.now,
 	})
 	if err != nil {
+		c.rejectResync("apply_wait_failed", fmt.Sprintf("archive=%s job=%s", imported.ArchiveID, imported.ApplyJobID), &NodeConversionStageError{marker: ErrNodeConversionApplyWait, Err: err})
 		return NodeResyncResult{}, err
 	}
 	if terminal.Status != configuration.ApplyTerminalStatusApplied {
 		c.logger("node resync apply terminal status=%s job=%s", terminal.Status, imported.ApplyJobID)
-		return NodeResyncResult{}, &NodeConversionAbortedError{
+		aborted := &NodeConversionAbortedError{
 			Status: terminal.Status, ArchiveID: imported.ArchiveID, ApplyJobID: imported.ApplyJobID,
 		}
+		c.rejectResync("apply_not_applied", fmt.Sprintf("status=%s failure=%s archive=%s job=%s", terminal.Status, terminalFailureReason(terminal.FailureCode), imported.ArchiveID, imported.ApplyJobID), aborted)
+		return NodeResyncResult{}, aborted
 	}
 	return NodeResyncResult{ArchiveID: imported.ArchiveID, ApplyJobID: imported.ApplyJobID}, nil
+}
+
+// rejectResync is the Resync twin of reject.
+func (c *NodeConverter) rejectResync(reason, detail string, cause error) {
+	if detail != "" {
+		detail += " "
+	}
+	c.logger("node resync rejected reason=%s %scause=%s", reason, detail, RedactedCause(cause))
 }
