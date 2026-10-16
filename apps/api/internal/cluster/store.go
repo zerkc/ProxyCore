@@ -22,7 +22,6 @@ var (
 	// errors.Is(err, ErrClusterKeyDenied) so existing callers keep working,
 	// and carries no key material or row identifiers.
 	ErrClusterKeyMaterialMismatch = clusterKeyDenial("active cluster key id holds different material")
-	ErrClusterKeyRetiredMismatch  = clusterKeyDenial("retired cluster key id holds different material")
 	ErrClusterKeyUnwrapFailed     = clusterKeyDenial("stored cluster key cannot be unwrapped")
 	ErrClusterKeyInsertFailed     = clusterKeyDenial("cluster key insert failed")
 

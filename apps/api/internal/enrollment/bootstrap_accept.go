@@ -164,8 +164,6 @@ func keyDenialReason(err error) string {
 	switch {
 	case errors.Is(err, cluster.ErrClusterKeyMaterialMismatch):
 		return "key_material_mismatch"
-	case errors.Is(err, cluster.ErrClusterKeyRetiredMismatch):
-		return "key_retired_mismatch"
 	case errors.Is(err, cluster.ErrClusterKeyUnwrapFailed):
 		return "key_unwrap_failed"
 	case errors.Is(err, cluster.ErrClusterKeyInsertFailed):

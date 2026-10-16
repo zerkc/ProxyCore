@@ -122,7 +122,6 @@ func TestImportInWriteReactivatesRetiredRowWithSameMaterial(t *testing.T) {
 }
 
 func TestImportInWriteDeniesWithSpecificCause(t *testing.T) {
-	retiredStamp := func(t *testing.T) *string { s := stampText(t, 1_700_000_100); return &s }
 	cases := []struct {
 		name    string
 		seed    func(t *testing.T, f *sqliteKeyFixture, id uuid.UUID)
@@ -132,15 +131,9 @@ func TestImportInWriteDeniesWithSpecificCause(t *testing.T) {
 		{"active different material", func(t *testing.T, f *sqliteKeyFixture, id uuid.UUID) {
 			f.seedRow(t, id, seedKey(0x43), ClusterKeyPurpose, ClusterKeyWrappingVersion, stampText(t, 1), nil)
 		}, ErrClusterKeyMaterialMismatch, false},
-		{"retired different material", func(t *testing.T, f *sqliteKeyFixture, id uuid.UUID) {
-			f.seedRow(t, id, seedKey(0x43), ClusterKeyPurpose, ClusterKeyWrappingVersion, stampText(t, 1), retiredStamp(t))
-		}, ErrClusterKeyRetiredMismatch, true},
 		{"active unwrap failure", func(t *testing.T, f *sqliteKeyFixture, id uuid.UUID) {
 			f.seedRow(t, id, seedKey(0x42), "other-purpose", ClusterKeyWrappingVersion, stampText(t, 1), nil)
 		}, ErrClusterKeyUnwrapFailed, false},
-		{"retired unwrap failure", func(t *testing.T, f *sqliteKeyFixture, id uuid.UUID) {
-			f.seedRow(t, id, seedKey(0x42), "other-purpose", ClusterKeyWrappingVersion, stampText(t, 1), retiredStamp(t))
-		}, ErrClusterKeyUnwrapFailed, true},
 		{"insert failure", func(t *testing.T, f *sqliteKeyFixture, id uuid.UUID) {
 			if _, err := f.db.Exec(`create trigger block_cluster_keys before insert on cluster_keys
 				begin select raise(abort, 'blocked'); end`); err != nil {
@@ -158,7 +151,7 @@ func TestImportInWriteDeniesWithSpecificCause(t *testing.T) {
 			if !errors.Is(err, tc.want) || !errors.Is(err, ErrClusterKeyDenied) {
 				t.Fatalf("err = %v, want %v and ErrClusterKeyDenied", err, tc.want)
 			}
-			for _, other := range []error{ErrClusterKeyMaterialMismatch, ErrClusterKeyRetiredMismatch, ErrClusterKeyUnwrapFailed, ErrClusterKeyInsertFailed} {
+			for _, other := range []error{ErrClusterKeyMaterialMismatch, ErrClusterKeyUnwrapFailed, ErrClusterKeyInsertFailed} {
 				if other != tc.want && errors.Is(err, other) {
 					t.Fatalf("err also matches %v", other)
 				}
@@ -176,12 +169,68 @@ func TestImportInWriteDeniesWithSpecificCause(t *testing.T) {
 func TestImportInWriteInvalidInputStaysPlainDenied(t *testing.T) {
 	f := newSQLiteKeyFixture(t)
 	err := f.importKey(uuid.Nil, seedKey(0x42))
-	for _, specific := range []error{ErrClusterKeyMaterialMismatch, ErrClusterKeyRetiredMismatch, ErrClusterKeyUnwrapFailed, ErrClusterKeyInsertFailed} {
+	for _, specific := range []error{ErrClusterKeyMaterialMismatch, ErrClusterKeyUnwrapFailed, ErrClusterKeyInsertFailed} {
 		if errors.Is(err, specific) {
 			t.Fatalf("invalid input matched %v", specific)
 		}
 	}
 	if !errors.Is(err, ErrClusterKeyDenied) {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestImportInWriteReplacesRetiredRowThatCannotBeTrusted(t *testing.T) {
+	retiredStamp := func(t *testing.T) *string { s := stampText(t, 1_700_000_100); return &s }
+	cases := map[string]struct {
+		purpose string
+		stored  []byte
+	}{
+		"different material": {ClusterKeyPurpose, seedKey(0x43)},
+		"unwrap failure":     {"other-purpose", seedKey(0x42)},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			f := newSQLiteKeyFixture(t)
+			id := uuid.New()
+			f.seedRow(t, id, tc.stored, tc.purpose, ClusterKeyWrappingVersion, stampText(t, 1), retiredStamp(t))
+			if err := f.importKey(id, seedKey(0x42)); err != nil {
+				t.Fatalf("ImportInWrite: %v", err)
+			}
+			if got := f.count(t, ""); got != 1 {
+				t.Fatalf("rows = %d, want 1", got)
+			}
+			if f.retiredAt(t, id) {
+				t.Fatal("replacement row is retired")
+			}
+			material, err := f.store.LoadActive(context.Background(), id)
+			if err != nil {
+				t.Fatalf("LoadActive: %v", err)
+			}
+			defer material.Destroy()
+			if !bytes.Equal(material.CopyBytes(), seedKey(0x42)) {
+				t.Fatal("replacement KEK does not match the incoming key")
+			}
+		})
+	}
+}
+
+func TestImportInWriteReplacementIsAtomic(t *testing.T) {
+	f := newSQLiteKeyFixture(t)
+	id := uuid.New()
+	retired := stampText(t, 1_700_000_100)
+	f.seedRow(t, id, seedKey(0x43), ClusterKeyPurpose, ClusterKeyWrappingVersion, stampText(t, 1), &retired)
+	if _, err := f.db.Exec(`create trigger block_cluster_keys before insert on cluster_keys
+		begin select raise(abort, 'blocked'); end`); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.importKey(id, seedKey(0x42)); !errors.Is(err, ErrClusterKeyInsertFailed) {
+		t.Fatalf("err = %v, want ErrClusterKeyInsertFailed", err)
+	}
+	if got := f.count(t, "where retired_at is not null"); got != 1 {
+		t.Fatalf("retired rows = %d, want 1 (delete must roll back)", got)
+	}
+	var wrapped string
+	if err := f.db.QueryRow(`select wrapped_kek from cluster_keys where id = ?`, id.String()).Scan(&wrapped); err != nil {
+		t.Fatal(err)
 	}
 }

@@ -167,17 +167,40 @@ func TestBootstrapAcceptorLogsConflicts(t *testing.T) {
 		}
 		assertRedacted(t, buf.String(), sealed2, hash2)
 	})
-	t.Run("key retired mismatch", func(t *testing.T) {
+	t.Run("retired row with different material is replaced", func(t *testing.T) {
 		f := newAcceptFixture(t)
 		f.seedKeyRow(t, bytes.Repeat([]byte{0x55}, 32), true, "")
 		buf := f.captureLog()
 		sealed, hash := f.seal(t, f.binding, f.now.Add(time.Hour))
-		_, err := f.acceptor.Accept(ctx, &f.recipient, f.binding, sealed, hash)
-		if !errors.Is(err, ErrBootstrapDenied) || !strings.Contains(buf.String(), "reason=key_retired_mismatch") {
-			t.Fatalf("err=%v log=%q", err, buf.String())
+		accepted, err := f.acceptor.Accept(ctx, &f.recipient, f.binding, sealed, hash)
+		if err != nil {
+			t.Fatalf("Accept: %v log=%q", err, buf.String())
 		}
-		if got := f.count(t, "select count(*) from cluster_keys where retired_at is not null"); got != 1 {
-			t.Fatalf("retired rows = %d, want 1", got)
+		if buf.Len() != 0 {
+			t.Fatalf("unexpected log on success: %q", buf.String())
+		}
+		_, kek := testBootstrapInputs()
+		material, err := f.keys.LoadActive(ctx, uuid.MustParse(accepted.ClusterKeyID))
+		if err != nil {
+			t.Fatalf("LoadActive: %v", err)
+		}
+		defer material.Destroy()
+		if !bytes.Equal(material.CopyBytes(), kek) {
+			t.Fatal("stored KEK differs from granted KEK")
+		}
+		if got := f.count(t, "select count(*) from cluster_keys"); got != 1 {
+			t.Fatalf("cluster_keys rows = %d, want 1", got)
+		}
+		assertRedacted(t, buf.String(), sealed, hash)
+	})
+	t.Run("active row with different material stays denied", func(t *testing.T) {
+		f := newAcceptFixture(t)
+		f.seedKeyRow(t, bytes.Repeat([]byte{0x55}, 32), false, "")
+		buf := f.captureLog()
+		sealed, hash := f.seal(t, f.binding, f.now.Add(time.Hour))
+		_, err := f.acceptor.Accept(ctx, &f.recipient, f.binding, sealed, hash)
+		if !errors.Is(err, ErrBootstrapDenied) || !strings.Contains(buf.String(), "reason=key_material_mismatch") {
+			t.Fatalf("err=%v log=%q", err, buf.String())
 		}
 		assertRedacted(t, buf.String(), sealed, hash)
 	})
