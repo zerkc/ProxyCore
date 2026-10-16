@@ -140,7 +140,7 @@ func (a *BootstrapAcceptor) Accept(ctx context.Context, recipient *BootstrapReci
 	if err != nil {
 		switch {
 		case errors.Is(err, cluster.ErrClusterKeyDenied):
-			return AcceptedBootstrap{}, a.deny("key_conflict")
+			return AcceptedBootstrap{}, a.deny(keyDenialReason(err))
 		case errors.Is(err, ErrBootstrapDenied):
 			return AcceptedBootstrap{}, a.deny("credential_conflict")
 		}
@@ -156,6 +156,20 @@ func (a *BootstrapAcceptor) Accept(ctx context.Context, recipient *BootstrapReci
 		LeadershipGeneration:        grant.Metadata.LeadershipGeneration,
 		ExpiresAt:                   expiresAt,
 	}, nil
+}
+
+// keyDenialReason maps a cluster key denial to a stable reason code. Only the
+// code is ever logged, never the error text.
+func keyDenialReason(err error) string {
+	switch {
+	case errors.Is(err, cluster.ErrClusterKeyMaterialMismatch):
+		return "key_material_mismatch"
+	case errors.Is(err, cluster.ErrClusterKeyUnwrapFailed):
+		return "key_unwrap_failed"
+	case errors.Is(err, cluster.ErrClusterKeyInsertFailed):
+		return "key_insert_failed"
+	}
+	return "key_conflict"
 }
 
 func (a *BootstrapAcceptor) putCredentialInWrite(v sqlitedb.WriteValue, id string, secret []byte) error {
