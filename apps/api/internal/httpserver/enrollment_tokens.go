@@ -262,8 +262,8 @@ func (s *Server) handleEnrollmentTokenDefaults(w http.ResponseWriter, r *http.Re
 		return
 	}
 	defaults := enrollmentTokenDefaults{
-		PrimaryURL:  s.defaultEnrollmentPrimaryURL(),
-		GatewayIPv4: s.gatewayIngress().IPv4,
+		PrimaryURL:  s.defaultEnrollmentPrimaryURL(r.Context()),
+		GatewayIPv4: s.gatewayIngress(r.Context()).IPv4,
 		Port:        s.enrollmentTLSPort(),
 	}
 	if s.config != nil {
@@ -276,10 +276,19 @@ func (s *Server) handleEnrollmentTokenDefaults(w http.ResponseWriter, r *http.Re
 	writeJSON(w, http.StatusOK, defaults)
 }
 
-func (s *Server) gatewayIngress() domain.Ingress {
+// gatewayIngress prefers the advertised ingress persisted from the Ingress
+// screen, then the startup default, then the environment. A settings read
+// failure degrades to the latter two instead of failing the caller.
+func (s *Server) gatewayIngress(ctx context.Context) domain.Ingress {
+	var persisted domain.Ingress
+	if s.config != nil {
+		if settings, err := s.config.GetSettings(ctx); err == nil {
+			persisted = settings.Ingress
+		}
+	}
 	return domain.Ingress{
-		IPv4: firstNonEmpty(s.defaultIngress.IPv4, s.cfg.ProxyIngressIPv4),
-		IPv6: firstNonEmpty(s.defaultIngress.IPv6, s.cfg.ProxyIngressIPv6),
+		IPv4: firstNonEmpty(persisted.IPv4, s.defaultIngress.IPv4, s.cfg.ProxyIngressIPv4),
+		IPv6: firstNonEmpty(persisted.IPv6, s.defaultIngress.IPv6, s.cfg.ProxyIngressIPv6),
 	}
 }
 
@@ -299,8 +308,8 @@ func (s *Server) enrollmentTLSPort() int {
 
 // defaultEnrollmentPrimaryURL is https://<gateway IPv4>:<port>/ (IPv6 only
 // when there is no IPv4), or "" when no gateway address is configured.
-func (s *Server) defaultEnrollmentPrimaryURL() string {
-	ingress := s.gatewayIngress()
+func (s *Server) defaultEnrollmentPrimaryURL(ctx context.Context) string {
+	ingress := s.gatewayIngress(ctx)
 	host := ingress.IPv4
 	if host == "" {
 		host = ingress.IPv6
@@ -331,7 +340,7 @@ func (s *Server) resolveEnrollmentTokenRoute(ctx context.Context, requestedURL s
 	}
 	rawURL := strings.TrimSpace(requestedURL)
 	if rawURL == "" {
-		rawURL = s.defaultEnrollmentPrimaryURL()
+		rawURL = s.defaultEnrollmentPrimaryURL(ctx)
 	}
 	if rawURL == "" {
 		return EnrollmentTokenRoute{}, &httpError{status: http.StatusUnprocessableEntity, message: "a primary URL is required", code: "PRIMARY_URL_REQUIRED"}

@@ -63,6 +63,27 @@ func TestSQLiteEnrollmentTokenHTTPWorkflowPersistsOnlyHashAndListsRedactedMetada
 	}
 }
 
+// noPersistedIngressBackend hides the ingress the SQLite test env seeds into the
+// persisted settings, so tests can exercise the "no gateway address" case.
+type noPersistedIngressBackend struct {
+	httpserver.ConfigurationBackend
+}
+
+func (b *noPersistedIngressBackend) GetSettings(ctx context.Context) (domain.Settings, error) {
+	settings, err := b.ConfigurationBackend.GetSettings(ctx)
+	settings.Ingress = domain.Ingress{}
+	return settings, err
+}
+
+func newSQLiteHTTPTestServerWithoutIngress(t *testing.T, extra ...httpserver.Option) *sqliteHTTPEnv {
+	t.Helper()
+	backend := &noPersistedIngressBackend{}
+	options := append([]httpserver.Option{httpserver.WithDefaultIngress(domain.Ingress{}), httpserver.WithConfigurationStore(backend)}, extra...)
+	env := newSQLiteHTTPTestServer(t, options...)
+	backend.ConfigurationBackend = env.Config
+	return env
+}
+
 // establishV2Trust configures enrollment hostnames and issues the enrollment
 // TLS material so token creation can embed a CA and verify host coverage.
 func establishV2Trust(t *testing.T, env *sqliteHTTPEnv, hostnames ...string) configuration.EnrollmentTLSMaterial {
@@ -166,7 +187,7 @@ func TestSQLiteSelfContainedTokenRefusesWithoutMintingToken(t *testing.T) {
 		assertRefusal(t, env, cookie, `{"primaryUrl":7}`, http.StatusBadRequest, "")
 	})
 	t.Run("no default and none supplied", func(t *testing.T) {
-		env := newSQLiteHTTPTestServer(t, httpserver.WithSelfContainedEnrollmentTokens(), httpserver.WithDefaultIngress(domain.Ingress{}))
+		env := newSQLiteHTTPTestServerWithoutIngress(t, httpserver.WithSelfContainedEnrollmentTokens())
 		cookie := sqliteOwnerCookie(t, env.Handler)
 		establishV2Trust(t, env, "enroll.example")
 		assertRefusal(t, env, cookie, `{}`, http.StatusUnprocessableEntity, "PRIMARY_URL_REQUIRED")
@@ -219,7 +240,7 @@ func TestSQLiteEnrollmentTokenDefaultsEndpoint(t *testing.T) {
 		}
 	})
 	t.Run("no ingress configured", func(t *testing.T) {
-		env := newSQLiteHTTPTestServer(t, httpserver.WithDefaultIngress(domain.Ingress{}))
+		env := newSQLiteHTTPTestServerWithoutIngress(t)
 		response, body := get(env, sqliteOwnerCookie(t, env.Handler))
 		if response.Code != http.StatusOK || body["primaryUrl"] != "" || body["gatewayIPv4"] != "" ||
 			body["trustReady"] != false || body["hostCovered"] != false {
