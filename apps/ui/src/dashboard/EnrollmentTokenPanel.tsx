@@ -261,7 +261,7 @@ export function EnrollmentTokenPanel({ identity }: { identity?: TopologyIdentity
           <span id="enrollment-token-primary-url-help" className="mt-1 block text-xs text-faint" data-testid="enrollment-token-primary-url-help">The node will connect to this address. If you changed the enrollment port, edit it here before generating.</span>
         </label>
         {defaults && defaults.trustReady === false ? <p className="pc-toast-err" role="status" data-testid="enrollment-token-trust-warning">Enrollment trust is not ready yet, so a token cannot be generated. Set it up in the enrollment trust panel first.</p> : null}
-        {defaults && defaults.trustReady !== false && defaults.hostCovered === false ? <p className="pc-toast-err" role="status" data-testid="enrollment-token-host-warning">The default address is not covered by the enrollment certificate. Add its host to the enrollment hostnames in the enrollment trust panel, or enter another address.</p> : null}
+        {defaults && defaults.primaryUrl && defaults.trustReady !== false && defaults.hostCovered === false ? <p className="pc-toast-err" role="status" data-testid="enrollment-token-host-warning">The default address is not covered by the enrollment certificate. Add its host to the enrollment hostnames in the enrollment trust panel, or enter another address.</p> : null}
       </div>
       {creation ? (
         <section className="space-y-4 border-2 border-signal/60 bg-signal/5 p-4" aria-labelledby="new-enrollment-token-title" data-testid="enrollment-token-acknowledgement">
