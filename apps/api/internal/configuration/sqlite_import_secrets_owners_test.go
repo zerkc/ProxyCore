@@ -2,6 +2,7 @@ package configuration
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -354,5 +355,54 @@ func TestSQLiteImportV3VerifiesSecretDigestAgainstUnwrappedPlaintext(t *testing.
 				}
 			}
 		})
+	}
+}
+
+func TestSQLiteImportIncompleteSecretNamesTheReasonAndIndexWithoutValues(t *testing.T) {
+	cases := []struct {
+		name    string
+		secrets func(kek *cluster.KEK) []replicationsnapshot.ReplicatedSecret
+		want    error
+		index   string
+	}{
+		{"nil id at index 1", func(kek *cluster.KEK) []replicationsnapshot.ReplicatedSecret {
+			return []replicationsnapshot.ReplicatedSecret{
+				wrappedSecret(t, kek, uuid.New(), "dns", "ok"),
+				wrappedSecret(t, kek, uuid.Nil, "dns", "x"),
+			}
+		}, ErrImportSecretIDMissing, "(index 1)"},
+		{"blank purpose at index 0", func(kek *cluster.KEK) []replicationsnapshot.ReplicatedSecret {
+			return []replicationsnapshot.ReplicatedSecret{wrappedSecret(t, kek, uuid.New(), "  ", "x")}
+		}, ErrImportSecretPurposeMissing, "(index 0)"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f, store := newSQLitePhase2Fixture(t)
+			kek := clusterKEK(t, f)
+			keyRef := f.clusterKey
+			err := importWith(t, f, store, func(env *replicationsnapshot.Envelope) {
+				env.NodeLocal.ClusterKeyRef = &keyRef
+				env.Replicated.Secrets = tc.secrets(kek)
+			})
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("err = %v, want %v", err, tc.want)
+			}
+			if !strings.Contains(err.Error(), "import secrets: ") || !strings.Contains(err.Error(), tc.index) {
+				t.Fatalf("message must start with the stage and carry %s: %q", tc.index, err)
+			}
+		})
+	}
+}
+
+func TestSQLiteImportIncompleteOwnerIsASentinelWithIndex(t *testing.T) {
+	f, store := newSQLitePhase2Fixture(t)
+	err := importWith(t, f, store, func(env *replicationsnapshot.Envelope) {
+		env.Replicated.Owners = []replicationsnapshot.ReplicatedOwner{
+			{UserID: uuid.New(), Username: "ok", PasswordHash: importedOwnerHash, Role: "owner"},
+			{UserID: uuid.New(), Username: "", PasswordHash: importedOwnerHash, Role: "owner"},
+		}
+	})
+	if !errors.Is(err, ErrImportOwnerIncomplete) || !strings.Contains(err.Error(), "(index 1)") {
+		t.Fatalf("err = %v, want ErrImportOwnerIncomplete with index 1", err)
 	}
 }

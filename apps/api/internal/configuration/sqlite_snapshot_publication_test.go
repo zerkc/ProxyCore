@@ -37,12 +37,20 @@ type sqlitePublicationFixture struct {
 
 func newSQLitePublicationFixture(t *testing.T) *sqlitePublicationFixture {
 	t.Helper()
+	return newSQLitePublicationFixtureWithMaster(t, base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x37}, 32)))
+}
+
+// newSQLitePublicationFixtureWithMaster builds an installation whose secrets
+// are protected by the given master key, so tests can model installs that do
+// not share the constant fixture key.
+func newSQLitePublicationFixtureWithMaster(t *testing.T, master string) *sqlitePublicationFixture {
+	t.Helper()
 	db, _, _ := sqliteSettingsFixture(t)
 	writer := settingsWriter(db)
 	f := &sqlitePublicationFixture{
 		db: db, writer: writer, selector: strings.Repeat("ab", 16),
 		credential: uuid.NewString(), primaryID: uuid.NewString(), nodeID: uuid.NewString(), peerID: uuid.NewString(),
-		master: base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x37}, 32)),
+		master: master,
 	}
 	keys := cluster.NewSQLiteKeyStore(db, writer, f.master)
 	material, err := keys.LoadOrCreate(context.Background(), nil)
