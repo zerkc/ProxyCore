@@ -41,8 +41,10 @@ func (s *SQLiteCanonicalSnapshotCandidateStore) ListCanonicalSnapshotCandidates(
     and a.id is null
     -- A job whose content hash already has a published row was superseded by a
     -- newer revision publishing the same hash (a revert): it is not a candidate.
+    -- A discarded row (healed stale body) does not count: its job is regenerated.
     and not exists (select 1 from applied_snapshots s
-      where j.snapshot_content_hash is not null and s.content_hash = j.snapshot_content_hash)
+      where j.snapshot_content_hash is not null and s.content_hash = j.snapshot_content_hash
+        and s.discarded_at is null)
   order by j.finished_at asc, j.id asc
  `)
 	if err != nil {

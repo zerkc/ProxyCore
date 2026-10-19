@@ -261,6 +261,34 @@ func (t *sqlitePhase2Transaction) FindCanonicalSnapshotForJob(ctx context.Contex
 	return record, err
 }
 
+var _ CanonicalSnapshotHealer = (*sqlitePhase2Transaction)(nil)
+
+func (t *sqlitePhase2Transaction) ListRecentCanonicalSnapshots(ctx context.Context, limit int) ([]CanonicalSnapshotRecord, error) {
+	rows, err := t.v.Conn().QueryContext(ctx, `select `+sqliteAppliedSnapshotColumns+`
+		from applied_snapshots
+		where status = 'applied' and discarded_at is null and snapshot_body is not null
+		order by applied_at desc, id desc limit ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make([]CanonicalSnapshotRecord, 0)
+	for rows.Next() {
+		record, err := sqliteScanCanonicalSnapshot(rows)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, *record)
+	}
+	return result, rows.Err()
+}
+
+func (t *sqlitePhase2Transaction) DiscardCanonicalSnapshot(ctx context.Context, id string) error {
+	result, err := t.v.Conn().ExecContext(ctx, `update applied_snapshots set discarded_at = ?
+		where id = ? and status = 'applied' and discarded_at is null`, t.v.Timestamp(), id)
+	return sqliteSingleRow(result, err)
+}
+
 func (t *sqlitePhase2Transaction) findCanonicalSnapshotByHash(ctx context.Context, contentHash string) (*CanonicalSnapshotRecord, error) {
 	record, err := sqliteScanCanonicalSnapshot(t.v.Conn().QueryRowContext(ctx, `select `+sqliteAppliedSnapshotColumns+`
 		from applied_snapshots where content_hash = ?`, contentHash))
@@ -359,6 +387,8 @@ func (t *sqlitePhase2Transaction) PublishCanonicalSnapshot(ctx context.Context, 
 		// while a newer one already exists. An older apply never rewinds the
 		// published snapshot; an equal clock falls back to the revision number.
 		switch {
+		case existing.DiscardedAt != nil:
+			// A healed (discarded) row is rebound below whatever its recency.
 		case write.AppliedAt.Before(existing.AppliedAt):
 			return nil
 		case write.AppliedAt.Equal(existing.AppliedAt):

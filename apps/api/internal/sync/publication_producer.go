@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"time"
 
 	"github.com/google/uuid"
@@ -23,6 +24,9 @@ var (
 const (
 	defaultCanonicalSnapshotBackoff = time.Second
 	maxCanonicalSnapshotBackoff     = time.Minute
+	// healRecentSnapshots bounds how many of the newest stored snapshots are
+	// re-validated per reconcile; the publisher only serves the latest.
+	healRecentSnapshots = 8
 )
 
 type CanonicalSnapshotExporter interface {
@@ -40,6 +44,8 @@ type CanonicalSnapshotProducerOptions struct {
 	MaxBackoff      time.Duration
 	Wait            func(context.Context, time.Duration) error
 	OnError         func(error)
+	// OnHeal receives the number of stale stored snapshots just discarded.
+	OnHeal func(int)
 }
 
 type CanonicalSnapshotProducer struct {
@@ -49,6 +55,7 @@ type CanonicalSnapshotProducer struct {
 	maxBackoff      time.Duration
 	wait            func(context.Context, time.Duration) error
 	onError         func(error)
+	onHeal          func(int)
 }
 
 func NewCanonicalSnapshotProducer(
@@ -87,6 +94,7 @@ func NewCanonicalSnapshotProducer(
 		maxBackoff:      max,
 		wait:            wait,
 		onError:         opts.OnError,
+		onHeal:          opts.OnHeal,
 	}
 }
 
@@ -128,6 +136,9 @@ func (p *CanonicalSnapshotProducer) Produce(ctx context.Context, jobID string) e
 		existing, err := tx.FindCanonicalSnapshotForJob(ctx, jobID)
 		if err != nil {
 			return err
+		}
+		if existing != nil && existing.DiscardedAt != nil {
+			existing = nil // healed: regenerate from the job
 		}
 		if existing != nil {
 			if existing.RevisionID == nil || *existing.RevisionID != apply.RevisionID ||
@@ -196,6 +207,9 @@ func (p *CanonicalSnapshotProducer) Reconcile(ctx context.Context) (int, error) 
 	if p == nil || p.store == nil || ctx == nil {
 		return 0, ErrCanonicalSnapshotProducerNotReady
 	}
+	if err := p.healStaleSnapshots(ctx); err != nil {
+		return 0, err
+	}
 	candidates, err := p.store.ListCanonicalSnapshotCandidates(ctx)
 	if err != nil {
 		return 0, err
@@ -208,6 +222,66 @@ func (p *CanonicalSnapshotProducer) Reconcile(ctx context.Context) (int, error) 
 		published++
 	}
 	return published, nil
+}
+
+// healStaleSnapshots discards recent live snapshots of the current primary
+// identity that the validator now rejects (a body stored before the backup
+// marker secret was filtered out). Produce then regenerates them from their
+// jobs. Healthy rows, and rows of another identity or generation, are untouched.
+func (p *CanonicalSnapshotProducer) healStaleSnapshots(ctx context.Context) error {
+	healed := 0
+	err := p.store.WithCanonicalSnapshot(ctx, func(tx configuration.CanonicalSnapshotTransaction) error {
+		healer, ok := tx.(configuration.CanonicalSnapshotHealer)
+		if !ok {
+			return nil
+		}
+		identity, err := tx.LockPrimaryIdentity(ctx)
+		if err != nil {
+			return err
+		}
+		if !eligibleCanonicalPrimary(identity) || identity.ClusterKeyID == nil {
+			return nil
+		}
+		records, err := healer.ListRecentCanonicalSnapshots(ctx, healRecentSnapshots)
+		if err != nil || len(records) == 0 {
+			return err
+		}
+		material, err := tx.LoadOrCreateClusterKEK(ctx, identity.ClusterKeyID.String())
+		if err != nil {
+			return err
+		}
+		defer material.Destroy()
+		keyBytes := material.CopyBytes()
+		kek, err := cluster.NewKEK(keyBytes)
+		zeroCanonicalBytes(keyBytes)
+		if err != nil {
+			return err
+		}
+		defer kek.Destroy()
+		for _, record := range records {
+			if record.SourcePrimaryID != identity.InstallationID ||
+				record.LeadershipGeneration != int64(identity.LeadershipGeneration) ||
+				canonicalPublicationIsValid(ctx, record.AppliedSnapshotRecord, identity, kek) {
+				continue
+			}
+			if err := healer.DiscardCanonicalSnapshot(ctx, record.ID); err != nil {
+				return err
+			}
+			healed++
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	if healed > 0 {
+		if p.onHeal != nil {
+			p.onHeal(healed)
+		} else {
+			log.Printf("canonical snapshot publication: discarded %d stale stored snapshot(s) for regeneration", healed)
+		}
+	}
+	return nil
 }
 
 func (p *CanonicalSnapshotProducer) Run(ctx context.Context) {

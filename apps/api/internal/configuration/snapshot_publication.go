@@ -144,6 +144,18 @@ type CanonicalSnapshotTransaction interface {
 	PublishCanonicalSnapshot(context.Context, CanonicalSnapshotWrite) error
 }
 
+// CanonicalSnapshotHealer is the optional producer-transaction extension that
+// lets a primary replace stored snapshots a current validator rejects (for
+// example a body written before the backup marker secret was filtered out).
+type CanonicalSnapshotHealer interface {
+	// ListRecentCanonicalSnapshots returns the newest live (applied, not
+	// discarded) rows that carry a body, newest first.
+	ListRecentCanonicalSnapshots(ctx context.Context, limit int) ([]CanonicalSnapshotRecord, error)
+	// DiscardCanonicalSnapshot marks one live row discarded so the producer
+	// regenerates its job. It never deletes the row.
+	DiscardCanonicalSnapshot(ctx context.Context, id string) error
+}
+
 // CanonicalSnapshotStore owns the producer transaction and candidate scan.
 type CanonicalSnapshotStore interface {
 	ListCanonicalSnapshotCandidates(context.Context) ([]CanonicalSnapshotApplyRef, error)
