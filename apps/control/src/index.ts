@@ -15,10 +15,13 @@ export * from "./transport";
 export * from "./docker-control";
 
 async function main() {
-  const socketPath = process.env.WORKER_SOCKET_PATH ?? "/run/proxycore/control.sock";
+  const socketPath =
+    process.env.WORKER_SOCKET_PATH ?? "/run/proxycore/control.sock";
   const { FixedServiceControl } = await import("./service");
   const { startControlServer } = await import("./transport");
-  const fixedOperation = async (request: import("./protocol").ControlRequest) => ({
+  const fixedOperation = async (
+    request: import("./protocol").ControlRequest,
+  ) => ({
     service: request.service,
     operation: request.operation,
     candidatePath: request.candidatePath,
@@ -76,7 +79,9 @@ async function main() {
         });
         const name = process.env.COREDNS_CONTAINER_NAME ?? "proxycore-coredns";
         await docker.getContainer(name).restart({ t: 5 });
-        process.stdout.write(`proxycore-control restarted ${name} to load Corefile\n`);
+        process.stdout.write(
+          `proxycore-control restarted ${name} to load Corefile\n`,
+        );
       } catch (error) {
         process.stderr.write(
           `proxycore-control could not restart CoreDNS after Corefile seed: ${
@@ -87,7 +92,9 @@ async function main() {
     }
   }
 
-  await startControlServer(socketPath, control);
+  await startControlServer(socketPath, control, (line) =>
+    process.stderr.write(`${new Date().toISOString()} ${line}\n`),
+  );
   process.stdout.write(`proxycore-control listening on ${socketPath}\n`);
 }
 

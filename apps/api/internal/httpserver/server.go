@@ -477,7 +477,10 @@ func (s *Server) initializeIngressSideEffect(r *http.Request, user auth.User) er
 	if settings.DefaultPool == nil {
 		return nil
 	}
-	_, err = s.config.CreateApplyJob(r.Context(), user.ID)
+	apply, err := s.config.CreateApplyJob(r.Context(), user.ID)
+	if err == nil {
+		noteApply(r.Context(), apply)
+	}
 	return err
 }
 

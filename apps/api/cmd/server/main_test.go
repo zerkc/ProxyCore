@@ -212,7 +212,8 @@ func TestNodeConverterFlagIsOnByDefaultWithExplicitOptOut(t *testing.T) {
 
 func TestEnrollmentWorkflowTLSListenerFactoryWiresWorkflowMux(t *testing.T) {
 	workflow := httpserver.EnrollmentWorkflowHandlerOptions{Cache: enrollment.NewDraftCache(enrollment.DraftCacheOptions{})}
-	factory := newEnrollmentWorkflowTLSListenerFactory(runtimeTestIdentity{}, workflow, log.New(io.Discard, "", 0))
+	var requestLogs strings.Builder
+	factory := newEnrollmentWorkflowTLSListenerFactory(runtimeTestIdentity{}, workflow, log.New(&requestLogs, "", 0))
 	var gotHandler http.Handler
 	factory.listen = func(string, string) (net.Listener, error) {
 		return runtimeTestNetListener{}, nil
@@ -231,6 +232,10 @@ func TestEnrollmentWorkflowTLSListenerFactoryWiresWorkflowMux(t *testing.T) {
 	gotHandler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/health", nil))
 	if recorder.Code != http.StatusNotFound {
 		t.Fatalf("ordinary route status=%d, want %d", recorder.Code, http.StatusNotFound)
+	}
+	id := recorder.Header().Get("X-Request-ID")
+	if id == "" || !strings.Contains(requestLogs.String(), "request_id="+id) {
+		t.Fatalf("TLS workflow request has no correlated log: header=%q logs=%q", id, requestLogs.String())
 	}
 }
 

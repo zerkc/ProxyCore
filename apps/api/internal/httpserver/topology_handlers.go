@@ -131,6 +131,7 @@ func (s *Server) enqueuePromotePublication(ctx context.Context, actorID string) 
 	for attempt := 1; attempt <= promotePublicationAttempts; attempt++ {
 		apply, err := s.config.CreateApplyJob(ctx, actorID)
 		if err == nil {
+			noteApply(ctx, apply)
 			return map[string]any{"status": "queued", "applyJobId": apply.Job.ID}
 		}
 		lastErr = err

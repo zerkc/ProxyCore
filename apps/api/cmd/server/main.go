@@ -590,6 +590,11 @@ func wireEnrollmentGrantExchange(workflow *httpserver.EnrollmentWorkflowHandlerO
 	}
 	client := syncpublication.NewExchangeClient(syncpublication.ExchangeClientOptions{
 		HTTPClient: primaryTrustHTTPClient(configuration.NewSQLitePrimaryTrustStore(stack.writer)),
+		Logf: func(format string, args ...any) {
+			if workflow.Logger != nil {
+				workflow.Logger.Printf(format, args...)
+			}
+		},
 	})
 	acceptor := enrollment.NewBootstrapAcceptor(enrollment.BootstrapAcceptorOptions{
 		DB: stack.db, Writer: stack.writer, Keys: stack.keys, MasterKeyBase64: masterKeyBase64,
@@ -854,6 +859,7 @@ func (f *enrollmentWorkflowTLSListenerFactory) Listen(ctx context.Context, addre
 		exchangeOptions.Certificate = certificate
 		handler = httpserver.NewEnrollmentGrantExchangeMux(httpserver.NewEnrollmentGrantExchangeHandler(exchangeOptions), handler)
 	}
+	handler = httpserver.RequestLogMiddleware(f.logger, handler)
 	server, err := f.newServer(listener, handler, provider)
 	if err != nil || server == nil {
 		_ = listener.Close()

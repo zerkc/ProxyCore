@@ -1,6 +1,7 @@
 package httpserver
 
 import (
+	"context"
 	"encoding/json"
 	"net"
 	"net/http"
@@ -204,6 +205,10 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"settings": settings})
 }
 
+func noteApply(ctx context.Context, apply configuration.ApplyResult) {
+	noteJob(ctx, apply.Job.ID, apply.RevisionID, apply.Job.CorrelationID)
+}
+
 func (s *Server) handleApply(w http.ResponseWriter, r *http.Request) {
 	user, ok := s.requireUser(w, r)
 	if !ok {
@@ -218,6 +223,7 @@ func (s *Server) handleApply(w http.ResponseWriter, r *http.Request) {
 		writeConfigError(w, err)
 		return
 	}
+	noteApply(r.Context(), apply)
 	writeJSON(w, http.StatusAccepted, apply)
 }
 
@@ -260,6 +266,7 @@ func (s *Server) handleCreateZone(w http.ResponseWriter, r *http.Request) {
 		writeConfigError(w, err)
 		return
 	}
+	noteApply(r.Context(), result.Apply)
 	writeJSON(w, http.StatusCreated, map[string]any{"zone": result.Value, "apply": result.Apply})
 }
 
@@ -302,6 +309,7 @@ func (s *Server) handleAddRecord(w http.ResponseWriter, r *http.Request) {
 		writeConfigError(w, err)
 		return
 	}
+	noteApply(r.Context(), result.Apply)
 	writeJSON(w, http.StatusCreated, map[string]any{"record": result.Value, "apply": result.Apply})
 }
 
@@ -350,6 +358,7 @@ func (s *Server) handlePatchRecord(w http.ResponseWriter, r *http.Request) {
 		writeConfigError(w, err)
 		return
 	}
+	noteApply(r.Context(), result.Apply)
 	writeJSON(w, http.StatusOK, map[string]any{"record": result.Value, "apply": result.Apply})
 }
 

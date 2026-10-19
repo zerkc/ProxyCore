@@ -43,6 +43,7 @@ export class ApplyOrchestrator {
       control: ControlClient;
       candidateRoot?: string;
       now?: () => Date;
+      log?: (message: string) => void;
     },
   ) {}
 
@@ -80,14 +81,35 @@ export class ApplyOrchestrator {
     snapshot: ConfigurationSnapshot,
     render: CandidateRenderer,
   ): Promise<JobRecord> {
-    let job = await this.requireJob(jobId);
-    if (job.status === "queued") {
-      job = await this.setStatus(job, "validating");
-    } else if (job.status !== "validating") {
-      throw new Error(`Job ${jobId} is not queued`);
+    let job: JobRecord;
+    try {
+      job = await this.requireJob(jobId);
+    } catch (error) {
+      this.stores.log?.(
+        `worker apply failed job=${safeLogId(jobId)} revision=unavailable step=lookup service=none`,
+      );
+      throw error;
+    }
+    try {
+      if (job.status === "queued") {
+        job = await this.setStatus(job, "validating");
+      } else if (job.status !== "validating") {
+        throw new Error(`Job ${jobId} is not queued`);
+      }
+    } catch (error) {
+      this.stores.log?.(
+        `worker apply failed job=${safeLogId(job.id)} revision=${safeLogId(job.revisionId)} correlation=${safeLogId(job.correlationId)} step=claim service=none`,
+      );
+      throw error;
     }
     const promoted: RenderedCandidate[] = [];
     let candidates: RenderedCandidate[] = [];
+    let step = "render";
+    let service = "none";
+    const logFailure = (outcome: string) =>
+      this.stores.log?.(
+        `worker apply ${outcome} job=${safeLogId(job.id)} revision=${safeLogId(job.revisionId)} correlation=${safeLogId(job.correlationId)} step=${step} service=${service}`,
+      );
 
     try {
       const rendered = await render(desiredSnapshotForApply(snapshot), job);
@@ -98,9 +120,13 @@ export class ApplyOrchestrator {
 
       const validationOutput: Record<string, unknown> = {};
       for (const candidate of candidates) {
+        service = candidate.service;
+        step = "write_candidate";
         await writeCandidate(candidate, this.stores.candidateRoot);
+        step = "stage";
         const staged = await this.request(candidate, job, "stage");
         if (!staged.ok) {
+          logFailure("failed");
           return await this.fail(
             job,
             staged.error ?? "Candidate staging failed",
@@ -112,9 +138,11 @@ export class ApplyOrchestrator {
             },
           );
         }
+        step = "validate";
         const validation = await this.request(candidate, job, "validate");
         validationOutput[candidate.service] = validation.output;
         if (!validation.ok) {
+          logFailure("failed");
           return await this.fail(
             job,
             validation.error ?? "Candidate validation failed",
@@ -125,9 +153,12 @@ export class ApplyOrchestrator {
         }
       }
 
+      step = "set_applying";
       job = await this.setStatus(job, "applying", { validationOutput });
       const applyOutput: Record<string, unknown> = {};
       for (const candidate of candidates) {
+        service = candidate.service;
+        step = "promote";
         const promotedResponse = await this.request(candidate, job, "promote");
         if (!promotedResponse.ok) {
           throw new Error(
@@ -140,13 +171,17 @@ export class ApplyOrchestrator {
 
       const healthOutput: Record<string, unknown> = {};
       for (const candidate of candidates) {
+        service = candidate.service;
+        step = "reload";
         const reload = await this.request(candidate, job, "reload");
         if (!reload.ok) {
           throw new Error(reload.error ?? "Service reload failed");
         }
+        step = "health";
         const health = await this.request(candidate, job, "health");
         healthOutput[candidate.service] = health.output;
         if (!health.ok || hasNginxDrift(health)) {
+          logFailure("failed");
           const rollbackSucceeded = await this.rollback(promoted, job);
           if (rollbackSucceeded) {
             return await this.setStatus(job, "rolled-back", {
@@ -164,6 +199,7 @@ export class ApplyOrchestrator {
         }
       }
 
+      step = "mark_applied";
       await this.stores.revisions.markApplied(job.revisionId, this.now());
       return await this.setStatus(job, "applied", {
         applyOutput,
@@ -171,6 +207,7 @@ export class ApplyOrchestrator {
         finishedAt: this.now(),
       });
     } catch (error) {
+      logFailure("failed");
       if (promoted.length > 0 && (await this.rollback(promoted, job))) {
         return await this.setStatus(job, "rolled-back", {
           errorMessage: errorMessage(error),
@@ -238,6 +275,11 @@ export class ApplyOrchestrator {
           operation: "rollback" as const,
         }),
       );
+      if (!response.ok) {
+        this.stores.log?.(
+          `worker rollback failed job=${safeLogId(job.id)} revision=${safeLogId(job.revisionId)} correlation=${safeLogId(job.correlationId)} service=${candidate.service}`,
+        );
+      }
       succeeded = response.ok && succeeded;
     }
     return succeeded;
@@ -263,6 +305,10 @@ export class ApplyOrchestrator {
   }
 }
 
+function safeLogId(value: string): string {
+  return /^[A-Za-z0-9_-]{1,80}$/.test(value) ? value : "[redacted]";
+}
+
 // desiredSnapshotForApply unwraps the replication envelope. A node renders a
 // near-exact copy of the primary with one exception: its own ingress. The
 // envelope's nodeLocal.ingress is authoritative on the receiving installation
@@ -276,13 +322,16 @@ function desiredSnapshotForApply(
   if (!snapshot || typeof snapshot !== "object") return snapshot;
   const replicated = (snapshot as { replicated?: unknown }).replicated;
   if (!replicated || typeof replicated !== "object") return snapshot;
-  const configuration = (replicated as { configuration?: unknown }).configuration;
+  const configuration = (replicated as { configuration?: unknown })
+    .configuration;
   if (!configuration || typeof configuration !== "object") return snapshot;
   const desired = configuration as ConfigurationSnapshot;
   const local = (snapshot as { nodeLocal?: { ingress?: unknown } }).nodeLocal
     ?.ingress as { ipv4?: unknown; ipv6?: unknown } | undefined;
-  const ipv4 = typeof local?.ipv4 === "string" && local.ipv4 ? local.ipv4 : undefined;
-  const ipv6 = typeof local?.ipv6 === "string" && local.ipv6 ? local.ipv6 : undefined;
+  const ipv4 =
+    typeof local?.ipv4 === "string" && local.ipv4 ? local.ipv4 : undefined;
+  const ipv6 =
+    typeof local?.ipv6 === "string" && local.ipv6 ? local.ipv6 : undefined;
   const settings = (desired as { settings?: unknown }).settings;
   if ((!ipv4 && !ipv6) || !settings || typeof settings !== "object") {
     return desired;

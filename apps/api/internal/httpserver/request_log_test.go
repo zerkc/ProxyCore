@@ -81,6 +81,21 @@ func TestRequestLogLinesRedactAndCaptureErrors(t *testing.T) {
 	}
 }
 
+func TestRequestLogAddsCorrelationIDWithoutTrustingIncomingHeader(t *testing.T) {
+	var buf bytes.Buffer
+	h := httpserver.RequestLogMiddleware(log.New(&buf, "", 0), http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	req := httptest.NewRequest(http.MethodGet, "/api/failure", nil)
+	req.Header.Set("X-Request-ID", "secret\nINJECTED")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	id := rec.Header().Get("X-Request-ID")
+	if id == "" || id == "secret\nINJECTED" || !strings.Contains(buf.String(), "request_id="+id) || strings.Contains(buf.String(), "INJECTED") || rec.Code != http.StatusInternalServerError {
+		t.Fatalf("missing safe correlation ID: header=%q log=%q status=%d", id, buf.String(), rec.Code)
+	}
+}
+
 func TestRequestLogSkipsHealthUnlessFailing(t *testing.T) {
 	var buf bytes.Buffer
 	status := http.StatusOK

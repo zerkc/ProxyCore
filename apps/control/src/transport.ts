@@ -12,12 +12,21 @@ import { FixedServiceControl } from "./service";
 export async function startControlServer(
   socketPath: string,
   control: FixedServiceControl,
+  log?: (line: string) => void,
 ): Promise<ReturnType<typeof createServer>> {
-  await mkdir(dirname(socketPath), { recursive: true });
+  await mkdir(dirname(socketPath), { recursive: true }).catch(
+    (error: unknown) => {
+      log?.("control socket failed reason=setup_failed stage=mkdir");
+      throw error;
+    },
+  );
   await unlink(socketPath).catch(() => undefined);
   const server = createServer({ allowHalfOpen: true }, (socket) => {
-    socket.on("error", () => socket.destroy());
-    handleConnection(socket, control);
+    socket.on("error", () => {
+      log?.("control socket failed reason=socket_error");
+      socket.destroy();
+    });
+    handleConnection(socket, control, log);
   });
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
@@ -25,6 +34,9 @@ export async function startControlServer(
       server.removeListener("error", reject);
       resolve();
     });
+  }).catch((error: unknown) => {
+    log?.("control socket failed reason=setup_failed stage=listen");
+    throw error;
   });
   return server;
 }
@@ -58,7 +70,11 @@ export function requestControl(
   });
 }
 
-function handleConnection(socket: Socket, control: FixedServiceControl): void {
+function handleConnection(
+  socket: Socket,
+  control: FixedServiceControl,
+  log?: (line: string) => void,
+): void {
   let buffer = "";
   socket.on("end", () => socket.destroy());
   socket.on("data", async (chunk: Buffer) => {
@@ -67,7 +83,7 @@ function handleConnection(socket: Socket, control: FixedServiceControl): void {
     while (newline >= 0) {
       const line = buffer.slice(0, newline);
       buffer = buffer.slice(newline + 1);
-      const response = await handleLine(line, control);
+      const response = await handleLine(line, control, log);
       socket.write(`${JSON.stringify(response)}\n`);
       newline = buffer.indexOf("\n");
     }
@@ -77,10 +93,21 @@ function handleConnection(socket: Socket, control: FixedServiceControl): void {
 async function handleLine(
   line: string,
   control: FixedServiceControl,
+  log?: (line: string) => void,
 ): Promise<ControlResponse> {
   try {
-    return await control.execute(parseControlRequest(line));
+    const request = parseControlRequest(line);
+    const response = await control.execute(request);
+    if (!response.ok) {
+      log?.(
+        `control request failed request=${safeLogId(request.requestId)} operation=${request.operation} service=${request.service} reason=operation_failed`,
+      );
+    }
+    return response;
   } catch (error) {
+    log?.(
+      `control request failed reason=${error instanceof SyntaxError ? "invalid_json" : "invalid_request"}`,
+    );
     return {
       requestId: "invalid",
       operation: "health",
@@ -88,4 +115,8 @@ async function handleLine(
       error: error instanceof Error ? error.message : "Invalid control request",
     };
   }
+}
+
+function safeLogId(value: string): string {
+  return /^[A-Za-z0-9_-]{1,80}$/.test(value) ? value : "[redacted]";
 }

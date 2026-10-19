@@ -57,6 +57,8 @@ async function main(): Promise<void> {
     revisions,
     control: new UnixSocketControlClient(config.workerSocketPath),
     candidateRoot,
+    log: (message) =>
+      process.stderr.write(`${new Date().toISOString()} ${message}\n`),
   });
   const controller = new AbortController();
   const shutdown = () => controller.abort();

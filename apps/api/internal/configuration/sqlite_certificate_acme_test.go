@@ -389,6 +389,49 @@ func (f *acmeFixture) resolveJobs(t *testing.T, status string, message any) func
 	return func() { cancel(); wg.Wait() }
 }
 
+func TestStandaloneApplyHelperLeavesNotificationToCaller(t *testing.T) {
+	f := newACMEFixture(t)
+	f.seedOwner(t, issueOwnerA, "owner", 1, "0")
+	var notified int
+	ctx := WithApplyJobObserver(context.Background(), func(ApplyResult) { notified++ })
+	apply, err := sqliteCreateApplyJob(ctx, f.issuer.writer, issueOwnerA)
+	if err != nil || apply.Job.ID == "" || notified != 0 {
+		t.Fatalf("helper notified instead of caller: err=%v job=%q notifications=%d", err, apply.Job.ID, notified)
+	}
+}
+
+func TestSQLiteCertificateHTTP01ObservesOnlyCommittedApplyJob(t *testing.T) {
+	f := newACMEFixture(t)
+	f.seedOwner(t, issueOwnerA, "owner", 1, "0")
+	var observed []ApplyResult
+	ctx := WithApplyJobObserver(context.Background(), func(apply ApplyResult) {
+		var persisted string
+		if err := f.db.QueryRow(`select correlation_id from apply_jobs where id=?`, apply.Job.ID).Scan(&persisted); err != nil {
+			t.Fatalf("observed apply before commit: %v", err)
+		}
+		if persisted != apply.Job.CorrelationID || apply.RevisionID == "" {
+			t.Fatalf("observer does not match persisted job")
+		}
+		observed = append(observed, apply)
+	})
+	stop := f.resolveJobs(t, "applied", nil)
+	defer stop()
+	cert, err := f.issuer.IssueCertificate(ctx, CertificateIssueInput{Hostnames: []string{"le.example.test"}, Issuer: "letsencrypt", Challenge: "http-01"}, issueOwnerA)
+	if err != nil || cert.Status != "active" || len(observed) != 1 {
+		t.Fatalf("status=%s err=%v observed=%d", cert.Status, err, len(observed))
+	}
+
+	g := newACMEFixture(t)
+	g.seedOwner(t, issueOwnerA, "owner", 1, "0")
+	settingsExec(t, g.db, `update installation_settings set default_resolver_pool = null`)
+	var rejected int
+	ctx = WithApplyJobObserver(context.Background(), func(ApplyResult) { rejected++ })
+	_, _ = g.issuer.IssueCertificate(ctx, CertificateIssueInput{Hostnames: []string{"le.example.test"}, Issuer: "letsencrypt", Challenge: "http-01"}, issueOwnerA)
+	if rejected != 0 || g.count(t, `select count(*) from apply_jobs`) != 0 {
+		t.Fatalf("failed enqueue must not report a job: observations=%d", rejected)
+	}
+}
+
 func TestSQLiteCertificateIssueHTTP01WithActorWaitsForApplyThenIssues(t *testing.T) {
 	f := newACMEFixture(t)
 	f.seedOwner(t, issueOwnerA, "owner", 1, "0")

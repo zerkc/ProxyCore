@@ -82,6 +82,7 @@ func (f *enrollmentTLSListenerFactory) Listen(ctx context.Context, address strin
 			return provider.Certificate(ctx)
 		},
 	})
+	handler = httpserver.RequestLogMiddleware(f.logger, handler)
 	server, err := f.newServer(listener, handler, provider)
 	if err != nil || server == nil {
 		_ = listener.Close()

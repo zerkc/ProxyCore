@@ -57,6 +57,7 @@ func (s *SQLiteCertificateIssueStore) issueLetsEncrypt(ctx context.Context, inpu
 		if err != nil {
 			return domain.CertificateStatus{}, err
 		}
+		NotifyApplyJob(ctx, apply)
 		if err := sqliteWaitForJob(ctx, s.db, apply.Job.ID, s.httpChallengeTimeout(), s.httpChallengePoll()); err != nil {
 			return domain.CertificateStatus{}, err
 		}

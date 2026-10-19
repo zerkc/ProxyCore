@@ -33,6 +33,9 @@ func (a *configStoreCreateApplyJobAdapter) Trigger(ctx context.Context, actorID 
 	if a == nil || a.store == nil {
 		return errors.New("httpexport: nil configuration store")
 	}
-	_, err := a.store.CreateApplyJob(ctx, actorID)
+	result, err := a.store.CreateApplyJob(ctx, actorID)
+	if err == nil {
+		configuration.NotifyApplyJob(ctx, result)
+	}
 	return err
 }
