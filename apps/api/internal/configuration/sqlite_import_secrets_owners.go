@@ -15,6 +15,15 @@ import (
 	"github.com/zerkc/ProxyCore/apps/api/internal/sqlitedb"
 )
 
+// Import diagnostics. Each sentinel names one reason and is returned wrapped
+// with the zero-based index of the offending entry, never with its values, so
+// operator logs can identify the failure without exposing secret material.
+var (
+	ErrImportSecretIDMissing      = errors.New("import secrets: secret id is missing")
+	ErrImportSecretPurposeMissing = errors.New("import secrets: secret purpose is missing")
+	ErrImportOwnerIncomplete      = errors.New("import owners: owner is incomplete")
+)
+
 // sqliteImportReplicatedSecrets unwraps every replicated secret with the
 // cluster KEK the node received at enrollment (env.NodeLocal.ClusterKeyRef) and
 // re-wraps it with the node's own master key, exactly as locally created
@@ -46,9 +55,12 @@ func sqliteImportReplicatedSecrets(v sqlitedb.WriteValue, env replicationsnapsho
 	}
 	defer kek.Destroy()
 
-	for _, secret := range env.Replicated.Secrets {
-		if secret.ID == uuid.Nil || strings.TrimSpace(secret.Purpose) == "" {
-			return errors.New("import secrets: secret is incomplete")
+	for index, secret := range env.Replicated.Secrets {
+		if secret.ID == uuid.Nil {
+			return fmt.Errorf("%w (index %d)", ErrImportSecretIDMissing, index)
+		}
+		if strings.TrimSpace(secret.Purpose) == "" {
+			return fmt.Errorf("%w (index %d)", ErrImportSecretPurposeMissing, index)
 		}
 		plain, err := kek.Unwrap(secret.Envelope)
 		if err != nil {
@@ -99,10 +111,10 @@ func sqliteImportReplicatedOwners(v sqlitedb.WriteValue, owners []replicationsna
 		return nil
 	}
 	hasOwner := false
-	for _, owner := range owners {
+	for index, owner := range owners {
 		if owner.UserID == uuid.Nil || owner.Username == "" || owner.PasswordHash == "" ||
 			(owner.Role != "owner" && owner.Role != "operator") {
-			return errors.New("import owners: owner is incomplete")
+			return fmt.Errorf("%w (index %d)", ErrImportOwnerIncomplete, index)
 		}
 		hasOwner = hasOwner || owner.Role == "owner"
 	}
