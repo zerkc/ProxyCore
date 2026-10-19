@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/google/uuid"
+
 	"github.com/zerkc/ProxyCore/apps/api/internal/cluster"
 )
 
@@ -97,7 +99,7 @@ func (v *Validator) validateSecrets(env Envelope, result *ValidationResult) {
 		return
 	}
 	for _, secret := range env.Replicated.Secrets {
-		if secret.ID.String() == "" {
+		if secret.ID == uuid.Nil {
 			result.add("SECRET_ID", "replicated.secrets[].id", "secret id is empty")
 			continue
 		}
@@ -126,7 +128,7 @@ func zeroSnapshotSecretBytes(value []byte) {
 
 func (v *Validator) validateOwners(env Envelope, result *ValidationResult) {
 	for _, owner := range env.Replicated.Owners {
-		if owner.UserID.String() == "" {
+		if owner.UserID == uuid.Nil {
 			result.add("OWNER_ID", "replicated.owners[].userId", "owner id is empty")
 			continue
 		}
