@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"unicode/utf8"
+
+	"github.com/zerkc/ProxyCore/apps/api/internal/configuration"
 )
 
 func TestSanitizedMessage(t *testing.T) {
@@ -28,6 +30,14 @@ func TestSanitizedMessage(t *testing.T) {
 		{"key value", errors.New("rejected token=abc123 now"), "rejected <redacted> now"},
 		{"password colon", errors.New("password: hunter2"), "<redacted>"},
 		{"wrapped", fmt.Errorf("outer: %w", errors.New("inner")), "outer: inner"},
+		{"prose secrets colon kept", errors.New("import secrets: secret is incomplete (index 3)"), "import secrets: secret is incomplete (index 3)"},
+		{"prose with redacted id kept", errors.New("import secrets: secret 123e4567-e89b-12d3-a456-426614174000 cannot be unwrapped"), "import secrets: secret <redacted> cannot be unwrapped"},
+		{"prose key colon kept", errors.New("cluster key: unavailable"), "cluster key: unavailable"},
+		{"secret equals value", errors.New("bad secret=sup3rS3cr3t now"), "bad <redacted> now"},
+		{"secret equals plain word", errors.New("bad secret=hunter now"), "bad <redacted> now"},
+		{"password colon long token", errors.New("password: hunter2xxxxxxxxxxxx"), "<redacted>"},
+		{"token colon mixed value", errors.New("rejected token: ab12cd34 by peer"), "rejected <redacted> by peer"},
+		{"api key colon long letters", errors.New("api key: abcdefghijklmnop end"), "api <redacted> end"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -65,5 +75,15 @@ func TestSanitizedMessageNeverLeaks(t *testing.T) {
 		if strings.Contains(got, s) {
 			t.Fatalf("message leaks %q: %q", s, got)
 		}
+	}
+}
+
+func TestImportSecretDiagnosticsAreReadableAndNamedInLogs(t *testing.T) {
+	err := fmt.Errorf("importer: enqueue apply job: %w", fmt.Errorf("%w (index 2)", configuration.ErrImportSecretPurposeMissing))
+	if got := SanitizedMessage(err); !strings.Contains(got, "import secrets: secret purpose is missing (index 2)") {
+		t.Fatalf("sanitized message hides the reason: %q", got)
+	}
+	if got := RedactedCause(err); !strings.Contains(got, "ErrImportSecretPurposeMissing") {
+		t.Fatalf("sentinel not named: %q", got)
 	}
 }
