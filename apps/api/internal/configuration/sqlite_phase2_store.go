@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/zerkc/ProxyCore/apps/api/internal/backupcore/dbexport"
 	"github.com/zerkc/ProxyCore/apps/api/internal/cluster"
 	"github.com/zerkc/ProxyCore/apps/api/internal/domain"
 	"github.com/zerkc/ProxyCore/apps/api/internal/secrets"
@@ -270,7 +271,9 @@ func (t *sqlitePhase2Transaction) findCanonicalSnapshotByHash(ctx context.Contex
 }
 
 func (t *sqlitePhase2Transaction) ListSecrets(ctx context.Context) ([]replicationsnapshot.PlainSecret, error) {
-	rows, err := t.v.Conn().QueryContext(ctx, `select id, purpose, ciphertext from secrets order by id`)
+	// The backup master-key marker is a bundle-only row that a restore leaves in
+	// the table under the reserved nil id. It is not a replicable secret.
+	rows, err := t.v.Conn().QueryContext(ctx, `select id, purpose, ciphertext from secrets where purpose <> ? order by id`, dbexport.BackupMasterKeyMarkerPurpose)
 	if err != nil {
 		return nil, err
 	}

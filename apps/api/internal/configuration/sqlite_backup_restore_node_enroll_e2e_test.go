@@ -3,10 +3,7 @@ package configuration_test
 import (
 	"bytes"
 	"context"
-	"errors"
-	"fmt"
 	"path/filepath"
-	"regexp"
 	"testing"
 
 	"github.com/google/uuid"
@@ -85,13 +82,12 @@ func TestPrimaryWithoutBackupRestoreEnrollsNode_Control(t *testing.T) {
 	t.Log("CONTROL: no restore -> no marker row -> node import succeeds")
 }
 
-// TestBackupRestoredPrimaryCannotEnrollNode_ReproducesNilIDMarkerSecret
-// documents a KNOWN BUG as a characterization test: the real restore persists
-// the backup master-key marker (nil id) into the primary's secrets table, the
-// snapshot exporter replicates it, and the node import fails closed. When the
-// bug is fixed, invert the final assertions (restore must not leak the marker,
-// or the exporter must skip it, and the node import must succeed).
-func TestBackupRestoredPrimaryCannotEnrollNode_ReproducesNilIDMarkerSecret(t *testing.T) {
+// TestBackupRestoredPrimaryEnrollsNode_SkipsBackupMarkerSecret is the regression
+// test for the production failure "import secrets: secret is incomplete". The
+// real restore intentionally keeps the backup master-key marker (reserved nil
+// id) in the primary's secrets table; the snapshot export must not replicate it,
+// so a node can still enroll after the primary was restored from a backup.
+func TestBackupRestoredPrimaryEnrollsNode_SkipsBackupMarkerSecret(t *testing.T) {
 	e := configuration.NewExternalTwoInstalls(t)
 	backupAndRestorePrimary(t, e)
 
@@ -108,18 +104,14 @@ func TestBackupRestoredPrimaryCannotEnrollNode_ReproducesNilIDMarkerSecret(t *te
 	_ = e.PrimaryDB.QueryRow(`select count(*) from secrets`).Scan(&total)
 	t.Logf("STEP 3 (a) primary secrets after restore: %d rows, including the nil-id marker row", total)
 
-	// (b) the snapshot export replicates it with uuid.Nil.
+	// (b) the snapshot export must NOT replicate the bundle-only marker.
 	env := e.Export(t)
-	nilIndex := -1
-	for i, s := range env.Replicated.Secrets {
-		if s.ID == uuid.Nil {
-			nilIndex = i
+	for i, secret := range env.Replicated.Secrets {
+		if secret.ID == uuid.Nil || secret.Purpose == dbexport.BackupMasterKeyMarkerPurpose {
+			t.Fatalf("(b) snapshot must not carry the backup marker, found it at index %d", i)
 		}
 	}
-	if nilIndex < 0 {
-		t.Fatal("(b) snapshot must contain a secret with uuid.Nil")
-	}
-	t.Logf("STEP 4 (b) snapshot exported %d secrets; nil-id secret at index %d", len(env.Replicated.Secrets), nilIndex)
+	t.Logf("STEP 4 (b) snapshot exported %d secrets; no backup marker among them", len(env.Replicated.Secrets))
 
 	kek := e.DeliverKEK(t)
 	defer kek.Destroy()
@@ -128,18 +120,14 @@ func TestBackupRestoredPrimaryCannotEnrollNode_ReproducesNilIDMarkerSecret(t *te
 	for _, issue := range result.Issues {
 		codes = append(codes, issue.Code)
 	}
-	t.Logf("STEP 5 validator OK=%v issues=%v (on this branch the nil-id check is missing)", result.OK, codes)
+	t.Logf("STEP 5 validator OK=%v issues=%v", result.OK, codes)
 	if !result.OK {
-		t.Fatalf("validator unexpectedly rejects the snapshot (nil-id check may already exist): %v", codes)
+		t.Fatalf("validator rejects the snapshot: %v", codes)
 	}
 
-	// (c) the node import fails with the secret-id-missing sentinel.
-	err := e.ImportOnNode(env)
-	t.Logf("STEP 6 node import error: %v", err)
-	if !errors.Is(err, configuration.ErrImportSecretIDMissing) {
-		t.Fatalf("(c) err = %v, want ErrImportSecretIDMissing", err)
+	// (c) the node imports it.
+	if err := e.ImportOnNode(env); err != nil {
+		t.Fatalf("(c) node import after backup restore failed: %v", err)
 	}
-	if want := fmt.Sprintf("(index %d)", nilIndex); !regexp.MustCompile(regexp.QuoteMeta(want)).MatchString(err.Error()) {
-		t.Fatalf("(c) error must report %s: %q", want, err)
-	}
+	t.Logf("STEP 6 node import OK")
 }
