@@ -45,5 +45,15 @@ Behavior changes beyond diagnostics (T4) need the user's approval first.
 - Branch: fix/enrollment-import-secret-diagnostics (from main @ ded8554, v0.6.7).
 - Route: T1-T3 delegated to one writer (touches 2+ non-trivial files; needs reading to prepare writes).
 
+- T3 result: two independent installs round-trip cleanly; the failure is NOT caused by independent keys.
+- Verified finding for T4: `snapshot/validate.go:100` checks `secret.ID.String() == ""` (and `:129` the same for
+  `owner.UserID`), which is never true for `uuid.UUID` (nil prints `00000000-...`). A secret with a nil id therefore
+  passes `validate` and only fails later at import (`import secrets: secret is incomplete`), matching the v0.6.7 log
+  (`step=validate ok`, then `convert` fails). An empty purpose WOULD be flagged by the validator, so the broken secret
+  most likely has a nil id (inference). Why the primary exports a nil-id secret is still unknown
+  (candidate to check: the reserved nil-UUID backup master-key marker row, `backupcore/dbexport/exporter.go:13`).
+- T4 proposal (needs user approval, behavior change): compare against `uuid.Nil` in the validator so the failure
+  surfaces at `validate` with the right reason; root cause on the primary still to be found via the new diagnostics.
+
 ## Next step
 Writer implements T1-T3 test-first; parent reviews and commits one work unit per task.
