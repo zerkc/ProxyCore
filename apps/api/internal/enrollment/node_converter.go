@@ -85,6 +85,9 @@ func KnownCauseSentinels() []NamedError {
 		{"ErrIdentityNotLoaded", identity.ErrIdentityNotLoaded},
 		{"ErrIdentityNotFound", identity.ErrNotFound},
 		{"ErrApplyWaitTimeout", configuration.ErrApplyWaitTimeout},
+		{"ErrContentHashMismatch", replicationsnapshot.ErrContentHashMismatch},
+		{"ErrSecretDigestMissing", replicationsnapshot.ErrSecretDigestMissing},
+		{"ErrUnsupportedHashVersion", replicationsnapshot.ErrUnsupportedHashVersion},
 	}
 }
 

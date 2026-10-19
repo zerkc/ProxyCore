@@ -81,6 +81,18 @@ func TestNodeConverterLogsEveryFailureWithRedactedCause(t *testing.T) {
 			})
 			return c, context.Background(), NodeConversionInput{Envelope: converterEnvelope(t), LocalNodeID: service.Current().NodeID}
 		}, []string{"reason=import_failed", "ErrNodeConversionImport", "*errors.errorString"}},
+		{"import content hash mismatch", func(t *testing.T, sink *converterLogSink) (*NodeConverter, context.Context, NodeConversionInput) {
+			service := newConverterIdentityService(t, domain.TopologyRoleStandalone)
+			enq := &converterEnqueuerFake{}
+			archive := &converterArchiveFake{}
+			c := NewNodeConverter(NodeConverterOptions{
+				Importer: replicationsnapshot.NewImporter(archive, enq, func() time.Time { return time.Now() }),
+				Archive:  archive, Identity: service, ApplyWaiter: &converterWaiterFake{}, ApplyEnqueuer: enq, Logger: sink.logf,
+			})
+			envelope := converterEnvelope(t)
+			envelope.ContentHash = strings.Repeat("0", 64)
+			return c, context.Background(), NodeConversionInput{Envelope: envelope, LocalNodeID: service.Current().NodeID}
+		}, []string{"reason=import_failed", "ErrNodeConversionImport", "ErrContentHashMismatch"}},
 		{"apply wait timeout", func(t *testing.T, sink *converterLogSink) (*NodeConverter, context.Context, NodeConversionInput) {
 			service := newConverterIdentityService(t, domain.TopologyRoleStandalone)
 			waitErr := &syncapply.ApplyWaitTimeoutError{Last: syncapply.ApplyJobTerminal{Status: "running"}}

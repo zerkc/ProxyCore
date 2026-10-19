@@ -57,40 +57,40 @@ type ReplicatedOwner struct {
 // inner ConfigurationSnapshot mirrors the existing ConfigurationSnapshot
 // shape from apps/api/internal/domain/snapshot.go.
 type ReplicatedFields struct {
-	Configuration any                  `json:"configuration"`
-	Secrets       []ReplicatedSecret   `json:"secrets"`
-	Owners        []ReplicatedOwner    `json:"owners"`
+	Configuration any                `json:"configuration"`
+	Secrets       []ReplicatedSecret `json:"secrets"`
+	Owners        []ReplicatedOwner  `json:"owners"`
 }
 
 // NodeLocalFields are authoritative on the receiving node. They MUST be
 // replaced before a snapshot is applied locally; the validator and the
 // importer both enforce this.
 type NodeLocalFields struct {
-	Ingress             domain.Ingress          `json:"ingress"`
-	NodeID              domain.NodeID           `json:"nodeId"`
-	Role                domain.TopologyRole     `json:"role"`
+	Ingress              domain.Ingress              `json:"ingress"`
+	NodeID               domain.NodeID               `json:"nodeId"`
+	Role                 domain.TopologyRole         `json:"role"`
 	LeadershipGeneration domain.LeadershipGeneration `json:"leadershipGeneration"`
-	ClusterKeyRef       *uuid.UUID              `json:"clusterKeyRef,omitempty"`
+	ClusterKeyRef        *uuid.UUID                  `json:"clusterKeyRef,omitempty"`
 }
 
 // TransientFields are authored by the producing primary and describe the
 // envelope itself.
 type TransientFields struct {
-	SnapshotVersion      domain.SnapshotVersion     `json:"snapshotVersion"`
-	ReplicationVersion   domain.ReplicationVersion  `json:"replicationVersion"`
-	SourcePrimaryID      uuid.UUID                  `json:"sourcePrimaryId"`
+	SnapshotVersion      domain.SnapshotVersion      `json:"snapshotVersion"`
+	ReplicationVersion   domain.ReplicationVersion   `json:"replicationVersion"`
+	SourcePrimaryID      uuid.UUID                   `json:"sourcePrimaryId"`
 	LeadershipGeneration domain.LeadershipGeneration `json:"leadershipGeneration"`
-	CapturedAt           time.Time                  `json:"capturedAt"`
+	CapturedAt           time.Time                   `json:"capturedAt"`
 }
 
 // Envelope is the outer shape of a replication snapshot. The ContentHash
 // covers the canonical serialization of ReplicatedFlattened (see the
 // snapshot.Hash function).
 type Envelope struct {
-	Transient   TransientFields `json:"transient"`
-	NodeLocal   NodeLocalFields `json:"nodeLocal"`
+	Transient   TransientFields  `json:"transient"`
+	NodeLocal   NodeLocalFields  `json:"nodeLocal"`
 	Replicated  ReplicatedFields `json:"replicated"`
-	ContentHash string         `json:"contentHash"`
+	ContentHash string           `json:"contentHash"`
 	// HashVersion selects the content-hash definition. Absent (0) or 1 is the
 	// legacy definition that covers settings.ingress; 2 excludes the ingress
 	// so installations with identical configuration but different ingress
@@ -138,6 +138,15 @@ func (e *Envelope) validateClassification() error {
 	return nil
 }
 
+// ErrContentHashMismatch and ErrSecretDigestMissing classify the hash
+// verification failures so callers can log which one occurred without
+// exposing the hashes or secret identifiers carried in the error text.
+var (
+	ErrContentHashMismatch    = errors.New("snapshot content hash mismatch")
+	ErrSecretDigestMissing    = errors.New("snapshot secret digest missing")
+	ErrUnsupportedHashVersion = errors.New("unsupported snapshot hash version")
+)
+
 // ExpectedHash returns the canonical content hash that this envelope should
 // carry once the producer signs it. The hash covers a canonical serialization
 // of the ReplicatedFields only: the snapshot hash is the contract that lets
@@ -158,12 +167,12 @@ func (e *Envelope) ExpectedHash() (string, error) {
 	case HashVersionStableSecrets:
 		for _, secret := range e.Replicated.Secrets {
 			if secret.Digest == "" {
-				return "", fmt.Errorf("hashVersion %d requires a digest on secret %s", HashVersionStableSecrets, secret.ID)
+				return "", fmt.Errorf("%w: hashVersion %d requires a digest on secret %s", ErrSecretDigestMissing, HashVersionStableSecrets, secret.ID)
 			}
 		}
 		canonical = canonicalizeReplicatedStableSecrets(e.Replicated)
 	default:
-		return "", fmt.Errorf("unsupported snapshot hashVersion %d", e.HashVersion)
+		return "", fmt.Errorf("%w: hashVersion %d", ErrUnsupportedHashVersion, e.HashVersion)
 	}
 	sum := sha256.Sum256(canonical)
 	return hex.EncodeToString(sum[:]), nil
@@ -178,7 +187,7 @@ func (e *Envelope) VerifyHash() error {
 		return err
 	}
 	if got != e.ContentHash {
-		return fmt.Errorf("snapshot content hash mismatch: declared %s, computed %s", e.ContentHash, got)
+		return fmt.Errorf("%w: declared %s, computed %s", ErrContentHashMismatch, e.ContentHash, got)
 	}
 	return nil
 }
