@@ -338,7 +338,8 @@ func TestRunServerRuntimeCancelsAndWaitsForOwnedGoroutines(t *testing.T) {
 }
 
 func TestEnrollmentTLSListenerFactoryWiresAddressProviderAndProofOnlyHandler(t *testing.T) {
-	factory := newEnrollmentTLSListenerFactory(runtimeTestIdentity{}, log.New(io.Discard, "", 0))
+	var requestLogs strings.Builder
+	factory := newEnrollmentTLSListenerFactory(runtimeTestIdentity{}, log.New(&requestLogs, "", 0))
 	var gotNetwork, gotAddress string
 	var gotProvider *enrollment.TLSCertificateProvider
 	var gotHandler http.Handler
@@ -375,6 +376,10 @@ func TestEnrollmentTLSListenerFactoryWiresAddressProviderAndProofOnlyHandler(t *
 	gotHandler.ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusNotFound {
 		t.Fatalf("ordinary route status=%d, want %d", recorder.Code, http.StatusNotFound)
+	}
+	id := recorder.Header().Get("X-Request-ID")
+	if id == "" || !strings.Contains(requestLogs.String(), "request_id="+id) {
+		t.Fatalf("TLS identity request has no correlated log: header=%q logs=%q", id, requestLogs.String())
 	}
 }
 

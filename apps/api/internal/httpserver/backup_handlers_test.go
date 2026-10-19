@@ -17,7 +17,9 @@ import (
 	"time"
 
 	"github.com/zerkc/ProxyCore/apps/api/internal/auth"
+	"github.com/zerkc/ProxyCore/apps/api/internal/backupcore/httpexport"
 	"github.com/zerkc/ProxyCore/apps/api/internal/config"
+	"github.com/zerkc/ProxyCore/apps/api/internal/configuration"
 	"github.com/zerkc/ProxyCore/apps/api/internal/httpserver"
 )
 
@@ -298,6 +300,63 @@ func TestBackupImportHappyDryRunUsesQueryAsSourceOfTruth(t *testing.T) {
 	}
 	if len(report.Tables) != 1 || report.Tables[0].Name != "users" || report.Tables[0].RowCount != 2 || report.Tables[0].Action != "preview" {
 		t.Fatalf("tables=%+v", report.Tables)
+	}
+}
+
+type requestBridgeEnqueuer struct {
+	result configuration.ApplyResult
+	err    error
+}
+
+func (e requestBridgeEnqueuer) CreateApplyJob(context.Context, string) (configuration.ApplyResult, error) {
+	return e.result, e.err
+}
+
+func TestBackupImportLogsOnlySuccessfulEnqueueBridge(t *testing.T) {
+	const jobID = "11111111-1111-4111-8111-111111111111"
+	const revisionID = "22222222-2222-4222-8222-222222222222"
+	const correlationID = "33333333-3333-4333-8333-333333333333"
+	for _, tc := range []struct {
+		name       string
+		dryRun     bool
+		enqueueErr error
+		wantBridge bool
+	}{
+		{name: "real restore", wantBridge: true},
+		{name: "dry run", dryRun: true},
+		{name: "enqueue rejected", enqueueErr: errors.New("private-enqueue-error")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var logs bytes.Buffer
+			trigger := httpexport.NewApplyTrigger(requestBridgeEnqueuer{
+				result: configuration.ApplyResult{RevisionID: revisionID, Job: configuration.JobRecord{ID: jobID, CorrelationID: correlationID}},
+				err:    tc.enqueueErr,
+			})
+			fixture := newBackupHTTPFixture(t, nil, backupImporterFunc(func(ctx context.Context, _ io.Reader, _ int64, _ []byte, dryRun bool) (httpserver.ImportReport, error) {
+				if !dryRun {
+					if err := trigger.Trigger(ctx, ""); err != nil {
+						return httpserver.ImportReport{}, err
+					}
+				}
+				return httpserver.ImportReport{DryRun: dryRun, AppliedPostImport: !dryRun}, nil
+			}), log.New(&logs, "", 0))
+			target := "/api/backup/import?dry_run=false"
+			if tc.dryRun {
+				target = "/api/backup/import?dry_run=true"
+			}
+			rec := httptest.NewRecorder()
+			fixture.server.Handler().ServeHTTP(rec, newBackupImportRequest(t, target, fixture.ownerCookie, []byte("bundle"), "", ""))
+			line := logs.String()
+			if tc.wantBridge {
+				id := rec.Header().Get("X-Request-ID")
+				if rec.Code != http.StatusOK || id == "" || !strings.Contains(line, "request_id="+id) ||
+					!strings.Contains(line, "job="+jobID+" revision="+revisionID+" correlation="+correlationID) {
+					t.Fatalf("status=%d bridge=%q", rec.Code, line)
+				}
+			} else if strings.Contains(line, "job="+jobID) || strings.Contains(line, correlationID) {
+				t.Fatalf("rejected/dry-run import logged job: %q", line)
+			}
+		})
 	}
 }
 

@@ -1,16 +1,46 @@
 package httpserver_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"log"
 	"net/http"
 	"strings"
 	"testing"
 
 	"github.com/google/uuid"
+	"github.com/zerkc/ProxyCore/apps/api/internal/config"
 	"github.com/zerkc/ProxyCore/apps/api/internal/configuration"
 	"github.com/zerkc/ProxyCore/apps/api/internal/domain"
+	"github.com/zerkc/ProxyCore/apps/api/internal/httpserver"
 )
+
+func TestApplyRequestLogBridgesToPersistedJobCorrelation(t *testing.T) {
+	env := newSQLiteHTTPTestServer(t)
+	cookie := sqliteOwnerCookie(t, env.Handler)
+	settings := doJSON(t, env.Handler, http.MethodPut, "/api/settings", map[string]any{
+		"defaultPool": map[string]any{"id": "default", "endpoints": []map[string]any{{"host": "1.1.1.1", "port": 53}}},
+	}, cookie)
+	if settings.Code != http.StatusOK {
+		t.Fatalf("settings status=%d", settings.Code)
+	}
+	var logs bytes.Buffer
+	handler := httpserver.New(config.Config{UIDist: t.TempDir(), SessionCookieName: "proxycore_session"}, log.New(&logs, "", 0),
+		httpserver.WithAuthService(env.Auth), httpserver.WithConfigurationStore(env.Config)).Handler()
+	response := doJSON(t, handler, http.MethodPost, "/api/apply", nil, cookie)
+	var apply configuration.ApplyResult
+	if err := json.Unmarshal(response.Body.Bytes(), &apply); err != nil {
+		t.Fatal(err)
+	}
+	id := response.Header().Get("X-Request-ID")
+	if response.Code != http.StatusAccepted || id == "" || apply.Job.CorrelationID == "" ||
+		!strings.Contains(logs.String(), "request_id="+id) ||
+		!strings.Contains(logs.String(), "job="+apply.Job.ID) ||
+		!strings.Contains(logs.String(), "correlation="+apply.Job.CorrelationID) {
+		t.Fatalf("request-to-job bridge missing: status=%d id=%q log=%q", response.Code, id, logs.String())
+	}
+}
 
 func TestConfigurationRoutesFlow(t *testing.T) {
 	env := newSQLiteHTTPTestServer(t)

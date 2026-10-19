@@ -1,14 +1,57 @@
 package httpserver_test
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
+	"log"
 	"net/http"
 	"strings"
 	"testing"
+
+	"github.com/zerkc/ProxyCore/apps/api/internal/config"
+	"github.com/zerkc/ProxyCore/apps/api/internal/configuration"
+	"github.com/zerkc/ProxyCore/apps/api/internal/domain"
+	"github.com/zerkc/ProxyCore/apps/api/internal/httpserver"
 )
 
 // The self-signed lifecycle runs fully offline, so these tests exercise the
 // certificate routes over the SQLite stack without ACME.
+
+type observedCertificateBackend struct {
+	httpserver.ConfigurationBackend
+	apply configuration.ApplyResult
+}
+
+func (b observedCertificateBackend) IssueCertificate(ctx context.Context, input configuration.CertificateIssueInput, _ string) (domain.CertificateStatus, error) {
+	if input.Challenge == "http-01" {
+		configuration.NotifyApplyJob(ctx, b.apply)
+	}
+	return domain.CertificateStatus{Status: "failed", FailureReason: "upstream unavailable"}, nil
+}
+
+func TestCertificateHTTP01RequestLogsEnqueuedApplyEvenIfIssuanceFails(t *testing.T) {
+	env := newSQLiteHTTPTestServer(t)
+	cookie := sqliteOwnerCookie(t, env.Handler)
+	const jobID = "11111111-1111-4111-8111-111111111111"
+	const revisionID = "22222222-2222-4222-8222-222222222222"
+	const correlationID = "33333333-3333-4333-8333-333333333333"
+	var logs bytes.Buffer
+	handler := httpserver.New(config.Config{UIDist: t.TempDir(), SessionCookieName: "proxycore_session"}, log.New(&logs, "", 0),
+		httpserver.WithAuthService(env.Auth), httpserver.WithConfigurationStore(observedCertificateBackend{
+			ConfigurationBackend: env.Config,
+			apply:                configuration.ApplyResult{RevisionID: revisionID, Job: configuration.JobRecord{ID: jobID, CorrelationID: correlationID}},
+		})).Handler()
+	response := doJSON(t, handler, http.MethodPost, "/api/certificates", map[string]any{
+		"hostnames": []string{"example.test"}, "issuer": "letsencrypt", "challenge": "http-01",
+	}, cookie)
+	id := response.Header().Get("X-Request-ID")
+	if response.Code != http.StatusUnprocessableEntity || id == "" ||
+		!strings.Contains(logs.String(), "request_id="+id) ||
+		!strings.Contains(logs.String(), "job="+jobID+" revision="+revisionID+" correlation="+correlationID) {
+		t.Fatalf("status=%d missing certificate bridge: %q", response.Code, logs.String())
+	}
+}
 
 func TestCertificateRoutesRequireAuthentication(t *testing.T) {
 	env := newSQLiteHTTPTestServer(t)

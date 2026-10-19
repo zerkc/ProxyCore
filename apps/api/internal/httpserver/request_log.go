@@ -3,6 +3,8 @@ package httpserver
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"log"
 	"net"
@@ -42,6 +44,12 @@ func RequestLogMiddleware(logger *log.Logger, next http.Handler) http.Handler {
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, original *http.Request) {
 		start := time.Now()
+		var requestID string
+		var idBytes [16]byte
+		if _, err := rand.Read(idBytes[:]); err == nil {
+			requestID = hex.EncodeToString(idBytes[:])
+			w.Header().Set("X-Request-ID", requestID)
+		}
 		notes := &causeNotes{}
 		// r is the request the mux sees, so r.Pattern is readable afterwards.
 		r := original.WithContext(context.WithValue(original.Context(), causeNotesKey{}, notes))
@@ -65,6 +73,9 @@ func RequestLogMiddleware(logger *log.Logger, next http.Handler) http.Handler {
 				return
 			}
 			line := fmt.Sprintf("http %s %s status=%d dur=%dms bytes=%d", r.Method, route, status, time.Since(start).Milliseconds(), rec.bytes)
+			if requestID != "" {
+				line += " request_id=" + requestID
+			}
 			if status >= http.StatusBadRequest {
 				if message := requestLogError(rec.captured); message != "" {
 					line += fmt.Sprintf(" err=%q", message)
@@ -202,15 +213,33 @@ type causeNotesKey struct{}
 type causeNotes struct {
 	mu    sync.Mutex
 	items []string
+	job   string
 }
 
 func (n *causeNotes) render() string {
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	if len(n.items) == 0 {
-		return ""
+	parts := make([]string, 0, 2)
+	if len(n.items) > 0 {
+		parts = append(parts, "cause="+strings.Join(n.items, ";"))
 	}
-	return "cause=" + strings.Join(n.items, ";")
+	if n.job != "" {
+		parts = append(parts, n.job)
+	}
+	return strings.Join(parts, " ")
+}
+
+// noteJob links a server-generated request ID to existing durable job IDs.
+// It never changes the job's persisted correlation ID or response payload.
+func noteJob(ctx context.Context, jobID, revisionID, correlationID string) {
+	if ctx == nil || !requestLogUUID.MatchString(jobID) || !requestLogUUID.MatchString(revisionID) || !requestLogUUID.MatchString(correlationID) {
+		return
+	}
+	if notes, ok := ctx.Value(causeNotesKey{}).(*causeNotes); ok {
+		notes.mu.Lock()
+		notes.job = "job=" + jobID + " revision=" + revisionID + " correlation=" + correlationID
+		notes.mu.Unlock()
+	}
 }
 
 // noteCause attaches a redacted cause (sentinel names plus Go type chain, never

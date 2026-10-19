@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -28,6 +29,8 @@ const (
 	exchangeMaxRequestBytes     = 8 << 10
 	exchangeDefaultMaxBody      = 64 << 10
 )
+
+var errExchangePinMismatch = errors.New("tls: pinned key mismatch")
 
 var (
 	// ErrExchangeDenied is the uniform outcome for every primary-side denial.
@@ -84,6 +87,7 @@ type exchangeResponseWire struct {
 type ExchangeClient struct {
 	httpClient   *http.Client
 	maxBodyBytes int64
+	logf         func(string, ...any)
 }
 
 type ExchangeClientOptions struct {
@@ -95,6 +99,8 @@ type ExchangeClientOptions struct {
 	// to normal chain/hostname verification, never instead of it.
 	PinnedSPKISHA256 string
 	MaxBodyBytes     int64
+	// Logf receives constant failure classes only; never URL, token, body or raw error.
+	Logf func(string, ...any)
 }
 
 func NewExchangeClient(opts ExchangeClientOptions) *ExchangeClient {
@@ -106,7 +112,7 @@ func NewExchangeClient(opts ExchangeClientOptions) *ExchangeClient {
 	if opts.PinnedSPKISHA256 != "" {
 		client = pinExchangeClient(client, opts.PinnedSPKISHA256)
 	}
-	return &ExchangeClient{httpClient: client, maxBodyBytes: max}
+	return &ExchangeClient{httpClient: client, maxBodyBytes: max, logf: opts.Logf}
 }
 
 // pinExchangeClient adds the SPKI pin to the (already cloned) transport. A pin
@@ -124,7 +130,7 @@ func pinExchangeClient(client *http.Client, pin string) *http.Client {
 		}
 		sum := sha256.Sum256(state.PeerCertificates[0].RawSubjectPublicKeyInfo)
 		if subtle.ConstantTimeCompare(sum[:], want) != 1 {
-			return errors.New("tls: pinned key mismatch")
+			return errExchangePinMismatch
 		}
 		return nil
 	}
@@ -135,57 +141,85 @@ func pinExchangeClient(client *http.Client, pin string) *http.Client {
 // Exchange POSTs the request with the enrollment token in the Authorization
 // header only. The token is never logged, placed in a URL or echoed in errors.
 func (c *ExchangeClient) Exchange(ctx context.Context, primaryURL, token string, request ExchangeRequest) (ExchangeResult, error) {
-	if c == nil || c.httpClient == nil || ctx == nil || !validExchangeToken(token) {
+	if c == nil {
+		return ExchangeResult{}, ErrExchangeInvalid
+	}
+	if c.httpClient == nil || ctx == nil || !validExchangeToken(token) {
+		c.logFailure("input", "invalid", 0)
 		return ExchangeResult{}, ErrExchangeInvalid
 	}
 	if err := ctx.Err(); err != nil {
+		c.logFailure("context", "cancelled", 0)
 		return ExchangeResult{}, ErrExchangeUnavailable
 	}
 	normalized, err := canonicalizeSnapshotPrimaryURL(primaryURL)
 	if err != nil || !validSnapshotClientOrigin(normalized) {
+		c.logFailure("origin", "invalid", 0)
 		return ExchangeResult{}, ErrExchangeInvalid
 	}
 	payload, err := json.Marshal(request)
 	if err != nil || len(payload) > exchangeMaxRequestBytes || len(request.RecipientPublicKey) == 0 {
+		c.logFailure("request_payload", "invalid", 0)
 		return ExchangeResult{}, ErrExchangeInvalid
 	}
 	endpoint := strings.TrimRight(normalized, "/") + ExchangeHTTPPath
 	httpRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
 	if err != nil {
+		c.logFailure("request", "construction_failed", 0)
 		return ExchangeResult{}, ErrExchangeInvalid
 	}
 	httpRequest.Header.Set("Content-Type", "application/json")
 	httpRequest.Header.Set("Authorization", exchangeAuthorizationScheme+" "+token)
 	response, err := c.httpClient.Do(httpRequest)
 	if err != nil {
-		// url.Error embeds the URL, never the header, but is discarded anyway.
+		// url.Error embeds the URL; classify but never print the error itself.
+		class := "transport"
+		var certificateError *tls.CertificateVerificationError
+		var authorityError x509.UnknownAuthorityError
+		switch {
+		case errors.Is(err, errExchangePinMismatch):
+			class = "pin_mismatch"
+		case errors.Is(err, context.DeadlineExceeded):
+			class = "timeout"
+		case errors.As(err, &certificateError), errors.As(err, &authorityError):
+			class = "certificate"
+		}
+		c.logFailure("transport", class, 0)
 		return ExchangeResult{}, ErrExchangeUnavailable
 	}
 	defer response.Body.Close()
 	if response.ProtoMajor != 2 {
+		c.logFailure("protocol", "not_http2", 0)
 		return ExchangeResult{}, ErrExchangeInvalid
 	}
 	switch {
 	case response.StatusCode == http.StatusTooManyRequests:
+		c.logFailure("response_status", "rate_limited", response.StatusCode)
 		return ExchangeResult{}, &ExchangeRateLimitedError{RetryAfter: parseExchangeRetryAfter(response.Header.Get("Retry-After"))}
 	case response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden ||
 		response.StatusCode == http.StatusNotFound || response.StatusCode == http.StatusGone:
+		c.logFailure("response_status", "denied", response.StatusCode)
 		return ExchangeResult{}, ErrExchangeDenied
 	case response.StatusCode >= 500 && response.StatusCode <= 599:
+		c.logFailure("response_status", "upstream_5xx", response.StatusCode)
 		return ExchangeResult{}, ErrExchangeUnavailable
 	case response.StatusCode != http.StatusCreated:
+		c.logFailure("response_status", "unexpected_status", response.StatusCode)
 		return ExchangeResult{}, ErrExchangeInvalid
 	}
 	body, err := io.ReadAll(io.LimitReader(response.Body, c.maxBodyBytes+1))
 	if err != nil {
+		c.logFailure("response_body", "read_failed", 0)
 		return ExchangeResult{}, ErrExchangeUnavailable
 	}
 	if int64(len(body)) > c.maxBodyBytes || len(body) == 0 {
+		c.logFailure("response_body", "size_invalid", 0)
 		return ExchangeResult{}, ErrExchangeInvalid
 	}
 	var wire exchangeResponseWire
 	if err := json.Unmarshal(body, &wire); err != nil || len(wire.SealedBootstrapPayload) == 0 ||
 		wire.PayloadHash == "" || wire.ExpiresAt.IsZero() {
+		c.logFailure("response_body", "payload_invalid", 0)
 		return ExchangeResult{}, ErrExchangeInvalid
 	}
 	return ExchangeResult{
@@ -193,6 +227,16 @@ func (c *ExchangeClient) Exchange(ctx context.Context, primaryURL, token string,
 		PayloadHash:   wire.PayloadHash,
 		ExpiresAt:     wire.ExpiresAt.UTC(),
 	}, nil
+}
+
+func (c *ExchangeClient) logFailure(step, class string, status int) {
+	if c.logf != nil {
+		if status != 0 {
+			c.logf("enrollment exchange failed step=%s class=%s status=%d", step, class, status)
+		} else {
+			c.logf("enrollment exchange failed step=%s class=%s", step, class)
+		}
+	}
 }
 
 func validExchangeToken(token string) bool {

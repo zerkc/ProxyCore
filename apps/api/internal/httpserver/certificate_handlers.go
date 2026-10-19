@@ -120,7 +120,10 @@ func (s *Server) handleIssueCertificate(w http.ResponseWriter, r *http.Request) 
 		writeConfigError(w, err)
 		return
 	}
-	cert, err := store.IssueCertificate(r.Context(), input, user.ID)
+	ctx := configuration.WithApplyJobObserver(r.Context(), func(apply configuration.ApplyResult) {
+		noteApply(r.Context(), apply)
+	})
+	cert, err := store.IssueCertificate(ctx, input, user.ID)
 	if err != nil {
 		writeConfigError(w, err)
 		return

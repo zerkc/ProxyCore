@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -191,6 +192,28 @@ func TestExchangeClientInvalidInputsNeverReachTransport(t *testing.T) {
 		if err := run(); !errors.Is(err, ErrExchangeInvalid) {
 			t.Fatalf("%s: err = %v, want ErrExchangeInvalid", name, err)
 		}
+	}
+}
+
+func TestExchangeClientLogsLocalValidationWithoutInput(t *testing.T) {
+	var lines []string
+	client := NewExchangeClient(ExchangeClientOptions{Logf: func(format string, args ...any) { lines = append(lines, fmt.Sprintf(format, args...)) }})
+	_, err := client.Exchange(context.Background(), "http://private.example:3443/", exchangeTestToken, exchangeTestRequest())
+	if !errors.Is(err, ErrExchangeInvalid) || len(lines) != 1 || !strings.Contains(lines[0], "step=origin class=invalid") || strings.Contains(lines[0], "private.example") || strings.Contains(lines[0], exchangeTestToken) {
+		t.Fatalf("err=%v safe-log=%q", err, lines)
+	}
+}
+
+func TestExchangeClientLogsOnlySafeFailureClass(t *testing.T) {
+	var lines []string
+	server, pin := startExchangeServer(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = w.Write([]byte(`{"secret":"private-detail"}`))
+	})
+	client := NewExchangeClient(ExchangeClientOptions{HTTPClient: server.Client(), PinnedSPKISHA256: pin, Logf: func(format string, args ...any) { lines = append(lines, fmt.Sprintf(format, args...)) }})
+	_, err := client.Exchange(context.Background(), server.URL, exchangeTestToken, exchangeTestRequest())
+	if !errors.Is(err, ErrExchangeUnavailable) || len(lines) != 1 || !strings.Contains(lines[0], "step=response_status class=upstream_5xx status=502") || strings.Contains(lines[0], exchangeTestToken) || strings.Contains(lines[0], "private-detail") {
+		t.Fatalf("err=%v safe-log=%q", err, lines)
 	}
 }
 

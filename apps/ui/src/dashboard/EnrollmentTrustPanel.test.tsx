@@ -151,7 +151,9 @@ describe("EnrollmentTrustPanel", () => {
 
     expect(container.textContent).toContain("SHA-256 fingerprint");
     expect(container.textContent).toContain("0123 4567 89ab cdef");
-    expect(container.textContent).toContain("January 1, 2030");
+    // Expiry is displayed in the viewer's locale/timezone, not always UTC.
+    const localExpiry = new Intl.DateTimeFormat(undefined, { dateStyle: "long" }).format(new Date("2030-01-01T00:00:00Z"));
+    expect(container.textContent).toContain(localExpiry);
     expect(container.textContent).not.toContain(leafPEM);
     expect(container.textContent).not.toContain(caPEM);
     expect(fetchMock).toHaveBeenCalledWith(

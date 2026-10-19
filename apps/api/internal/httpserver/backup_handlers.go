@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/zerkc/ProxyCore/apps/api/internal/auth"
+	"github.com/zerkc/ProxyCore/apps/api/internal/configuration"
 )
 
 // BackupExporter is the HTTP boundary for a streaming backup export. It is
@@ -165,11 +166,16 @@ func (s *Server) handleBackupImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The importer returns a report, not the apply job it enqueues after restore.
+	// Observe only committed jobs without changing the importer contract.
+	ctx := configuration.WithApplyJobObserver(r.Context(), func(apply configuration.ApplyResult) {
+		noteApply(r.Context(), apply)
+	})
 	var report ImportReport
 	if actorImporter, ok := s.backupImporter.(actorBackupImporter); ok {
-		report, err = actorImporter.ImportWithActorID(r.Context(), file, header.Size, passphrase, dryRun, user.ID)
+		report, err = actorImporter.ImportWithActorID(ctx, file, header.Size, passphrase, dryRun, user.ID)
 	} else {
-		report, err = s.backupImporter.Import(r.Context(), file, header.Size, passphrase, dryRun)
+		report, err = s.backupImporter.Import(ctx, file, header.Size, passphrase, dryRun)
 	}
 	if err != nil {
 		writeBackupImportError(w, err)

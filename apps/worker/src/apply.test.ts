@@ -174,6 +174,83 @@ describe("apply orchestrator", () => {
     expect(control.operations).toEqual(["stage", "validate"]);
   });
 
+  it("logs a safe job, revision, service and step when a control operation fails", async () => {
+    const { jobs, revisions, job, control } = await setup("validate");
+    const logs: string[] = [];
+    const worker = new ApplyOrchestrator({
+      jobs,
+      revisions,
+      control,
+      log: (line) => logs.push(line),
+    });
+    const result = await worker.apply(job.id, { zones: [] }, () => ({
+      service: "coredns",
+      candidatePath: "/candidates/private",
+      checksum: "abc",
+    }));
+    expect(result.status).toBe("failed");
+    expect(result.errorMessage).toBe("simulated failure");
+    expect(logs).toEqual([
+      expect.stringContaining("step=validate service=coredns"),
+    ]);
+    expect(logs[0]).toContain(`job=${job.id} revision=${job.revisionId}`);
+    expect(logs[0]).toContain(`correlation=${job.correlationId}`);
+    expect(logs[0]).not.toMatch(/simulated failure|private|abc/);
+  });
+
+  it("logs the job ID when lookup fails before rendering", async () => {
+    const { jobs, revisions, control } = await setup();
+    const logs: string[] = [];
+    const worker = new ApplyOrchestrator({
+      jobs,
+      revisions,
+      control,
+      log: (line) => logs.push(line),
+    });
+    await expect(
+      worker.apply("missing-job", { zones: [] }, () => {
+        throw new Error("should not render");
+      }),
+    ).rejects.toThrow("Job not found");
+    expect(logs).toEqual([
+      expect.stringContaining(
+        "job=missing-job revision=unavailable step=lookup",
+      ),
+    ]);
+  });
+
+  it("logs failed rollback without exposing control error text", async () => {
+    const { jobs, revisions, job } = await setup();
+    const logs: string[] = [];
+    const control: ControlClient = {
+      execute: async (request) => ({
+        requestId: request.requestId,
+        operation: request.operation,
+        ok: request.operation !== "health" && request.operation !== "rollback",
+        error: "private credential",
+      }),
+    };
+    const worker = new ApplyOrchestrator({
+      jobs,
+      revisions,
+      control,
+      log: (line) => logs.push(line),
+    });
+    const result = await worker.apply(job.id, { zones: [] }, () => ({
+      service: "coredns",
+      candidatePath: "/private/candidate",
+      checksum: "abc",
+    }));
+    expect(result.status).toBe("failed");
+    expect(logs).toEqual([
+      expect.stringContaining("step=health service=coredns"),
+      expect.stringContaining(
+        `worker rollback failed job=${job.id} revision=${job.revisionId} correlation=${job.correlationId} service=coredns`,
+      ),
+    ]);
+    expect(logs.join("\n")).not.toMatch(/credential|candidate|abc/);
+  });
+
   it("rolls back after a post-promotion health failure", async () => {
     const { worker, job, control } = await setup("health");
     const result = await worker.apply(job.id, { zones: [] }, () => ({

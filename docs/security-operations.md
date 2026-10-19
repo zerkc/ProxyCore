@@ -79,6 +79,26 @@ Renewal failure keeps the current valid certificate and surfaces expiry risk. Ba
 - Configurable retention: 7 days or 50 MB by default, whichever limit is reached first
 - No Prometheus or webhook alert system in MVP
 
+### Failure diagnostics
+
+The ordinary API returns a generated `X-Request-ID` header and records the same
+`request_id` on its HTTP request line (except successful quiet health/static
+requests). Treat incoming request IDs as untrusted: the server generates its own.
+The dedicated enrollment TLS listeners also use this middleware. Ordinary API
+apply, zone/record auto-apply, initial ingress apply, and topology promotion
+attach the durable `job`, `revision` and `correlation` IDs to the request log.
+Backup restore and HTTP-01 certificate issuance attach these fields after
+their apply job commits, including when later certificate issuance fails;
+backup dry runs and failed enqueues do not record a job. Match the worker's
+failure line on the same job/correlation. Background jobs retain independently
+generated correlation IDs. This is a log bridge, not a propagated trace context
+for every operation. The control process records a safe
+`request`, operation, service and failure class for rejected socket operations.
+Enrollment grant exchange logs a step, a bounded class and, when relevant, an
+HTTP status; it never includes its token, URL or response body. Logs deliberately
+avoid raw exception text in these new diagnostics. Preserve existing log access
+controls: job records and other older logs may still contain raw error text.
+
 ## Primary–Node continuity threat model (Phase 0+)
 
 The PRIMARY/NODE topology introduced by `docs/prd-primary-node-continuity.md`
