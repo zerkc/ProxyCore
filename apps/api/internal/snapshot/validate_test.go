@@ -239,6 +239,37 @@ func TestValidatorRejectsEmptySecretEnvelope(t *testing.T) {
 	}
 }
 
+func TestValidatorRejectsNilSecretAndOwnerIDs(t *testing.T) {
+	kekBytes, err := cluster.GenerateKEK()
+	if err != nil {
+		t.Fatalf("GenerateKEK: %v", err)
+	}
+	kek, err := cluster.NewKEK(kekBytes)
+	if err != nil {
+		t.Fatalf("NewKEK: %v", err)
+	}
+	v := NewValidator(kek)
+	env := sealedEnvelope(t)
+	env.Replicated.Secrets = []ReplicatedSecret{
+		{ID: uuid.Nil, Purpose: "tls-key", Envelope: "not-a-kek-envelope"},
+	}
+	env.Replicated.Owners = []ReplicatedOwner{
+		{UserID: uuid.Nil, Username: "admin", PasswordHash: "scrypt$16384$8$1$aa$bb", Role: "owner"},
+	}
+	if hash, err := env.ExpectedHash(); err == nil {
+		env.ContentHash = hash
+	}
+	result := v.Validate(context.Background(), env)
+	if result.OK {
+		t.Fatalf("expected validation to fail for nil ids, got OK")
+	}
+	for _, code := range []string{"SECRET_ID", "OWNER_ID"} {
+		if !hasCode(result, code) {
+			t.Errorf("expected %s issue, got %+v", code, result.Issues)
+		}
+	}
+}
+
 func TestValidatorRejectsOwnerWithBadHash(t *testing.T) {
 	kekBytes, err := cluster.GenerateKEK()
 	if err != nil {
