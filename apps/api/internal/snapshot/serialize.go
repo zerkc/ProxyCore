@@ -25,13 +25,16 @@ func Marshal(e Envelope) ([]byte, error) {
 // Unmarshal parses a JSON payload into the Envelope type. It does NOT
 // validate the envelope; callers MUST call Envelope.Validate after parsing
 // to confirm structural correctness and the declared content hash.
+// ErrEnvelopeShape means the JSON parsed but is not a snapshot envelope.
+var ErrEnvelopeShape = errors.New("envelope shape does not match the snapshot schema")
+
 func Unmarshal(data []byte) (Envelope, error) {
 	var env Envelope
 	if err := json.Unmarshal(data, &env); err != nil {
 		return Envelope{}, fmt.Errorf("unmarshal envelope: %w", err)
 	}
 	if env.Transient.SnapshotVersion == 0 && env.Replicated.Configuration == nil {
-		return Envelope{}, errors.New("envelope shape does not match the snapshot schema")
+		return Envelope{}, ErrEnvelopeShape
 	}
 	return env, nil
 }

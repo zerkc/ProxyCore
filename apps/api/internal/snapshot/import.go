@@ -11,6 +11,14 @@ import (
 	"github.com/zerkc/ProxyCore/apps/api/internal/domain"
 )
 
+// Stage sentinels classify which Import step failed. Their text is the
+// original wrapping prefix, so error messages are unchanged.
+var (
+	ErrImportRewrite = errors.New("importer: rewrite node-local fields")
+	ErrImportArchive = errors.New("importer: save archive")
+	ErrImportEnqueue = errors.New("importer: enqueue apply job")
+)
+
 // ArchiveStore persists the prior standalone desired state when an
 // installation transitions to NODE. The archive carries an explicit TTL
 // so the retention worker can purge it after the configured period.
@@ -103,7 +111,7 @@ func (i *Importer) Import(ctx context.Context, env *Envelope, in ImporterInput) 
 		in.ArchiveReason = "transition-to-node"
 	}
 	if err := i.replaceNodeLocalFields(env, in); err != nil {
-		return ImporterResult{}, fmt.Errorf("importer: rewrite node-local fields: %w", err)
+		return ImporterResult{}, fmt.Errorf("%w: %w", ErrImportRewrite, err)
 	}
 	capturedAt := i.now().UTC()
 	archive := StandaloneArchive{
@@ -114,11 +122,11 @@ func (i *Importer) Import(ctx context.Context, env *Envelope, in ImporterInput) 
 		SnapshotData: mustMarshalEnvelope(*env),
 	}
 	if err := i.archive.SaveStandaloneArchive(ctx, archive); err != nil {
-		return ImporterResult{}, fmt.Errorf("importer: save archive: %w", err)
+		return ImporterResult{}, fmt.Errorf("%w: %w", ErrImportArchive, err)
 	}
 	jobID, err := i.enqueuer.CreateApplyJobFromSnapshot(ctx, "import", archive.SnapshotData)
 	if err != nil {
-		return ImporterResult{}, fmt.Errorf("importer: enqueue apply job: %w", err)
+		return ImporterResult{}, fmt.Errorf("%w: %w", ErrImportEnqueue, err)
 	}
 	return ImporterResult{ArchiveID: archive.ID, ApplyJobID: jobID}, nil
 }

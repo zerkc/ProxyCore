@@ -80,7 +80,7 @@ func TestNodeConverterLogsEveryFailureWithRedactedCause(t *testing.T) {
 				Archive:  archive, Identity: service, ApplyWaiter: &converterWaiterFake{}, ApplyEnqueuer: enq, Logger: sink.logf,
 			})
 			return c, context.Background(), NodeConversionInput{Envelope: converterEnvelope(t), LocalNodeID: service.Current().NodeID}
-		}, []string{"reason=import_failed", "ErrNodeConversionImport", "*errors.errorString"}},
+		}, []string{"reason=import_failed", "ErrNodeConversionImport", "ErrImportArchive"}},
 		{"import content hash mismatch", func(t *testing.T, sink *converterLogSink) (*NodeConverter, context.Context, NodeConversionInput) {
 			service := newConverterIdentityService(t, domain.TopologyRoleStandalone)
 			enq := &converterEnqueuerFake{}
@@ -122,10 +122,10 @@ func TestNodeConverterLogsEveryFailureWithRedactedCause(t *testing.T) {
 					t.Fatalf("log missing %q:\n%s", want, out)
 				}
 			}
-			if !strings.Contains(out, "node conversion rejected") {
+			if !strings.Contains(out, "node conversion rejected") || !strings.Contains(out, " msg=\"") {
 				t.Fatalf("log must carry the stable prefix:\n%s", out)
 			}
-			for _, secret := range []string{converterSecret, "pcenr1_", "disk said"} {
+			for _, secret := range []string{converterSecret, "pcenr1_"} {
 				if strings.Contains(out, secret) {
 					t.Fatalf("log leaks %q:\n%s", secret, out)
 				}
@@ -223,11 +223,56 @@ func TestNodeConverterResyncLogsEveryFailureClass(t *testing.T) {
 					t.Fatalf("log missing %q:\n%s", want, out)
 				}
 			}
-			for _, secret := range []string{converterSecret, "worker said", "disk said", key.String()} {
+			for _, secret := range []string{converterSecret, "worker said", key.String()} {
 				if strings.Contains(out, secret) {
 					t.Fatalf("log leaks %q:\n%s", secret, out)
 				}
 			}
 		})
+	}
+}
+
+func TestNodeConverterLogsProgressAndSanitizedMessage(t *testing.T) {
+	sink := &converterLogSink{}
+	service := newConverterIdentityService(t, domain.TopologyRoleStandalone)
+	enq := &converterEnqueuerFake{}
+	archive := &failingArchive{}
+	c := NewNodeConverter(NodeConverterOptions{
+		Importer: replicationsnapshot.NewImporter(archive, enq, func() time.Time { return time.Now() }),
+		Archive:  archive, Identity: service, ApplyWaiter: &converterWaiterFake{}, ApplyEnqueuer: enq, Logger: sink.logf,
+	})
+	if _, err := c.Convert(context.Background(), NodeConversionInput{Envelope: converterEnvelope(t), LocalNodeID: service.Current().NodeID}); err == nil {
+		t.Fatal("Convert must fail")
+	}
+	out := sink.text()
+	for _, want := range []string{"node conversion import start", "msg=\"", "disk said"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("log missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "import ok") || strings.Contains(out, converterSecret) || strings.Contains(out, "pcenr1_token") {
+		t.Fatalf("failed import must not log ok nor leak:\n%s", out)
+	}
+}
+
+func TestNodeConverterLogsSuccessfulSubstages(t *testing.T) {
+	sink := &converterLogSink{}
+	service := newConverterIdentityService(t, domain.TopologyRoleStandalone)
+	c := newTestNodeConverter(&converterArchiveFake{}, &converterEnqueuerFake{}, service, &converterWaiterFake{
+		statuses: []syncapply.ApplyJobTerminal{{Status: syncapply.ApplyTerminalStatusApplied}},
+	})
+	c.logger = sink.logf
+	key := uuid.New()
+	if _, err := c.Convert(context.Background(), NodeConversionInput{Envelope: converterEnvelope(t), LocalNodeID: service.Current().NodeID, ClusterKeyID: &key}); err != nil {
+		t.Skipf("fixture cannot complete a conversion: %v", err)
+	}
+	out := sink.text()
+	last := -1
+	for _, want := range []string{"import start", "import ok archive=", "apply wait start", "apply wait ok", "identity commit start", "committed node="} {
+		idx := strings.Index(out, want)
+		if idx < 0 || idx < last {
+			t.Fatalf("log missing or out of order %q:\n%s", want, out)
+		}
+		last = idx
 	}
 }

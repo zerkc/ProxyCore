@@ -88,6 +88,15 @@ func KnownCauseSentinels() []NamedError {
 		{"ErrContentHashMismatch", replicationsnapshot.ErrContentHashMismatch},
 		{"ErrSecretDigestMissing", replicationsnapshot.ErrSecretDigestMissing},
 		{"ErrUnsupportedHashVersion", replicationsnapshot.ErrUnsupportedHashVersion},
+		{"ErrImportRewrite", replicationsnapshot.ErrImportRewrite},
+		{"ErrImportArchive", replicationsnapshot.ErrImportArchive},
+		{"ErrImportEnqueue", replicationsnapshot.ErrImportEnqueue},
+		{"ErrEnvelopeShape", replicationsnapshot.ErrEnvelopeShape},
+		{"ErrImportSnapshotEmpty", configuration.ErrImportSnapshotEmpty},
+		{"ErrImportSnapshotIdentity", configuration.ErrImportSnapshotIdentity},
+		{"ErrImportSnapshotTransient", configuration.ErrImportSnapshotTransient},
+		{"ErrImportSnapshotGeneration", configuration.ErrImportSnapshotGeneration},
+		{"ErrImportSnapshotHashEmpty", configuration.ErrImportSnapshotHashEmpty},
 	}
 }
 
@@ -261,6 +270,8 @@ func (c *NodeConverter) Convert(ctx context.Context, in NodeConversionInput) (No
 		return NodeConversionResult{}, denied
 	}
 
+	c.logger("node conversion import start")
+	importStart := c.now()
 	imported, err := c.importer.Import(ctx, in.Envelope, replicationsnapshot.ImporterInput{
 		LocalInstallationID: in.LocalInstallId,
 		LocalNodeID:         in.LocalNodeID,
@@ -272,7 +283,10 @@ func (c *NodeConverter) Convert(ctx context.Context, in NodeConversionInput) (No
 		c.reject("import_failed", "", wrapped)
 		return NodeConversionResult{}, wrapped
 	}
+	c.logger("node conversion import ok archive=%s job=%s dur=%s", imported.ArchiveID, imported.ApplyJobID, c.now().Sub(importStart))
 	c.logger("node conversion apply queued archive=%s job=%s", imported.ArchiveID, imported.ApplyJobID)
+	c.logger("node conversion apply wait start archive=%s job=%s", imported.ArchiveID, imported.ApplyJobID)
+	waitStart := c.now()
 
 	terminal, err := configuration.WaitForTerminalApply(ctx, c.applyWaiter, imported.ApplyJobID, configuration.ApplyWaitOptions{
 		Timeout: in.ApplyWaitTimeout,
@@ -294,6 +308,8 @@ func (c *NodeConverter) Convert(ctx context.Context, in NodeConversionInput) (No
 		return NodeConversionResult{}, aborted
 	}
 
+	c.logger("node conversion apply wait ok archive=%s job=%s dur=%s", imported.ArchiveID, imported.ApplyJobID, c.now().Sub(waitStart))
+	c.logger("node conversion identity commit start archive=%s job=%s", imported.ArchiveID, imported.ApplyJobID)
 	postTransition, err := c.identity.CommitNodeEnrollment(ctx, in.ClusterKeyID, in.Envelope.Transient.LeadershipGeneration)
 	if err != nil {
 		c.logger("node conversion identity transition denied archive=%s job=%s", imported.ArchiveID, imported.ApplyJobID)
@@ -361,7 +377,7 @@ func (c *NodeConverter) reject(reason, detail string, cause error) {
 	if detail != "" {
 		detail += " "
 	}
-	c.logger("node conversion rejected reason=%s %scause=%s", reason, detail, RedactedCause(cause))
+	c.logger("node conversion rejected reason=%s %scause=%s msg=%q", reason, detail, RedactedCause(cause), SanitizedMessage(cause))
 }
 
 // NodeResyncInput is one continuous-sync import for an installation that is
@@ -453,5 +469,5 @@ func (c *NodeConverter) rejectResync(reason, detail string, cause error) {
 	if detail != "" {
 		detail += " "
 	}
-	c.logger("node resync rejected reason=%s %scause=%s", reason, detail, RedactedCause(cause))
+	c.logger("node resync rejected reason=%s %scause=%s msg=%q", reason, detail, RedactedCause(cause), SanitizedMessage(cause))
 }

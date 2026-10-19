@@ -108,7 +108,10 @@ func TestConfirmLogsRedactedReasonCodes(t *testing.T) {
 			if want := "reason=" + tc.reason; !strings.Contains(output, want) {
 				t.Fatalf("log = %q, want %q", output, want)
 			}
-			for _, secret := range []string{f.token, "pcenr1_", "raw detail", "weird failure", "primary said"} {
+			if strings.Contains(output, "cause=") && !strings.Contains(output, " msg=\"") {
+				t.Fatalf("rejected line must carry msg=: %q", output)
+			}
+			for _, secret := range []string{f.token, "pcenr1_"} {
 				if strings.Contains(output, secret) {
 					t.Fatalf("log leaks %q: %q", secret, output)
 				}
@@ -203,7 +206,7 @@ func TestConfirmLogsStepReasonStatusAndRedactedCauseForEveryFailure(t *testing.T
 			if !strings.Contains(out, fmt.Sprintf("status=%d", tc.status)) {
 				t.Fatalf("log missing status:\n%s", out)
 			}
-			for _, secret := range []string{f.token, "pcenr1_", "raw detail", "read-back failed", "disk full", "weird", "primary said"} {
+			for _, secret := range []string{f.token, "pcenr1_"} {
 				if strings.Contains(out, secret) {
 					t.Fatalf("log leaks %q:\n%s", secret, out)
 				}
@@ -222,6 +225,36 @@ func TestConfirmLogsSuccessLine(t *testing.T) {
 	out := buf.String()
 	if !strings.Contains(out, "enrollment confirm committed role=node generation=1") || strings.Contains(out, f.token) {
 		t.Fatalf("log = %s", out)
+	}
+	last := -1
+	for _, step := range []string{"draft_lookup", "tls_authority", "identity", "ingress", "binding", "exchange", "accept", "kek_load", "validate", "record_sync", "convert", "response"} {
+		for _, suffix := range []string{" start", " ok dur="} {
+			want := "enrollment confirm step=" + step + suffix
+			idx := strings.Index(out, want)
+			if idx < 0 || idx < last {
+				t.Fatalf("log missing or out of order %q:\n%s", want, out)
+			}
+			last = idx
+		}
+	}
+}
+
+func TestConfirmLogsRedactedMessageForLeakyError(t *testing.T) {
+	f := newConfirmFixture(t, true)
+	var buf bytes.Buffer
+	f.convertErr = enrollment.NewNodeConversionImportError(fmt.Errorf("save archive for https://primary.example/x with %s and key=topsecret at 192.0.2.7", f.token))
+	f.withLogger(log.New(&buf, "", 0), nil)
+	if rec := f.confirm(); rec.Code != http.StatusConflict {
+		t.Fatalf("status=%d", rec.Code)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "step=convert start") || !strings.Contains(out, "msg=\"") || !strings.Contains(out, "save archive for <redacted> with <redacted>") {
+		t.Fatalf("log = %s", out)
+	}
+	for _, secret := range []string{f.token, "primary.example", "topsecret", "192.0.2.7"} {
+		if strings.Contains(out, secret) {
+			t.Fatalf("log leaks %q:\n%s", secret, out)
+		}
 	}
 }
 

@@ -151,26 +151,36 @@ type importedSnapshotFields struct {
 
 // importedSnapshotMetadata parses only the fields required for persistence.
 // Cryptographic and content validation remains the caller/validator boundary.
+// Sentinels classify why an imported snapshot was refused, so callers can log
+// the reason without exposing snapshot content.
+var (
+	ErrImportSnapshotEmpty      = errors.New("import snapshot is empty")
+	ErrImportSnapshotIdentity   = errors.New("import snapshot has invalid source identity")
+	ErrImportSnapshotTransient  = errors.New("import snapshot has invalid transient metadata")
+	ErrImportSnapshotGeneration = errors.New("import snapshot leadership generation exceeds PostgreSQL range")
+	ErrImportSnapshotHashEmpty  = errors.New("import snapshot content hash is empty")
+)
+
 func importedSnapshotMetadata(snapshotBytes []byte) (importedSnapshotFields, error) {
 	if len(snapshotBytes) == 0 {
-		return importedSnapshotFields{}, errors.New("import snapshot is empty")
+		return importedSnapshotFields{}, ErrImportSnapshotEmpty
 	}
 	env, err := snapshot.Unmarshal(snapshotBytes)
 	if err != nil {
 		return importedSnapshotFields{}, err
 	}
 	if env.Transient.SourcePrimaryID == uuid.Nil || !env.NodeLocal.NodeID.IsValid() {
-		return importedSnapshotFields{}, errors.New("import snapshot has invalid source identity")
+		return importedSnapshotFields{}, ErrImportSnapshotIdentity
 	}
 	if !env.Transient.SnapshotVersion.IsValid() || !env.Transient.ReplicationVersion.IsValid() || env.Transient.LeadershipGeneration == 0 {
-		return importedSnapshotFields{}, errors.New("import snapshot has invalid transient metadata")
+		return importedSnapshotFields{}, ErrImportSnapshotTransient
 	}
 	const maxInt64 = uint64(^uint64(0) >> 1)
 	if uint64(env.Transient.LeadershipGeneration) > maxInt64 {
-		return importedSnapshotFields{}, errors.New("import snapshot leadership generation exceeds PostgreSQL range")
+		return importedSnapshotFields{}, ErrImportSnapshotGeneration
 	}
 	if env.ContentHash == "" {
-		return importedSnapshotFields{}, errors.New("import snapshot content hash is empty")
+		return importedSnapshotFields{}, ErrImportSnapshotHashEmpty
 	}
 	sourceNodeID, err := uuid.Parse(env.NodeLocal.NodeID.String())
 	if err != nil {

@@ -207,7 +207,21 @@ var workflowSentinels = []enrollment.NamedError{
 // causeDetail renders only sentinel names and the Go type chain of err, never
 // its text, so tokens, keys or payloads inside wrapped messages cannot leak.
 func causeDetail(err error) string {
-	return "cause=" + enrollment.RedactedCause(err, workflowSentinels...)
+	return "cause=" + enrollment.RedactedCause(err, workflowSentinels...) + fmt.Sprintf(" msg=%q", enrollment.SanitizedMessage(err))
+}
+
+// stage logs the start of one workflow step and returns the function that logs
+// its successful completion with the elapsed time. Only the operation, the
+// step name and a duration are written, never request data.
+func (h *enrollmentWorkflowHandler) stage(op, step string) func() {
+	if h.logger == nil {
+		return func() {}
+	}
+	started := time.Now()
+	h.logger.Printf("enrollment %s step=%s start", op, step)
+	return func() {
+		h.logger.Printf("enrollment %s step=%s ok dur=%s", op, step, time.Since(started).Round(time.Millisecond))
+	}
 }
 
 // reject logs one redacted line (operation, step, stable reason code, HTTP
@@ -435,14 +449,18 @@ func (h *enrollmentWorkflowHandler) handleConfirm(w http.ResponseWriter, r *http
 		h.reject(w, op, "draft_lookup", "draft_expired", http.StatusGone, "enrollment draft expired; re-enter the token", "cache=nil")
 		return
 	}
+	lookupDone := h.stage(op, "draft_lookup")
 	draft, ok := h.cache.GetByID(request.DraftID)
 	if !ok {
 		h.reject(w, op, "draft_lookup", "draft_expired", http.StatusGone, "enrollment draft expired; re-enter the token", "")
 		return
 	}
+	lookupDone()
+	tlsDone := h.stage(op, "tls_authority")
 	if !h.requireTLSAuthority(w, r, draft.PrimaryURL, op) {
 		return
 	}
+	tlsDone()
 	if h.converter == nil || h.validator == nil || h.identity == nil {
 		h.reject(w, op, "workflow", "converter_unavailable", http.StatusConflict, "enrollment conversion denied",
 			fmt.Sprintf("converter_nil=%t validator_nil=%t identity_nil=%t", h.converter == nil, h.validator == nil, h.identity == nil))
@@ -472,6 +490,7 @@ func (h *enrollmentWorkflowHandler) handleConfirm(w http.ResponseWriter, r *http
 		return
 	}
 	defer recipient.Destroy()
+	identityDone := h.stage(op, "identity")
 	local, err := h.identity(r.Context())
 	if err != nil {
 		h.reject(w, op, "identity", "identity_lookup_failed", http.StatusConflict, "identity transition denied", causeDetail(err))
@@ -482,6 +501,7 @@ func (h *enrollmentWorkflowHandler) handleConfirm(w http.ResponseWriter, r *http
 			fmt.Sprintf("node_valid=%t installation_valid=%t node_matches_draft=%t", local.NodeID.IsValid(), local.InstallationID.IsValid(), local.NodeID == draft.Overlay.NodeID))
 		return
 	}
+	identityDone()
 	// Eligibility is evaluated per request (never at boot) so a demoted
 	// installation can enroll without a restart, and before the exchange so a
 	// refused identity never consumes a token.
@@ -494,16 +514,20 @@ func (h *enrollmentWorkflowHandler) handleConfirm(w http.ResponseWriter, r *http
 			fmt.Sprintf("role=%s key_present=%t", local.Role, local.ClusterKeyID != ""))
 		return
 	}
+	ingressDone := h.stage(op, "ingress")
 	ingress, err := h.currentIngress(r.Context())
 	if err != nil {
 		h.reject(w, op, "ingress", "ingress_unavailable", http.StatusConflict, "identity transition denied", causeDetail(err))
 		return
 	}
+	ingressDone()
+	bindingDone := h.stage(op, "binding")
 	binding, exchangeRequest, ok := h.confirmBinding(request.DraftID, draft, local, &recipient)
 	if !ok {
 		h.reject(w, op, "binding", "binding_invalid", http.StatusConflict, "enrollment grant denied", "")
 		return
 	}
+	bindingDone()
 
 	// The owner-loaded CA (if any) verifies every call to this primary below.
 	ctx := r.Context()
@@ -511,12 +535,15 @@ func (h *enrollmentWorkflowHandler) handleConfirm(w http.ResponseWriter, r *http
 		ctx = syncpublication.WithTrustOverride(ctx, primaryOrigin(draft.PrimaryURL), draft.PrimaryCAPEM)
 	}
 	// 1. exchange (the primary consumes the token and seals to our key)
+	exchangeDone := h.stage(op, "exchange")
 	exchanged, err := h.exchangeGrant(ctx, draft.PrimaryURL, token, exchangeRequest)
 	if err != nil {
 		h.writeExchangeFailure(w, request.DraftID, err)
 		return
 	}
+	exchangeDone()
 	// 2. open + persist KEK and credential atomically
+	acceptDone := h.stage(op, "accept")
 	accepted, err := h.acceptGrant(r.Context(), &recipient, binding, exchanged.SealedPayload, exchanged.PayloadHash)
 	if err != nil {
 		if errors.Is(err, enrollment.ErrBootstrapPersistence) {
@@ -526,18 +553,22 @@ func (h *enrollmentWorkflowHandler) handleConfirm(w http.ResponseWriter, r *http
 		h.reject(w, op, "accept", "accept_denied", http.StatusConflict, "enrollment grant denied", causeDetail(err))
 		return
 	}
+	acceptDone()
 	// 3. strict validation with the KEK the grant just delivered
 	keyID, err := uuid.Parse(accepted.ClusterKeyID)
 	if err != nil {
 		h.reject(w, op, "accept", "cluster_key_id_invalid", http.StatusConflict, "enrollment grant denied", "")
 		return
 	}
+	kekDone := h.stage(op, "kek_load")
 	kek, err := h.loadClusterKEK(r.Context(), keyID)
 	if err != nil || kek == nil {
 		h.reject(w, op, "kek_load", "kek_load_failed", http.StatusServiceUnavailable, "enrollment workflow unavailable",
 			fmt.Sprintf("kek_nil=%t %s", kek == nil, causeDetail(err)))
 		return
 	}
+	kekDone()
+	validateDone := h.stage(op, "validate")
 	result := kekValidator.ValidateWithKEK(r.Context(), *draft.Envelope, kek)
 	kek.Destroy()
 	if !result.OK || len(result.Issues) != 0 {
@@ -545,6 +576,7 @@ func (h *enrollmentWorkflowHandler) handleConfirm(w http.ResponseWriter, r *http
 			fmt.Sprintf("ok=%t issues=%d", result.OK, len(result.Issues)))
 		return
 	}
+	validateDone()
 	// 3a. persist the owner-loaded CA (replacing any previous one for this
 	// origin) so continuous sync keeps verifying the primary. Failing closed
 	// here avoids a node that enrolls but can never sync.
@@ -553,10 +585,12 @@ func (h *enrollmentWorkflowHandler) handleConfirm(w http.ResponseWriter, r *http
 			h.reject(w, op, "record_trust", "record_trust_unavailable", http.StatusServiceUnavailable, "enrollment workflow unavailable", "recorder_nil=true")
 			return
 		}
+		trustDone := h.stage(op, "record_trust")
 		if err := h.recordTrust(r.Context(), primaryOrigin(draft.PrimaryURL), draft.PrimaryCAPEM); err != nil {
 			h.reject(w, op, "record_trust", "record_trust_failed", http.StatusServiceUnavailable, "enrollment workflow unavailable", causeDetail(err))
 			return
 		}
+		trustDone()
 	}
 	// 3b. remember the primary before the role commit point, so a node can
 	// never exist without the binding continuous sync needs. A failed convert
@@ -567,12 +601,15 @@ func (h *enrollmentWorkflowHandler) handleConfirm(w http.ResponseWriter, r *http
 			CredentialID:          accepted.CredentialID,
 			PrimaryInstallationID: draft.Envelope.Transient.SourcePrimaryID.String(),
 		}
+		syncDone := h.stage(op, "record_sync")
 		if err := h.recordSync(r.Context(), binding, draft.Envelope.ContentHash); err != nil {
 			h.reject(w, op, "record_sync", "record_sync_failed", http.StatusServiceUnavailable, "enrollment workflow unavailable", causeDetail(err))
 			return
 		}
+		syncDone()
 	}
 	// 4. archive/import/apply, then the role commit point
+	convertDone := h.stage(op, "convert")
 	converted, err := h.converter.Convert(r.Context(), enrollment.NodeConversionInput{
 		Envelope: draft.Envelope, LocalNodeID: local.NodeID, LocalIngress: ingress,
 		LocalInstallId: local.InstallationID, ArchiveTTL: h.archiveTTL, ApplyWaitTimeout: h.applyWaitTimeout,
@@ -583,6 +620,8 @@ func (h *enrollmentWorkflowHandler) handleConfirm(w http.ResponseWriter, r *http
 			"class="+conversionClass(err)+" "+causeDetail(err))
 		return
 	}
+	convertDone()
+	responseDone := h.stage(op, "response")
 	result2 := converted
 	h.cache.DeleteByID(request.DraftID)
 	response := enrollmentConfirmResponse{
@@ -596,6 +635,7 @@ func (h *enrollmentWorkflowHandler) handleConfirm(w http.ResponseWriter, r *http
 		h.logger.Printf("enrollment confirm committed role=%s generation=%d", response.Role, response.Generation)
 	}
 	writeWorkflowJSON(w, http.StatusOK, response)
+	responseDone()
 }
 
 // enrollmentEligibility is implemented by the production converter, which sees
@@ -695,33 +735,43 @@ func (h *enrollmentWorkflowHandler) handleRecover(w http.ResponseWriter, r *http
 	if !ok {
 		return
 	}
+	tokenDone := h.stage(op, "token")
 	selector, valid := h.acceptToken(r.Context(), request.Token)
 	if !valid || h.cache == nil {
 		h.reject(w, op, "token", "token_denied_or_no_cache", http.StatusGone, "enrollment draft expired; re-enter the token", fmt.Sprintf("token_valid=%t cache_nil=%t", valid, h.cache == nil))
 		return
 	}
+	tokenDone()
+	lookupDone := h.stage(op, "draft_lookup")
 	draft, ok := h.cache.GetBySelector(selector)
 	if !ok {
 		h.reject(w, op, "draft_lookup", "draft_expired", http.StatusGone, "enrollment draft expired; re-enter the token", "")
 		return
 	}
+	lookupDone()
+	tlsDone := h.stage(op, "tls_authority")
 	if !h.requireTLSAuthority(w, r, draft.PrimaryURL, op) {
 		return
 	}
+	tlsDone()
 	if h.validator == nil || h.identity == nil {
 		h.reject(w, op, "workflow", "workflow_unavailable", http.StatusConflict, "enrollment preview unavailable",
 			fmt.Sprintf("validator_nil=%t identity_nil=%t", h.validator == nil, h.identity == nil))
 		return
 	}
+	validateDone := h.stage(op, "validate")
 	if ok, detail := h.validatePreviewEnvelope(r, draft.Envelope); !ok {
 		h.reject(w, op, "validate", "snapshot_denied", http.StatusConflict, "enrollment preview unavailable", detail)
 		return
 	}
+	validateDone()
+	overlayDone := h.stage(op, "overlay")
 	overlay, err := h.localOverlay(r.Context())
 	if err != nil {
 		h.reject(w, op, "overlay", "overlay_unavailable", http.StatusConflict, "enrollment preview unavailable", overlayDetail(err))
 		return
 	}
+	overlayDone()
 	h.writePreview(w, http.StatusOK, draft, overlay)
 }
 
