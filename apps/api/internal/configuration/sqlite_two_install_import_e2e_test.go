@@ -3,6 +3,7 @@ package configuration
 import (
 	"context"
 	"crypto/rand"
+	"database/sql"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -258,4 +259,43 @@ func TestTwoIndependentInstallsLegacyEmptyPurposeSecretFailsClosedWithDiagnostic
 	if n := phase2Count(t, ti.node, `select count(*) from secrets`); n != secretsBefore {
 		t.Fatalf("failed import must roll back secrets: %d -> %d", secretsBefore, n)
 	}
+}
+
+// ExternalTwoInstalls exposes the two-install fixture to the external
+// configuration_test package. The backup restore engine (backupcore/dbimport)
+// imports configuration, so an in-package test cannot import it without an
+// import cycle; an external test package can, and sees this exported bridge
+// because _test.go files of both packages are compiled into one test binary.
+type ExternalTwoInstalls struct {
+	ti                        *twoInstalls
+	PrimaryDB, NodeDB         *sql.DB
+	PrimaryMaster, NodeMaster string
+	PrimaryInstallID          string
+	PrimaryNodeID             string
+	PrimaryRole               string
+}
+
+func NewExternalTwoInstalls(t *testing.T) *ExternalTwoInstalls {
+	t.Helper()
+	ti := newTwoInstalls(t)
+	return &ExternalTwoInstalls{
+		ti: ti, PrimaryDB: ti.primary.db, NodeDB: ti.node.db,
+		PrimaryMaster: ti.primary.master, NodeMaster: ti.node.master,
+		PrimaryInstallID: ti.primary.primaryID, PrimaryNodeID: ti.primary.nodeID,
+		PrimaryRole: string(domain.TopologyRolePrimary),
+	}
+}
+
+func (e *ExternalTwoInstalls) Export(t *testing.T) replicationsnapshot.Envelope {
+	t.Helper()
+	return e.ti.export(t)
+}
+
+func (e *ExternalTwoInstalls) DeliverKEK(t *testing.T) *cluster.KEK {
+	t.Helper()
+	return e.ti.deliverKEK(t)
+}
+
+func (e *ExternalTwoInstalls) ImportOnNode(env replicationsnapshot.Envelope) error {
+	return e.ti.importOnNode(env)
 }
