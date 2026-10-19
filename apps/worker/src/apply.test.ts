@@ -195,7 +195,12 @@ describe("apply orchestrator", () => {
     ]);
     expect(logs[0]).toContain(`job=${job.id} revision=${job.revisionId}`);
     expect(logs[0]).toContain(`correlation=${job.correlationId}`);
-    expect(logs[0]).not.toMatch(/simulated failure|private|abc/);
+    // Random ids can contain "abc" by chance; strip them before scanning for leaks.
+    const withoutIds = logs[0]!
+      .replaceAll(job.id, "")
+      .replaceAll(job.revisionId, "")
+      .replaceAll(job.correlationId, "");
+    expect(withoutIds).not.toMatch(/simulated failure|private|abc/);
   });
 
   it("logs the job ID when lookup fails before rendering", async () => {
@@ -248,7 +253,12 @@ describe("apply orchestrator", () => {
         `worker rollback failed job=${job.id} revision=${job.revisionId} correlation=${job.correlationId} service=coredns`,
       ),
     ]);
-    expect(logs.join("\n")).not.toMatch(/credential|candidate|abc/);
+    const withoutIds = logs
+      .join("\n")
+      .replaceAll(job.id, "")
+      .replaceAll(job.revisionId, "")
+      .replaceAll(job.correlationId, "");
+    expect(withoutIds).not.toMatch(/credential|candidate|abc/);
   });
 
   it("rolls back after a post-promotion health failure", async () => {
