@@ -12,6 +12,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	gosync "sync"
@@ -572,8 +573,7 @@ func (h *enrollmentWorkflowHandler) handleConfirm(w http.ResponseWriter, r *http
 	result := kekValidator.ValidateWithKEK(r.Context(), *draft.Envelope, kek)
 	kek.Destroy()
 	if !result.OK || len(result.Issues) != 0 {
-		h.reject(w, op, "validate", "snapshot_denied", http.StatusConflict, "primary snapshot denied",
-			fmt.Sprintf("ok=%t issues=%d", result.OK, len(result.Issues)))
+		h.reject(w, op, "validate", "snapshot_denied", http.StatusConflict, "primary snapshot denied", validationSummary(result))
 		return
 	}
 	validateDone()
@@ -802,7 +802,7 @@ func (h *enrollmentWorkflowHandler) validate(r *http.Request, envelope *replicat
 	} else {
 		result = h.validator.Validate(r.Context(), *envelope)
 	}
-	return result.OK && len(result.Issues) == 0, fmt.Sprintf("ok=%t issues=%d", result.OK, len(result.Issues))
+	return result.OK && len(result.Issues) == 0, validationSummary(result)
 }
 
 // overlayError labels which part of the local overlay lookup failed while
@@ -1010,3 +1010,45 @@ func decodeEnrollmentWorkflowBody[T any](h *enrollmentWorkflowHandler, w http.Re
 }
 
 var _ EnrollmentSnapshotValidator = (*replicationsnapshot.Validator)(nil)
+
+// validationSummary renders a validation result for logs: the verdict, the
+// issue count and each distinct issue code with its field path and count.
+// Codes and field paths are constants chosen by the validator; issue messages
+// are left out because they can carry secret or owner identifiers.
+func validationSummary(result replicationsnapshot.ValidationResult) string {
+	counts := map[string]int{}
+	for _, issue := range result.Issues {
+		counts[safeIssueToken(issue.Code)+"@"+safeIssueToken(issue.Field)]++
+	}
+	keys := make([]string, 0, len(counts))
+	for key := range counts {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, key := range keys {
+		parts = append(parts, fmt.Sprintf("%s x%d", key, counts[key]))
+	}
+	return fmt.Sprintf("ok=%t issues=%d codes=[%s]", result.OK, len(result.Issues), strings.Join(parts, ", "))
+}
+
+// safeIssueToken keeps only identifier-like characters so an unexpected value
+// can never smuggle free text into a log line.
+func safeIssueToken(value string) string {
+	if value == "" {
+		return "-"
+	}
+	var b strings.Builder
+	for _, r := range value {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_', r == '.', r == '[', r == ']':
+			b.WriteRune(r)
+		default:
+			b.WriteRune('?')
+		}
+		if b.Len() >= 64 {
+			break
+		}
+	}
+	return b.String()
+}
