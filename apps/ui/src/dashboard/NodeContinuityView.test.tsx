@@ -191,6 +191,35 @@ describe("NodeContinuityView", () => {
     expect(container.textContent).toBe("");
   });
 
+  it("does not abort a confirm already in flight when the view unmounts", async () => {
+    const confirmation = deferred<Response>();
+    const fetchMock = queueFetch(
+      jsonResponse({ error: "token-missing" }, 410),
+      previewResponse(),
+      confirmation.promise,
+    );
+    const container = await mount(view());
+    setValue(element(container, "node-enrollment-token"), plaintext);
+    setValue(element(container, "node-primary-url"), "https://primary.example");
+    await settle();
+    await act(async () => {
+      element(container, "node-enrollment-form").dispatchEvent(new TestEvent("submit", { bubbles: true, cancelable: true }));
+      await settle();
+    });
+    await act(async () => {
+      element(container, "node-confirm").dispatchEvent(new TestEvent("click", { bubbles: true }));
+      await settle();
+    });
+    const confirmSignal = (fetchMock.mock.calls[2]![1] as RequestInit).signal;
+    await unmount(container);
+    expect(confirmSignal?.aborted).toBe(false);
+    await act(async () => {
+      confirmation.resolve(jsonResponse({ role: "node", generation: 7, nodeId: "node-id", clusterKeyId: "cluster-key-id", archiveId: "archive-id", applyJobId: "apply-job-id" }));
+      await settle();
+    });
+    expect(container.textContent).toBe("");
+  });
+
   it("downloads only the safe post-conversion audit projection", async () => {
     queueFetch(
       jsonResponse({ error: "token-missing" }, 410),

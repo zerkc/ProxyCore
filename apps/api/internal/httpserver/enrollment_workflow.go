@@ -189,6 +189,10 @@ func newEnrollmentWorkflowHandler(opts EnrollmentWorkflowHandlerOptions, certifi
 	}
 }
 
+// convertTimeoutMargin leaves room for the archive/import/commit work around the
+// apply wait, which Convert bounds with ApplyWaitTimeout itself.
+const convertTimeoutMargin = time.Minute
+
 // workflowSentinels names the package sentinels the workflow can surface in
 // addition to enrollment.KnownCauseSentinels.
 var workflowSentinels = []enrollment.NamedError{
@@ -609,8 +613,12 @@ func (h *enrollmentWorkflowHandler) handleConfirm(w http.ResponseWriter, r *http
 		syncDone()
 	}
 	// 4. archive/import/apply, then the role commit point
+	// Detached from the client: a browser abort or remount must not cancel the
+	// apply wait or leave the conversion half done. The apply wait timeout bounds it.
+	convertCtx, cancelConvert := context.WithTimeout(context.WithoutCancel(r.Context()), h.applyWaitTimeout+convertTimeoutMargin)
+	defer cancelConvert()
 	convertDone := h.stage(op, "convert")
-	converted, err := h.converter.Convert(r.Context(), enrollment.NodeConversionInput{
+	converted, err := h.converter.Convert(convertCtx, enrollment.NodeConversionInput{
 		Envelope: draft.Envelope, LocalNodeID: local.NodeID, LocalIngress: ingress,
 		LocalInstallId: local.InstallationID, ArchiveTTL: h.archiveTTL, ApplyWaitTimeout: h.applyWaitTimeout,
 		ClusterKeyID: &keyID,
