@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { NodeUnlinkedBanner } from "./NodeUnlinkedBanner";
-import { getTopologySync, retryTopologySync, shortHash, TopologySyncError } from "./topologySync";
+import { retryTopologySync, shortHash, TopologySyncError } from "./topologySync";
+import { useNodeSyncStatus, type NodeSyncState } from "./useNodeSyncStatus";
 import type { TopologyRole, TopologySyncStatus } from "./types";
 
 function formatDate(value?: string) {
@@ -19,36 +20,21 @@ function retryError(caught: unknown) {
   return "The sync could not be started. Try again.";
 }
 
-export function NodeSyncStatus({ role }: { role?: TopologyRole }) {
+export function NodeSyncStatus({ role, sync }: { role?: TopologyRole; sync?: NodeSyncState }) {
   const visible = role === "node" || role === "primary" || role === "primary-with-nodes";
   const isNode = role === "node";
-  const [status, setStatus] = useState<TopologySyncStatus | undefined>();
-  const [loadFailed, setLoadFailed] = useState(false);
+  const own = useNodeSyncStatus(visible && !sync, role);
+  const { status, loadFailed, reload } = sync ?? own;
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const mounted = useRef(true);
 
-  const load = useCallback(async (signal?: AbortSignal) => {
-    try {
-      const next = await getTopologySync(signal);
-      if (!mounted.current || signal?.aborted) return;
-      setStatus(next);
-      setLoadFailed(false);
-    } catch {
-      if (mounted.current && !signal?.aborted) setLoadFailed(true);
-    }
-  }, []);
-
   useEffect(() => {
     mounted.current = true;
-    if (!visible) return undefined;
-    const controller = new AbortController();
-    void load(controller.signal);
     return () => {
       mounted.current = false;
-      controller.abort();
     };
-  }, [visible, role, load]);
+  }, []);
 
   async function syncNow() {
     if (busy) return;
@@ -59,7 +45,7 @@ export function NodeSyncStatus({ role }: { role?: TopologyRole }) {
     } catch (caught) {
       if (mounted.current) setError(retryError(caught));
     }
-    await load();
+    await reload();
     if (mounted.current) setBusy(false);
   }
 

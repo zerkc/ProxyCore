@@ -11,6 +11,7 @@ import { NodeContinuityView } from "./NodeContinuityView";
 import { canListNodes } from "./NodesView";
 import { NodeSyncStatus } from "./NodeSyncStatus";
 import { TopologyConversionPanel } from "./TopologyConversionPanel";
+import { useNodeSyncStatus } from "./useNodeSyncStatus";
 import type { TopologyIdentity } from "./types";
 
 const NAVIGATION_STORAGE_KEY = "proxycore.navigation.collapsed";
@@ -36,6 +37,20 @@ export function getDashboardSurface(
   if (role === "node") return "node-only";
   if (role === "standalone-primary" || role === "primary" || role === "primary-with-nodes") return "ordinary";
   return "error";
+}
+
+/** Hides the enrollment form once the NODE is linked; it stays hidden while the status loads. */
+export function NodeOnlyBody({ identity, identityTuple, onConverted }: { identity?: TopologyIdentity; identityTuple: string; onConverted: () => Promise<void> | void }) {
+  const sync = useNodeSyncStatus(true, identityTuple);
+  const linked = sync.status?.bound === true && sync.status.unlinked !== true;
+  const loading = sync.status === undefined && !sync.loadFailed;
+  return (
+    <>
+      {linked || loading ? null : <NodeContinuityView key={identityTuple} />}
+      <NodeSyncStatus role={identity?.role} sync={sync} />
+      <TopologyConversionPanel identity={identity} onConverted={onConverted} />
+    </>
+  );
 }
 
 export function getIdentityTuple(identity?: IdentityTupleInput) {
@@ -340,11 +355,7 @@ export default function DashboardShell({ children }: { children: ReactNode }) {
 
               <div key={`${current.href}:${identityTuple}`} className="pc-enter">
                 {surface === "error" ? null : nodeOnly ? (
-                  <>
-                    <NodeContinuityView key={identityTuple} />
-                    <NodeSyncStatus role={identity?.role} />
-                    <TopologyConversionPanel identity={identity} onConverted={refresh} />
-                  </>
+                  <NodeOnlyBody identity={identity} identityTuple={identityTuple} onConverted={refresh} />
                 ) : (
                   <>
                     {children}
