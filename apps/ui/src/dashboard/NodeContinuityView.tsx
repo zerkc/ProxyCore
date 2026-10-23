@@ -17,6 +17,9 @@ export function NodeContinuityView() {
   // the owner does not have to load it again after fixing the token or URL.
   const [caPem, setCaPem] = useState("");
   const activeRequest = useRef<AbortController | undefined>(undefined);
+  // A confirm that is already sent changes node state on the server, so unmount
+  // (e.g. a remount caused by an identity change) must not abort it.
+  const confirmRequest = useRef<AbortController | undefined>(undefined);
   const mounted = useRef(true);
 
   useEffect(() => {
@@ -38,7 +41,7 @@ export function NodeContinuityView() {
       cancelled = true;
       mounted.current = false;
       controller.abort();
-      activeRequest.current?.abort();
+      if (activeRequest.current !== confirmRequest.current) activeRequest.current?.abort();
     };
   }, []);
 
@@ -72,6 +75,7 @@ export function NodeContinuityView() {
     if (state.kind !== "preview") return;
     const draft = state.draft;
     const controller = replaceActiveRequest();
+    confirmRequest.current = controller;
     setState({ kind: "pending" });
     try {
       const result = await confirmEnrollment(draft.draftId, controller.signal);
@@ -79,7 +83,7 @@ export function NodeContinuityView() {
       setState({ kind: "committed", result: sanitizeConfirmResult(result) });
     } catch (caught) {
       if (mounted.current && !controller.signal.aborted) setState({ kind: "preview", draft, error: confirmError(caught) });
-    } finally { clearActiveRequest(controller); }
+    } finally { clearActiveRequest(controller); if (confirmRequest.current === controller) confirmRequest.current = undefined; }
   }
 
   if (state.kind === "recovering") return <section className="mt-8 space-y-5" aria-labelledby="node-continuity-title"><NodeHeader /><p className="border-y border-dashed border-line py-5 text-sm text-faint" role="status">Checking for a recoverable enrollment draft…</p></section>;
