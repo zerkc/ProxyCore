@@ -1,11 +1,23 @@
-import { describe, expect, it } from "vitest";
+import { createElement } from "react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  NodeOnlyBody,
   getDashboardNavigation,
   getDashboardSurface,
   getIdentityTuple,
   getTopologyInspectorRows,
 } from "./DashboardShell";
 import { dashboardNav, resolveDashboardNav } from "./nav";
+import { deferred, jsonResponse, mount, queueFetch } from "./testDom";
+
+vi.mock("./NodeContinuityView", () => ({
+  NodeContinuityView: () => createElement("div", { "data-testid": "node-continuity" }),
+}));
+vi.mock("./TopologyConversionPanel", () => ({
+  TopologyConversionPanel: () => createElement("div", { "data-testid": "topology-conversion" }),
+}));
+
+afterEach(() => vi.restoreAllMocks());
 
 describe("dashboard continuity navigation", () => {
   it("routes authenticated dashboard navigation to Continuity", () => {
@@ -118,5 +130,47 @@ describe("dashboard topology surface routing", () => {
     expect(has("ordinary", "standalone-primary")).toBe(false);
     expect(has("ordinary")).toBe(false);
     expect(has("node-only", "node")).toBe(false);
+  });
+});
+
+describe("node-only enrollment gate", () => {
+  const syncStatus = { role: "node", bound: true, outdated: false, consecutiveFailures: 0, acknowledged: true };
+  const has = (container: { findAll: (fn: (e: { getAttribute: (n: string) => string | null }) => boolean) => unknown[] }, id: string) =>
+    container.findAll((element) => element.getAttribute("data-testid") === id).length > 0;
+  const body = () => createElement(NodeOnlyBody, { identity: { role: "node" } as never, identityTuple: "node|a", onConverted: () => undefined });
+
+  it("hides the enrollment form on a linked node and keeps sync status and conversion", async () => {
+    queueFetch(jsonResponse(syncStatus));
+    const container = await mount(body());
+    expect(has(container, "node-continuity")).toBe(false);
+    expect(has(container, "node-sync-status")).toBe(true);
+    expect(has(container, "topology-conversion")).toBe(true);
+  });
+
+  it("shows the enrollment form when the node is not bound", async () => {
+    queueFetch(jsonResponse({ ...syncStatus, bound: false }));
+    const container = await mount(body());
+    expect(has(container, "node-continuity")).toBe(true);
+    expect(has(container, "node-sync-status")).toBe(true);
+  });
+
+  it("shows the enrollment form when the PRIMARY unlinked the node", async () => {
+    queueFetch(jsonResponse({ ...syncStatus, unlinked: true, unlinkedAt: "2026-10-14T10:00:00Z" }));
+    const container = await mount(body());
+    expect(has(container, "node-continuity")).toBe(true);
+  });
+
+  it("does not render the form while the status is loading", async () => {
+    const pending = deferred<Response>();
+    queueFetch(pending.promise);
+    const container = await mount(body());
+    expect(has(container, "node-continuity")).toBe(false);
+    expect(has(container, "topology-conversion")).toBe(true);
+  });
+
+  it("keeps showing the enrollment form when the status cannot be loaded", async () => {
+    queueFetch(jsonResponse({ error: "boom" }, 500));
+    const container = await mount(body());
+    expect(has(container, "node-continuity")).toBe(true);
   });
 });
