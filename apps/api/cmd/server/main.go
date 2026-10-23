@@ -193,8 +193,9 @@ func runServerWithNodeConverter(ctx context.Context, cfg config.Config, logger *
 			Cache:    draftCache,
 			Logger:   logger,
 			Identity: localEnrollmentIdentityProvider(identitySvc),
-			LocalIngress: func(context.Context) (domain.Ingress, error) {
-				return domain.Ingress{IPv4: cfg.ProxyIngressIPv4, IPv6: cfg.ProxyIngressIPv6}, nil
+			LocalIngress: func(ctx context.Context) (domain.Ingress, error) {
+				return nodeSyncIngressResolver(stack.config.GetSettings,
+					domain.Ingress{IPv4: cfg.ProxyIngressIPv4, IPv6: cfg.ProxyIngressIPv6})(ctx), nil
 			},
 		}
 		if tokenAuthority != nil {

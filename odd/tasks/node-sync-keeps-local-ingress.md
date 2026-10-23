@@ -26,5 +26,5 @@ Delegated direct: one writer (2+ non-trivial files, preparation reading).
 T1-T3 done (delegated writer; RED observed, then GREEN). `go build`, `go vet`, `go test ./internal/configuration/... ./cmd/server/... ./internal/sync/...` green; parent re-ran tests (cached, same inputs).
 
 ## Open follow-ups (out of scope, need owner decision)
-- Worker `apps/worker/src/apply.ts:336` still renders the primary ingress when the node has no persisted ingress and no env value.
-- Enrollment `LocalIngress` closure `apps/api/cmd/server/main.go:~197` reads env only.
+- Worker `apps/worker/src/apply.ts:336` falling back to the primary ingress only when the node has no local ingress is intended (owner-confirmed); no change.
+- ~~Enrollment `LocalIngress` closure reads env only~~ fixed: reuses `nodeSyncIngressResolver` (persisted first, env second).
