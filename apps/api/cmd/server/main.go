@@ -168,9 +168,8 @@ func runServerWithNodeConverter(ctx context.Context, cfg config.Config, logger *
 			Converter:      buildNodeConverter(true, stack.phase2, identitySvc, logger),
 			Validator:      httpserver.NewLocalKEKSnapshotValidator(localKEKLoader),
 			LoadCredential: credentialReader.LoadNodeCredentialSecret,
-			Ingress: func() domain.Ingress {
-				return domain.Ingress{IPv4: cfg.ProxyIngressIPv4, IPv6: cfg.ProxyIngressIPv6}
-			},
+			Ingress: nodeSyncIngressResolver(stack.config.GetSettings,
+				domain.Ingress{IPv4: cfg.ProxyIngressIPv4, IPv6: cfg.ProxyIngressIPv6}),
 			Interval: nodeSyncInterval,
 			Logger:   logger,
 		})
