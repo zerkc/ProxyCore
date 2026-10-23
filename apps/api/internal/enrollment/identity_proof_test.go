@@ -266,10 +266,14 @@ func TestIdentityProofRejectsUnsupportedKeyAndAlgorithm(t *testing.T) {
 
 func TestIdentityProofSerializationAndErrorsAreRedacted(t *testing.T) {
 	f := newProofFixture(t)
+	// The nonce and signature are random base64url, so a forbidden word can
+	// show up in them by chance; blank them and scan only the fixed fields.
+	request, proof := f.request, f.proof
+	request.Nonce, proof.Nonce, proof.Signature = "", "", ""
 	encoded, err := json.Marshal(struct {
 		Request IdentityProofRequest
 		Proof   IdentityProof
-	}{f.request, f.proof})
+	}{request, proof})
 	if err != nil {
 		t.Fatal(err)
 	}
