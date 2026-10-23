@@ -114,6 +114,19 @@ func mustJSON(t *testing.T, value any) string {
 	return string(raw)
 }
 
+// persistedNodeIngress is the node's own advertised ingress, deliberately
+// different from both the primary's and the envelope's nodeLocal ingress.
+var persistedNodeIngress = domain.Ingress{IPv4: persistedNodeIPv4, IPv6: persistedNodeIPv6}
+
+// seedNodeIngress persists the node's own ingress before an import.
+func seedNodeIngress(t *testing.T, f *sqlitePublicationFixture) {
+	t.Helper()
+	settingsExec(t, f.db, `insert into installation_settings (id,forwarding_rules,created_at,updated_at) values (?, '[]', '0', '0')
+		on conflict(id) do nothing`, installationID)
+	settingsExec(t, f.db, `update installation_settings set ingress_ipv4=?, ingress_ipv6=? where id=?`,
+		persistedNodeIPv4, persistedNodeIPv6, installationID)
+}
+
 // seedLocalConfiguration is the node's pre-enrollment standalone configuration.
 func seedLocalConfiguration(t *testing.T, f *sqlitePublicationFixture) {
 	t.Helper()
@@ -125,6 +138,7 @@ func seedLocalConfiguration(t *testing.T, f *sqlitePublicationFixture) {
 
 func TestSQLiteImportMaterializesConfigurationIntoEditableTables(t *testing.T) {
 	f, store := newSQLitePhase2Fixture(t)
+	seedNodeIngress(t, f)
 	seedLocalConfiguration(t, f)
 	cfg := materializeConfig()
 	body, _ := materializeEnvelopeBody(t, f.primaryID, cfg, nil)
@@ -135,7 +149,7 @@ func TestSQLiteImportMaterializesConfigurationIntoEditableTables(t *testing.T) {
 
 	got := readNodeConfiguration(t, f)
 	want := cfg
-	want.Settings.Ingress = domain.Ingress{IPv4: materializeNodeIPv4, IPv6: materializeNodeIPv6}
+	want.Settings.Ingress = persistedNodeIngress
 	if gotJSON, wantJSON := mustJSON(t, got), mustJSON(t, want); gotJSON != wantJSON {
 		t.Fatalf("node tables diverge from the primary configuration\n got: %s\nwant: %s", gotJSON, wantJSON)
 	}
@@ -148,16 +162,17 @@ func TestSQLiteImportMaterializesConfigurationIntoEditableTables(t *testing.T) {
 	}
 }
 
-func TestSQLiteImportNodeIngressOverridesSettingsAndKeepsPrimaryHash(t *testing.T) {
+func TestSQLiteImportKeepsNodeIngressAndPrimaryHash(t *testing.T) {
 	f, store := newSQLitePhase2Fixture(t)
+	seedNodeIngress(t, f)
 	cfg := materializeConfig()
 	body, primaryHash := materializeEnvelopeBody(t, f.primaryID, cfg, nil)
 
 	if _, err := store.CreateApplyJobFromSnapshot(context.Background(), "import", body); err != nil {
 		t.Fatal(err)
 	}
-	if got := readNodeConfiguration(t, f).Settings.Ingress; got != (domain.Ingress{IPv4: materializeNodeIPv4, IPv6: materializeNodeIPv6}) {
-		t.Fatalf("settings ingress = %+v, want the node's own", got)
+	if got := readNodeConfiguration(t, f).Settings.Ingress; got != (persistedNodeIngress) {
+		t.Fatalf("settings ingress = %+v, want the node's persisted one, never the primary's or nodeLocal's", got)
 	}
 	// D11: the stored hash is the primary's contentHash exactly as received.
 	if n := phase2Count(t, f, `select count(*) from config_revisions where snapshot_content_hash = ?`, primaryHash); n != 1 {
@@ -167,8 +182,7 @@ func TestSQLiteImportNodeIngressOverridesSettingsAndKeepsPrimaryHash(t *testing.
 		t.Fatalf("job with the primary content hash = %d", n)
 	}
 	// The stored envelope is byte-identical to the one that was verified, so its
-	// declared hash still verifies and the node-local ingress travels in
-	// nodeLocal (the worker renders from it).
+	// declared hash still verifies.
 	var stored string
 	f.db.QueryRow(`select snapshot from config_revisions`).Scan(&stored)
 	if stored != string(body) {
@@ -206,6 +220,7 @@ func TestSQLiteImportMaterializationFailureRollsBackRevision(t *testing.T) {
 
 func TestSQLiteImportSecondSnapshotReplacesContent(t *testing.T) {
 	f, store := newSQLitePhase2Fixture(t)
+	seedNodeIngress(t, f)
 	ctx := context.Background()
 	first, _ := materializeEnvelopeBody(t, f.primaryID, materializeConfig(), nil)
 	if _, err := store.CreateApplyJobFromSnapshot(ctx, "import", first); err != nil {
@@ -231,7 +246,7 @@ func TestSQLiteImportSecondSnapshotReplacesContent(t *testing.T) {
 
 	got := readNodeConfiguration(t, f)
 	want := next
-	want.Settings.Ingress = domain.Ingress{IPv4: materializeNodeIPv4, IPv6: materializeNodeIPv6}
+	want.Settings.Ingress = persistedNodeIngress
 	if gotJSON, wantJSON := mustJSON(t, got), mustJSON(t, want); gotJSON != wantJSON {
 		t.Fatalf("second import must replace, not merge\n got: %s\nwant: %s", gotJSON, wantJSON)
 	}
@@ -259,7 +274,7 @@ func materializeAlternateConfig() domain.ConfigurationSnapshot {
 func expectNodeConfiguration(t *testing.T, f *sqlitePublicationFixture, cfg domain.ConfigurationSnapshot, label string) {
 	t.Helper()
 	want := cfg
-	want.Settings.Ingress = domain.Ingress{IPv4: materializeNodeIPv4, IPv6: materializeNodeIPv6}
+	want.Settings.Ingress = persistedNodeIngress
 	if gotJSON, wantJSON := mustJSON(t, readNodeConfiguration(t, f)), mustJSON(t, want); gotJSON != wantJSON {
 		t.Fatalf("%s: node tables diverge\n got: %s\nwant: %s", label, gotJSON, wantJSON)
 	}
@@ -269,6 +284,7 @@ func expectNodeConfiguration(t *testing.T, f *sqlitePublicationFixture, cfg doma
 // used to collide with the unique config_revisions.checksum index.
 func TestSQLiteImportRevertToEarlierSnapshotMaterializesAgain(t *testing.T) {
 	f, store := newSQLitePhase2Fixture(t)
+	seedNodeIngress(t, f)
 	ctx := context.Background()
 	a, _ := materializeEnvelopeBody(t, f.primaryID, materializeConfig(), nil)
 	b, _ := materializeEnvelopeBody(t, f.primaryID, materializeAlternateConfig(), nil)
@@ -292,6 +308,7 @@ func TestSQLiteImportRevertToEarlierSnapshotMaterializesAgain(t *testing.T) {
 // same bytes and re-materializes the tables.
 func TestSQLiteImportFailedJobIsRetryable(t *testing.T) {
 	f, store := newSQLitePhase2Fixture(t)
+	seedNodeIngress(t, f)
 	ctx := context.Background()
 	a, _ := materializeEnvelopeBody(t, f.primaryID, materializeConfig(), nil)
 	first, err := store.CreateApplyJobFromSnapshot(ctx, "import", a)

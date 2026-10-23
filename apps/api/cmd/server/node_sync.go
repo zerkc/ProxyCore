@@ -61,9 +61,26 @@ type nodeSyncDependencies struct {
 	Converter      nodeSyncResyncer
 	Validator      httpserver.EnrollmentSnapshotValidator
 	LoadCredential func(ctx context.Context, credentialID string) ([]byte, error)
-	Ingress        func() domain.Ingress
+	Ingress        func(context.Context) domain.Ingress
 	Interval       time.Duration
 	Logger         *log.Logger
+}
+
+// nodeSyncIngressResolver returns the ingress a node advertises while syncing:
+// the persisted installation settings first, the env-derived value only when
+// nothing is persisted (or the settings cannot be read). The primary's ingress
+// is never a source.
+func nodeSyncIngressResolver(settings func(context.Context) (domain.Settings, error), env domain.Ingress) func(context.Context) domain.Ingress {
+	return func(ctx context.Context) domain.Ingress {
+		if settings == nil {
+			return env
+		}
+		stored, err := settings(ctx)
+		if err != nil || (stored.Ingress.IPv4 == "" && stored.Ingress.IPv6 == "") {
+			return env
+		}
+		return stored.Ingress
+	}
 }
 
 // newNodeSyncer adapts the production seams to the sync loop. Credentials are
@@ -147,7 +164,7 @@ func nodeSyncApply(deps nodeSyncDependencies, logf func(string, ...any)) syncpub
 		current := deps.Identity.Current()
 		var ingress domain.Ingress
 		if deps.Ingress != nil {
-			ingress = deps.Ingress()
+			ingress = deps.Ingress(ctx)
 		}
 		_, err := deps.Converter.Resync(ctx, enrollment.NodeResyncInput{
 			Envelope: envelope, LocalNodeID: current.NodeID, LocalInstallId: current.InstallationID,

@@ -23,12 +23,12 @@ const preImportArchiveReason = "pre-import-configuration"
 // content. It runs inside the writer transaction that also creates the import
 // revision, so the tables and the revision commit or roll back together.
 //
-// Node-local ingress (owner exception): nodeLocal.ingress is authoritative on
-// the receiving node (the importer rewrites it with the installation's own
-// address), so it replaces settings.ingress in the tables. The stored envelope
-// is deliberately NOT rewritten: its contentHash covers replicated.configuration
-// and must stay exactly the primary's value (D11); the worker substitutes
-// nodeLocal.ingress when it renders.
+// Node-local ingress: the node's persisted installation_settings ingress is
+// never touched by an import, so neither the primary's settings.ingress nor
+// nodeLocal.ingress overwrites it. The stored envelope is deliberately NOT
+// rewritten: its contentHash covers replicated.configuration and must stay
+// exactly the primary's value (D11); the worker substitutes nodeLocal.ingress
+// (resolved from the persisted settings by the caller) when it renders.
 //
 // Secrets and owners (T13) are imported in this same transaction, secrets
 // BEFORE the certificate rows so key_secret_id references resolve; see
@@ -51,10 +51,6 @@ func sqliteMaterializeImportedConfiguration(v sqlitedb.WriteValue, snapshotBytes
 	if err != nil {
 		return err
 	}
-	ingress := cfg.Settings.Ingress
-	if env.NodeLocal.Ingress.IPv4 != "" || env.NodeLocal.Ingress.IPv6 != "" {
-		ingress = env.NodeLocal.Ingress
-	}
 
 	if err := sqliteArchiveLocalConfiguration(v); err != nil {
 		return err
@@ -65,7 +61,7 @@ func sqliteMaterializeImportedConfiguration(v sqlitedb.WriteValue, snapshotBytes
 	if err := sqliteImportReplicatedOwners(v, env.Replicated.Owners); err != nil {
 		return err
 	}
-	if err := sqliteReplaceSettings(v, cfg.Settings, ingress); err != nil {
+	if err := sqliteReplaceSettings(v, cfg.Settings); err != nil {
 		return err
 	}
 	for _, statement := range []string{`delete from dns_records`, `delete from zones`, `delete from stream_routes`, `delete from certificates`} {
@@ -117,8 +113,9 @@ func sqliteMaterializeImportedConfiguration(v sqlitedb.WriteValue, snapshotBytes
 // sqliteReplaceSettings writes the replicated settings over the node's row.
 // Unlike UpdateSettings it is a replacement, not a coalescing patch: an absent
 // default pool becomes NULL. Retention limits are kept when the primary does not
-// carry positive values (the local row's CHECKed invariant is >= 1).
-func sqliteReplaceSettings(v sqlitedb.WriteValue, settings domain.Settings, ingress domain.Ingress) error {
+// carry positive values (the local row's CHECKed invariant is >= 1). The
+// advertised ingress is node-local and is deliberately left untouched.
+func sqliteReplaceSettings(v sqlitedb.WriteValue, settings domain.Settings) error {
 	row, _, err := (&SQLiteSettingsStore{}).settings(v, domain.Ingress{})
 	if err != nil {
 		return err
@@ -154,9 +151,9 @@ func sqliteReplaceSettings(v sqlitedb.WriteValue, settings domain.Settings, ingr
 		maxSize = settings.RetentionMaxSizeMb
 	}
 	_, err = v.Conn().ExecContext(v.Context(), `update installation_settings set
-		ingress_ipv4=?,ingress_ipv6=?,default_resolver_pool=?,forwarding_rules=?,
+		default_resolver_pool=?,forwarding_rules=?,
 		retention_max_age_days=?,retention_max_size_mb=?,updated_at=? where id=?`,
-		nullableString(ingress.IPv4), nullableString(ingress.IPv6), pool, string(encodedRules),
+		pool, string(encodedRules),
 		maxAge, maxSize, v.Timestamp(), installationID)
 	return err
 }

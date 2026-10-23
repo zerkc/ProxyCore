@@ -168,9 +168,8 @@ func runServerWithNodeConverter(ctx context.Context, cfg config.Config, logger *
 			Converter:      buildNodeConverter(true, stack.phase2, identitySvc, logger),
 			Validator:      httpserver.NewLocalKEKSnapshotValidator(localKEKLoader),
 			LoadCredential: credentialReader.LoadNodeCredentialSecret,
-			Ingress: func() domain.Ingress {
-				return domain.Ingress{IPv4: cfg.ProxyIngressIPv4, IPv6: cfg.ProxyIngressIPv6}
-			},
+			Ingress: nodeSyncIngressResolver(stack.config.GetSettings,
+				domain.Ingress{IPv4: cfg.ProxyIngressIPv4, IPv6: cfg.ProxyIngressIPv6}),
 			Interval: nodeSyncInterval,
 			Logger:   logger,
 		})
@@ -194,8 +193,9 @@ func runServerWithNodeConverter(ctx context.Context, cfg config.Config, logger *
 			Cache:    draftCache,
 			Logger:   logger,
 			Identity: localEnrollmentIdentityProvider(identitySvc),
-			LocalIngress: func(context.Context) (domain.Ingress, error) {
-				return domain.Ingress{IPv4: cfg.ProxyIngressIPv4, IPv6: cfg.ProxyIngressIPv6}, nil
+			LocalIngress: func(ctx context.Context) (domain.Ingress, error) {
+				return nodeSyncIngressResolver(stack.config.GetSettings,
+					domain.Ingress{IPv4: cfg.ProxyIngressIPv4, IPv6: cfg.ProxyIngressIPv6})(ctx), nil
 			},
 		}
 		if tokenAuthority != nil {
