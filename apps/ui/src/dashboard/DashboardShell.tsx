@@ -236,6 +236,7 @@ export default function DashboardShell({ children }: { children: ReactNode }) {
     updateLoading,
     updateError,
     refreshUpdate,
+    setUpdateApplying,
     inSync,
     failedJob,
     failureReason,
@@ -476,6 +477,8 @@ export default function DashboardShell({ children }: { children: ReactNode }) {
             <div className="pc-inspector-version">
               <VersionStatus
                 update={update}
+                status={status}
+                onApplyingChange={setUpdateApplying}
                 loading={updateLoading}
                 error={updateError}
                 onRetry={() => void refreshUpdate({ force: true })}
