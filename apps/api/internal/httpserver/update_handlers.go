@@ -33,6 +33,11 @@ type UpdaterStatusClient interface {
 type UpdaterStatus struct {
 	Status        string `json:"status"`
 	TargetVersion string `json:"targetVersion"`
+
+	// Progress fields are absent from older updaters and decode to zero values.
+	CurrentStep    string `json:"currentStep"`
+	CompletedSteps int    `json:"completedSteps"`
+	TotalSteps     int    `json:"totalSteps"`
 }
 
 // UpdaterHTTPClient forwards requests to the real updater service.
@@ -151,6 +156,11 @@ type updaterState struct {
 	running bool
 	// target is the normalized target version; empty unless running.
 	target string
+	// step, completed and total describe the running step; total is zero when
+	// the updater did not report progress.
+	step      string
+	completed int
+	total     int
 }
 
 // updaterState asks the updater whether an update is running. known is false
@@ -170,7 +180,13 @@ func (s *Server) updaterState(ctx context.Context) (state updaterState, known bo
 	if status.Status != "running" {
 		return updaterState{}, true
 	}
-	return updaterState{running: true, target: normalizeUpdaterTarget(status.TargetVersion)}, true
+	return updaterState{
+		running:   true,
+		target:    normalizeUpdaterTarget(status.TargetVersion),
+		step:      status.CurrentStep,
+		completed: status.CompletedSteps,
+		total:     status.TotalSteps,
+	}, true
 }
 
 func normalizeUpdaterTarget(raw string) string {

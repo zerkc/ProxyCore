@@ -47,6 +47,13 @@ the UI polls to drive the update dialog:
   idle, and `null` when the updater is not configured or could not be asked
   (treat `null` as unknown, never as "not updating").
 - `updateTarget`: the target version, present only while `updating` is `true`.
+- `updateProgress`: `{ "step", "completed", "total" }`, present only while
+  `updating` is `true` and the updater reports progress. `step` is the running
+  step (`pull`, `preflight`, `restart`, `verify`, `bootstrap`), `completed` the
+  number of finished steps and `total` the fixed step count. It is absent when
+  the updater is older than 0.6.13, so treat a missing value as "no progress
+  information", not as an error. The bar is step-based: `pull` can stay on one
+  step for minutes on small hosts.
 
 An update that finishes with `updating: false` and an unchanged `version` did
 not take effect; check the updater logs.

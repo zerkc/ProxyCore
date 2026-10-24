@@ -79,6 +79,13 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		if state.running && state.target != "" {
 			response["updateTarget"] = state.target
 		}
+		if state.running && state.total > 0 {
+			response["updateProgress"] = map[string]any{
+				"step":      state.step,
+				"completed": state.completed,
+				"total":     state.total,
+			}
+		}
 	}
 	if status.DesiredRevision != nil {
 		response["desiredRevision"] = map[string]any{
