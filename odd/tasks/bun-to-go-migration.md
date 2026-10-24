@@ -49,7 +49,7 @@ Earlier: document created from the explorer audit. Branch not created yet: `main
 Planned per task: delegated direct (one writer, 2+ non-trivial files each). Mapping was one read-only explorer (9 tool uses, path:line evidence above).
 
 ## Delivery
-Strategy: ask-on-risk. Forecast is well above ~400 changed lines (about 4,000 src plus about 2,500 test LOC), so the chain strategy (`stacked-to-main` or `feature-branch-chain`) is asked once before the second commit. Push, PR and merge remain user decisions.
+Decision (user): every task ships on its own, in this order: own branch off `main`, own PR with its own version bump (`chore(release)`), merge, tag `vX.Y.Z`, the user tests the release, and only then the next task starts with the same process. Forecast is about 4,000 src plus about 2,500 test LOC across T1-T5, so no task is forced into a slice.
 
 ## Next step
 T2 (confirm overlap with `internal/domain`, `internal/secrets`, `internal/acme` first).
