@@ -27,21 +27,24 @@ PRIMARY_ALIAS="primary.pcep.test"
 NODE_ALIAS="node.pcep.test"
 PRIMARY_URL="https://$PRIMARY_ALIAS:3443/"
 NEW_PASSWORD="$(openssl rand -hex 18)"
-export E2E_WORKER_PREP="${E2E_WORKER_PREP:-true}"
 # shellcheck source=lib/e2e-docker.sh
 source "$ROOT/scripts/lib/e2e-docker.sh"
 
 # --- worker schema guard ----------------------------------------------------
-# The worker refuses to start when the SQLite schema is newer than the version
-# it hard-codes. If the migrations moved ahead of the worker (a product bug,
-# reported by this suite), patch the constant inside the throw-away container so
-# the rest of the matrix can still run, and record the finding in the summary.
+# `bun run worker` in the runtime image execs the Go worker, which refuses to
+# start when the SQLite schema is newer than schemawait.ExpectedVersion. The
+# constant is compiled into the binary, so unlike the old Bun hook it cannot be
+# patched inside the container: if the migrations moved ahead of it (a product
+# bug, normally caught by the schemawait registry test), fail fast with a clear
+# message instead of timing out on an unhealthy worker.
 LATEST_MIGRATION="$(ls "$ROOT"/apps/api/internal/sqlitedb/migrations/*.sql | sed -E 's|.*/0*([0-9]+)_.*|\1|' | sort -n | tail -1)"
-WORKER_SCHEMA="$(sed -nE 's/.*EXPECTED_SQLITE_SCHEMA_VERSION = ([0-9]+).*/\1/p' "$ROOT/apps/worker/src/sqlite-runtime.ts")"
-WORKER_FINDING=""
-if [[ -n "$WORKER_SCHEMA" && "$WORKER_SCHEMA" -lt "$LATEST_MIGRATION" ]]; then
-  export E2E_WORKER_PREP="sed -i 's/EXPECTED_SQLITE_SCHEMA_VERSION = $WORKER_SCHEMA/EXPECTED_SQLITE_SCHEMA_VERSION = $LATEST_MIGRATION/' apps/worker/src/sqlite-runtime.ts"
-  WORKER_FINDING="worker expects sqlite schema $WORKER_SCHEMA but migrations reach $LATEST_MIGRATION; constant patched in the container only"
+WORKER_SCHEMA="$(sed -nE 's/^const ExpectedVersion = ([0-9]+).*/\1/p' "$ROOT/apps/api/internal/worker/schemawait/schemawait.go")"
+if [[ -z "$WORKER_SCHEMA" ]]; then
+  echo "FAIL worker schema: cannot read ExpectedVersion from apps/api/internal/worker/schemawait/schemawait.go" >&2
+  exit 1
+elif [[ "$WORKER_SCHEMA" -lt "$LATEST_MIGRATION" ]]; then
+  echo "FAIL worker schema: the Go worker expects sqlite schema $WORKER_SCHEMA but migrations reach $LATEST_MIGRATION (bump schemawait.ExpectedVersion)" >&2
+  exit 1
 fi
 
 wait_for() { # name tries cmd... : poll a command until it succeeds
@@ -84,7 +87,6 @@ join_node() { # token label : draft -> preview -> confirm using ONLY the token
 
 echo "== build =="
 build_images
-[[ -n "$WORKER_FINDING" ]] && record PASS "KNOWN ISSUE worker schema" "$WORKER_FINDING"
 install primary; install node
 
 # ============================================================================

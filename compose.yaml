@@ -190,6 +190,9 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
+    # A multi-candidate apply can run ~10 control calls of up to 10 s each, longer
+    # than Docker's default 10 s stop grace; give the worker time to finish.
+    stop_grace_period: 120s
     restart: unless-stopped
     networks: [control]
 

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"sync"
@@ -138,6 +139,12 @@ func run(ctx context.Context, lookup config.Lookup, stdout, stderr io.Writer, op
 				logErr("worker heartbeat error: " + err.Error())
 			}
 		},
-		OnError: func(err error) { logErr("worker poll error: " + err.Error()) },
+		OnError: func(err error) {
+			// A shutdown that lands mid-poll surfaces as context.Canceled; it is expected.
+			if ctx.Err() != nil && errors.Is(err, context.Canceled) {
+				return
+			}
+			logErr("worker poll error: " + err.Error())
+		},
 	})
 }
