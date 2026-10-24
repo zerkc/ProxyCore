@@ -1,0 +1,7 @@
+{
+  "corefile": "home.arpa:53 {\n    file /etc/coredns/zones/home.arpa.zone\n}\n\ncorp:53 {\n    forward . 10.0.0.53:53 {\n        policy sequential\n    }\n}\n\n.:53 {\n    errors\n    health\n    ready\n    loop\n    reload\n    cache 30\n    forward . 192.168.1.1:53 {\n        policy sequential\n    }\n}\n",
+  "files": {
+    "zones/home.arpa.zone": "$ORIGIN home.arpa.\n$TTL 300\n@ 300 IN SOA ns1.home.arpa. hostmaster.home.arpa. 1 60 300 3600 60\n@ 300 IN NS ns1.home.arpa.\napi 300 IN A 192.168.1.10\n"
+  },
+  "checksum": "655719429dc682aceaaf26d4728ea31628d063f8565b82532939978d0901c5a8"
+}

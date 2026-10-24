@@ -1,0 +1,32 @@
+{
+  "records": [
+    {
+      "id": "x",
+      "name": "x.home.arpa",
+      "type": "A",
+      "value": "192.168.1.30",
+      "ttl": 300,
+      "enabled": true,
+      "proxied": true,
+      "proxy": {
+        "origin": { "ip": "10.0.0.70", "port": 8081, "protocol": "http" },
+        "tlsEnabled": true,
+        "certificateId": "cert-x",
+        "basicAuth": { "username": "op", "passwordSecretId": "secret-basic-2" },
+        "headers": [{ "name": "X-Skipped", "value": "yes" }],
+        "nginxDirectives": "proxy_set_header Host custom.example;"
+      }
+    }
+  ],
+  "streams": [
+    {
+      "id": "off",
+      "enabled": false,
+      "protocol": "tcp",
+      "listenAddress": "0.0.0.0",
+      "listenPort": 2222,
+      "upstream": { "ip": "10.0.0.2", "port": 22, "protocol": "tcp" }
+    }
+  ],
+  "capabilities": { "http3Module": false, "tcp443Published": false, "udp443Published": false }
+}

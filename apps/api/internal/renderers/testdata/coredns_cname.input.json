@@ -1,0 +1,17 @@
+{
+  "zones": [
+    {
+      "name": "home.arpa",
+      "records": [
+        {
+          "id": "cname", "name": "service.home.arpa", "type": "CNAME", "value": "origin.home.arpa", "ttl": 300,
+          "enabled": true, "proxied": true,
+          "proxy": { "origin": { "ip": "10.0.0.10", "port": 8080, "protocol": "http" }, "tlsEnabled": true }
+        }
+      ]
+    }
+  ],
+  "ingress": { "ipv4": "192.168.1.10", "ipv6": "fd00::10" },
+  "defaultPool": { "id": "default", "endpoints": [{ "host": "192.168.1.1", "port": 53 }] },
+  "forwardingRules": []
+}

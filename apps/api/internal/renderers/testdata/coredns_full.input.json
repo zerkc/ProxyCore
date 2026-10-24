@@ -1,0 +1,37 @@
+{
+  "zones": [
+    {
+      "name": "Zeta.Example.",
+      "records": [
+        { "id": "t1", "name": "@", "type": "TXT", "value": "v=spf1 \"quoted\" back\\slash", "ttl": 120, "enabled": true, "proxied": false },
+        { "id": "m1", "name": "@", "type": "MX", "value": { "priority": 20, "exchange": "mx2.zeta.example" }, "ttl": 300, "enabled": true, "proxied": false },
+        { "id": "m2", "name": "@", "type": "MX", "value": { "priority": 10, "exchange": "mx1.zeta.example." }, "ttl": 300, "enabled": true, "proxied": false },
+        { "id": "s1", "name": "sip.tcp", "type": "SRV", "value": { "priority": 1, "weight": 5, "port": 5060, "target": "sip.zeta.example" }, "ttl": 300, "enabled": true, "proxied": false },
+        { "id": "c1", "name": "www", "type": "CNAME", "value": "zeta.example", "ttl": 300, "enabled": true, "proxied": false },
+        { "id": "a1", "name": "host", "type": "A", "value": "192.0.2.5", "ttl": 60, "enabled": true, "proxied": false },
+        { "id": "a2", "name": "host", "type": "A", "value": "192.0.2.4", "ttl": 60, "enabled": true, "proxied": false },
+        { "id": "a3", "name": "host-b.zeta.example", "type": "AAAA", "value": "2001:db8::5", "ttl": 60, "enabled": true, "proxied": false },
+        {
+          "id": "p1", "name": "app", "type": "CNAME", "value": "origin.zeta.example", "ttl": 90,
+          "enabled": true, "proxied": true,
+          "proxy": { "origin": { "ip": "10.0.0.10", "port": 8080, "protocol": "http" }, "tlsEnabled": false }
+        }
+      ]
+    },
+    {
+      "name": "alpha.example",
+      "records": [
+        { "id": "x1", "name": "x", "type": "A", "value": "192.0.2.9", "enabled": true, "proxied": false }
+      ]
+    }
+  ],
+  "ingress": { "ipv4": "192.0.2.10", "ipv6": "2001:db8::10" },
+  "defaultPool": {
+    "id": "default",
+    "endpoints": [{ "host": "1.1.1.1", "port": 53 }, { "host": "2606:4700:4700::1111", "port": 53 }]
+  },
+  "forwardingRules": [
+    { "suffix": "corp", "pool": { "id": "corp", "endpoints": [{ "host": "10.0.0.53", "port": 53 }] } },
+    { "suffix": "internal.corp", "pool": { "id": "ic", "endpoints": [{ "host": "10.1.0.53", "port": 5353 }, { "host": "fd00::53", "port": 53 }] } }
+  ]
+}

@@ -1,0 +1,31 @@
+{
+  "records": [
+    {
+      "id": "private",
+      "name": "private.home.arpa",
+      "type": "A",
+      "value": "192.168.1.20",
+      "ttl": 300,
+      "enabled": true,
+      "proxied": true,
+      "proxy": {
+        "origin": { "ip": "10.0.0.40", "port": 3000, "protocol": "https" },
+        "tlsEnabled": true,
+        "certificateId": "cert-private",
+        "backendTlsVerify": false,
+        "basicAuth": { "username": "operator", "passwordSecretId": "secret-basic-1" },
+        "pathRules": [
+          { "kind": "prefix", "pattern": "/", "action": { "type": "proxy", "rewrite": "/app" } }
+        ]
+      }
+    }
+  ],
+  "streams": [],
+  "capabilities": { "http3Module": false, "tcp443Published": true, "udp443Published": false },
+  "candidatePath": "/var/lib/proxycore/candidates/rev-2/nginx",
+  "extraFiles": {
+    "basic-auth/secret-basic-1": "operator:{SHA}abc\n",
+    "certs/cert-private.crt": "-----BEGIN CERTIFICATE-----\nTEST\n-----END CERTIFICATE-----\n",
+    "certs/cert-private.key": "-----BEGIN PRIVATE KEY-----\nTEST\n-----END PRIVATE KEY-----\n"
+  }
+}
