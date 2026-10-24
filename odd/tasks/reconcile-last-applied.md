@@ -23,8 +23,10 @@ Stop the worker's nginx reconcile from reverting a freshly applied configuration
 - English for code, comments, tests and commits. Conventional commits, no AI attribution in commits. Test-first (`bunx vitest run` from repo root with `TZ=UTC`).
 
 ## Tasks
-- [ ] T1.7a Worker: `latestAppliedRevision` uses the most recent applied job; tests (revision 43 just applied while 45 is an older applied revision with a probe that reports drift only for 45: no `reconcile-nginx` job is enqueued and the probe targets 43; no applied job falls back to `latest()`; keep the existing case at `poller.test.ts:132-176`).
-- [ ] T1.7b Release: bump `0.6.14` to `0.6.15`.
+- [x] T1.7a Worker: `latestAppliedRevision` uses the most recent applied job; tests (revision 43 just applied while 45 is an older applied revision with a probe that reports drift only for 45: no `reconcile-nginx` job is enqueued and the probe targets 43; no applied job falls back to `latest()`; keep the existing case at `poller.test.ts:132-176`).
+- [x] T1.7b Release: bump `0.6.14` to `0.6.15`.
+  - T1.7a evidence: commit 2a13b99. RED: 3 of 4 new tests failed before the fix (newest-applied-job target, reconcile-job target, finishedAt/createdAt ordering); the no-applied-job fallback test passed already, as expected since it keeps the old behavior. GREEN: `TZ=UTC bunx vitest run apps/worker packages/db` 30 passed, 7 skipped; `bun run typecheck` clean.
+  - T1.7b evidence: commit 356cc6b; `cd apps/api && go build ./...` OK.
 
 ## Authorized scope
 apps/worker/src/poller.ts, apps/worker/src/poller.test.ts, the version files.
@@ -33,7 +35,7 @@ apps/worker/src/poller.ts, apps/worker/src/poller.test.ts, the version files.
 `bun run typecheck` clean, `TZ=UTC bunx vitest run` green for apps/worker, and the new test fails before the fix.
 
 ## Progress
-Created from the diagnosis. No source written yet.
+T1.7a and T1.7b done and committed. Deviation: the old fallback that sorted applied revisions by `appliedAt` was dropped; fallback is now `latest()` with `appliedAt`, as the Decisions state.
 
 ## Route declaration
 Delegated direct (one writer).
@@ -42,4 +44,4 @@ Delegated direct (one writer).
 Own branch `fix/reconcile-last-applied` off `main`, own PR with bump `0.6.15`, merge, tag `v0.6.15`, user tests. The Bun-to-Go migration branches rebase on it and shift their bumps by one.
 
 ## Next step
-T1.7a.
+Open the PR, merge, tag `v0.6.15`, user tests.
