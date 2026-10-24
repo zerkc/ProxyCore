@@ -1,0 +1,92 @@
+{
+  "records": [
+    {
+      "id": "z",
+      "name": "zeta.home.arpa",
+      "type": "A",
+      "value": "192.168.1.21",
+      "ttl": 300,
+      "enabled": true,
+      "proxied": true,
+      "proxy": {
+        "origin": { "ip": "fd00::20", "port": 9000, "protocol": "http" },
+        "tlsEnabled": false,
+        "websocket": true,
+        "cache": { "enabled": false },
+        "timeouts": { "connectSeconds": 7, "sendReadSeconds": 120, "clientHeaderSeconds": 20, "bodyLimitMb": 50 },
+        "headers": [
+          { "name": "X-Greeting", "value": "hello world" },
+          { "name": "X-Quote", "value": "say \"hi\" \\ bye" },
+          { "name": "X-Empty", "value": "" }
+        ],
+        "nginxDirectives": "# comment\r\nproxy_connect_timeout 3s; # trailing\r\nadd_header X-A b;\r\n"
+      }
+    },
+    {
+      "id": "a",
+      "name": "alpha.home.arpa",
+      "type": "A",
+      "value": "192.168.1.22",
+      "ttl": 300,
+      "enabled": true,
+      "proxied": true,
+      "proxy": {
+        "origin": { "ip": "10.0.0.50", "port": 8443, "protocol": "https" },
+        "tlsEnabled": true,
+        "certificateId": "cert-alpha",
+        "http3": true,
+        "http2": false,
+        "backendTlsVerify": true,
+        "redirectHttpToHttps": false,
+        "cache": { "enabled": true },
+        "pathRules": [
+          { "kind": "prefix", "pattern": "/api/", "action": { "type": "proxy" } },
+          { "kind": "prefix", "pattern": "/api/v1", "action": { "type": "proxy", "rewrite": "/v1/" } },
+          { "kind": "exact", "pattern": "/old", "action": { "type": "redirect", "status": 301, "location": "https://example.com/new path" } },
+          { "kind": "exact", "pattern": "/bare", "action": { "type": "redirect", "status": 302 } }
+        ]
+      }
+    },
+    {
+      "id": "d",
+      "name": "disabled.home.arpa",
+      "type": "A",
+      "value": "192.168.1.23",
+      "ttl": 300,
+      "enabled": false,
+      "proxied": true,
+      "proxy": { "origin": { "ip": "10.0.0.60", "port": 80, "protocol": "http" }, "tlsEnabled": false }
+    },
+    {
+      "id": "n",
+      "name": "plain.home.arpa",
+      "type": "A",
+      "value": "192.168.1.24",
+      "ttl": 300,
+      "enabled": true,
+      "proxied": false
+    }
+  ],
+  "streams": [
+    {
+      "id": "dns",
+      "enabled": true,
+      "protocol": "udp",
+      "listenAddress": "::",
+      "listenPort": 5353,
+      "upstream": { "ip": "fd00::53", "port": 53, "protocol": "udp" }
+    },
+    {
+      "id": "off",
+      "enabled": false,
+      "protocol": "tcp",
+      "listenAddress": "0.0.0.0",
+      "listenPort": 2222,
+      "upstream": { "ip": "10.0.0.2", "port": 22, "protocol": "tcp" }
+    }
+  ],
+  "capabilities": { "http3Module": true, "tcp443Published": true, "udp443Published": true },
+  "candidatePath": "/var/lib/proxycore/candidates/rev-3/nginx///",
+  "acmeUpstream": " https://acme.internal:8443/ ",
+  "extraFiles": { "certs/cert-alpha.crt": "CRT\n" }
+}

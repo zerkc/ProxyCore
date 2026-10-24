@@ -1,0 +1,20 @@
+{
+  "zones": [
+    {
+      "name": "home.arpa",
+      "records": [
+        {
+          "id": "b", "name": "api.home.arpa", "type": "A", "value": "192.168.1.20", "ttl": 300,
+          "enabled": true, "proxied": true,
+          "proxy": { "origin": { "ip": "192.168.1.20", "port": 8080, "protocol": "http" }, "tlsEnabled": true }
+        },
+        { "id": "a", "name": "disabled.home.arpa", "type": "A", "value": "192.168.1.21", "ttl": 300, "enabled": false, "proxied": false }
+      ]
+    }
+  ],
+  "ingress": { "ipv4": "192.168.1.10" },
+  "defaultPool": { "id": "default", "endpoints": [{ "host": "192.168.1.1", "port": 53 }] },
+  "forwardingRules": [
+    { "suffix": "corp", "pool": { "id": "corp", "endpoints": [{ "host": "10.0.0.53", "port": 53 }] } }
+  ]
+}
