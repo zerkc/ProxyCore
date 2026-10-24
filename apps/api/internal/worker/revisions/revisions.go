@@ -85,17 +85,35 @@ func (s *Store) Latest(ctx context.Context) (*Revision, error) {
 	return one(s.db.QueryRowContext(ctx, "SELECT "+columns+" FROM main.config_revisions ORDER BY revision_number DESC LIMIT 1"))
 }
 
-// LatestApplied returns the latest revision when it is applied. Otherwise it
-// falls back, like the TS poller, to the most recently applied revision among
-// those referenced by applied jobs; nil when there is none.
+// LatestApplied returns the reconcile target: the revision of the most recent
+// applied job, ordered by finished_at (created_at when it was never finished),
+// skipping revisions that have no applied_at. Reconcile jobs are applied jobs
+// too, which keeps the target stable after a repair. It is not Latest(): the API
+// reuses an older revision (keeping its old number) when a snapshot checksum
+// matches, so the highest number is not necessarily the one applied last. Only
+// when no applied job yields a revision does it fall back to the highest-numbered
+// revision, if that one has applied_at; nil otherwise. This is the rule of
+// latestAppliedRevision in apps/worker/src/poller.ts.
 func (s *Store) LatestApplied(ctx context.Context) (*Revision, error) {
-	latest, err := s.Latest(ctx)
-	if err != nil || (latest != nil && latest.AppliedAt != nil) {
-		return latest, err
+	prefixed := ""
+	for i, column := range strings.Split(columns, ",") {
+		if i > 0 {
+			prefixed += ","
+		}
+		prefixed += "r." + strings.TrimSpace(column)
 	}
-	return one(s.db.QueryRowContext(ctx, `SELECT `+columns+` FROM main.config_revisions
-		WHERE applied_at IS NOT NULL AND id IN (SELECT revision_id FROM main.apply_jobs WHERE status = 'applied')
-		ORDER BY applied_at DESC LIMIT 1`))
+	found, err := one(s.db.QueryRowContext(ctx, `SELECT `+prefixed+` FROM main.apply_jobs j
+		JOIN main.config_revisions r ON r.id = j.revision_id
+		WHERE j.status = 'applied' AND r.applied_at IS NOT NULL
+		ORDER BY coalesce(j.finished_at, j.created_at) DESC, j.created_at DESC LIMIT 1`))
+	if err != nil || found != nil {
+		return found, err
+	}
+	latest, err := s.Latest(ctx)
+	if err != nil || latest == nil || latest.AppliedAt == nil {
+		return nil, err
+	}
+	return latest, nil
 }
 
 // MarkApplied stamps applied_at on the revision and, in the same transaction,
