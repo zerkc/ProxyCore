@@ -39,6 +39,18 @@ Inspect current jobs and status through the authenticated API:
 curl -b cookies.txt http://localhost:3000/api/status
 ```
 
+The status response also reports the running build and the update state, which
+the UI polls to drive the update dialog:
+
+- `version`: the running build version (never a cached release value).
+- `updating`: `true` while the updater is applying an update, `false` when it is
+  idle, and `null` when the updater is not configured or could not be asked
+  (treat `null` as unknown, never as "not updating").
+- `updateTarget`: the target version, present only while `updating` is `true`.
+
+An update that finishes with `updating: false` and an unchanged `version` did
+not take effect; check the updater logs.
+
 Do not edit CoreDNS or Nginx files while an apply is running. Preserve the
 candidate checksum and correlation id when reporting an incident.
 

@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/zerkc/ProxyCore/apps/api/internal/auth"
 	"github.com/zerkc/ProxyCore/apps/api/internal/update"
@@ -123,15 +124,9 @@ func (s *Server) handleUpdates(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if client, ok := s.updaterClient.(UpdaterStatusClient); ok {
-		status, err := client.Status(r.Context())
-		if err == nil && status.Status == "running" {
-			targetVersion := normalizeUpdaterTarget(status.TargetVersion)
-			if targetVersion != "" {
-				result.UpdateInProgress = true
-				result.TargetVersion = targetVersion
-			}
-		}
+	if state, known := s.updaterState(r.Context()); known && state.running && state.target != "" {
+		result.UpdateInProgress = true
+		result.TargetVersion = state.target
 	}
 	writeJSON(w, http.StatusOK, result)
 }
@@ -145,6 +140,37 @@ func wantsForcedRefresh(r *http.Request) bool {
 	default:
 		return false
 	}
+}
+
+// updaterStatusTimeout bounds the best-effort updater lookup so polled
+// endpoints never wait on a slow or unreachable updater.
+const updaterStatusTimeout = time.Second
+
+// updaterState is the best-effort view of the updater service.
+type updaterState struct {
+	running bool
+	// target is the normalized target version; empty unless running.
+	target string
+}
+
+// updaterState asks the updater whether an update is running. known is false
+// when no updater status client is configured or the updater could not be
+// asked, so callers can tell "idle" from "unknown".
+func (s *Server) updaterState(ctx context.Context) (state updaterState, known bool) {
+	client, ok := s.updaterClient.(UpdaterStatusClient)
+	if !ok {
+		return updaterState{}, false
+	}
+	ctx, cancel := context.WithTimeout(ctx, updaterStatusTimeout)
+	defer cancel()
+	status, err := client.Status(ctx)
+	if err != nil {
+		return updaterState{}, false
+	}
+	if status.Status != "running" {
+		return updaterState{}, true
+	}
+	return updaterState{running: true, target: normalizeUpdaterTarget(status.TargetVersion)}, true
 }
 
 func normalizeUpdaterTarget(raw string) string {

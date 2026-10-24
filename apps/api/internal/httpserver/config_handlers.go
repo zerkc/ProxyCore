@@ -10,6 +10,7 @@ import (
 	"github.com/zerkc/ProxyCore/apps/api/internal/auth"
 	"github.com/zerkc/ProxyCore/apps/api/internal/configuration"
 	"github.com/zerkc/ProxyCore/apps/api/internal/domain"
+	"github.com/zerkc/ProxyCore/apps/api/internal/version"
 )
 
 // httpError carries an explicit status for configuration routes.
@@ -68,6 +69,16 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	if identity := s.publicIdentity(); identity != nil {
 		response["identity"] = identity
+	}
+	// updating is true/false when the updater answered and null when it could
+	// not be asked, so clients never read "unknown" as "not updating".
+	response["version"] = version.Version
+	response["updating"] = nil
+	if state, known := s.updaterState(r.Context()); known {
+		response["updating"] = state.running
+		if state.running && state.target != "" {
+			response["updateTarget"] = state.target
+		}
 	}
 	if status.DesiredRevision != nil {
 		response["desiredRevision"] = map[string]any{
