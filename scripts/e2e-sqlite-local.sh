@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Local SQLite smoke test: Go API and worker share one WAL file. No Docker.
-# The worker is the Bun one by default; WORKER_IMPL=go builds and runs the Go
-# worker (apps/api/cmd/worker) instead.
+# The worker is the Go one by default (apps/api/cmd/worker); WORKER_IMPL=bun
+# runs the legacy Bun worker instead.
 # Everything lives under a mktemp -d directory that is removed on exit; children
 # are killed by the EXIT trap. Exits non-zero when any step FAILs.
 set -euo pipefail
@@ -160,7 +160,7 @@ JOB_ID="$(jq -r '.id // .job.id // empty' "$BODY" 2>/dev/null || true)"
   || bail "create apply job" "POST /api/apply -> $code: $(snippet)"
 
 echo "== worker =="
-WORKER_IMPL="${WORKER_IMPL:-bun}"
+WORKER_IMPL="${WORKER_IMPL:-go}"
 WORKER_CMD=()
 worker_skip=""
 case "$WORKER_IMPL" in

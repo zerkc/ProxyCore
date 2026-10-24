@@ -38,9 +38,8 @@ services:
       context: ..
       dockerfile: infra/compose/Dockerfile.runtime
     image: pcep-e2e-runtime:local
-    # PCEP_WORKER_PREP lets the harness run a shell command before the worker starts
-    # (see "worker schema guard" in e2e-docker-endpoints.sh); it is a no-op by default.
-    command: ["sh", "-c", "${PCEP_WORKER_PREP:-true}; exec bun run worker"]
+    # `bun run worker` execs the Go worker shipped in the runtime image.
+    command: ["bun", "run", "worker"]
     environment:
       NODE_ENV: production
       PROXYCORE_SQLITE_PATH: /var/lib/proxycore-db/proxycore.db

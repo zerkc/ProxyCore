@@ -29,6 +29,16 @@ committed; there is no LISTEN/NOTIFY. It also reconciles the durable queue every
 and are re-queued after the lease expires, so a missed notification or a
 restart does not discard desired state or an outstanding apply.
 
+Since 0.6.17 the worker is the Go binary `/usr/local/bin/proxycore-worker`,
+shipped inside the `proxycore-runtime` image; the unchanged `bun run worker`
+command execs it. To roll back to the TypeScript worker without changing the
+image, set `PROXYCORE_WORKER_IMPL=bun` in the worker service environment and
+recreate it (`docker compose up -d worker`). That switch and the TS source are
+removed in a later release. Fresh installs set `stop_grace_period: 120s` on the
+worker so an in-flight multi-candidate apply can finish on `docker stop`;
+existing installs keep Docker's default 10 s because their host `compose.yaml`
+is not rewritten by dashboard updates.
+
 Saving a zone or DNS record creates its revision and queues an immediate
 combined CoreDNS/Nginx apply. Consecutive saves are intentionally not batched;
 inspect `/api/status` when several edits are made in succession.
