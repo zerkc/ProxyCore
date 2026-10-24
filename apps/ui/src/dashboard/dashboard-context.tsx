@@ -61,6 +61,8 @@ type DashboardContextValue = {
   updateLoading: boolean;
   updateError: string;
   refreshUpdate: (options?: { force?: boolean }) => Promise<void>;
+  /** Marks an update as being applied; a 401 then no longer redirects to login. */
+  setUpdateApplying: (applying: boolean) => void;
   inSync: boolean;
   failedJob?: JobRecord;
   failureReason: string;
@@ -88,6 +90,11 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   );
 
   const autoRetriedJobIdRef = useRef<string | null>(null);
+  // A ref, not state: the polling loop captures the first `refresh` closure.
+  const updateApplyingRef = useRef(false);
+  const setUpdateApplying = useCallback((applying: boolean) => {
+    updateApplyingRef.current = applying;
+  }, []);
 
   const activeZone = useMemo(
     () => status?.zones.find((zone) => zone.id === selectedZone),
@@ -122,7 +129,8 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
       credentials: "include",
     });
     if (response.status === 401) {
-      navigate("/login");
+      // The API restarts mid-update and may briefly lose the session.
+      if (!updateApplyingRef.current) navigate("/login");
       return;
     }
     if (!response.ok) {
@@ -428,6 +436,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     updateLoading,
     updateError,
     refreshUpdate,
+    setUpdateApplying,
     inSync,
     failedJob,
     failureReason,

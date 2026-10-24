@@ -1,13 +1,22 @@
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { api } from "../api";
-import type { UpdatePayload } from "./types";
+import type { StatusPayload, UpdatePayload } from "./types";
+
+type RuntimeStatus = Pick<
+  StatusPayload,
+  "version" | "updating" | "updateTarget"
+>;
 
 type VersionStatusProps = {
   update?: UpdatePayload;
+  /** Polled status (every few seconds); drives the update dialog phases. */
+  status?: RuntimeStatus;
   loading: boolean;
   error: string;
   onRetry: () => void;
+  /** Reports whether an update is being applied (the API restarts mid-update). */
+  onApplyingChange?: (applying: boolean) => void;
 };
 
 /**
@@ -15,17 +24,26 @@ type VersionStatusProps = {
  *
  * idle        - nothing happening; show "Update to v…" button
  * confirming  - user clicked once; show Cancel + Confirm pair
- * applying    - POST /api/updates/apply fired; polling every 5s
- * timeout     - apply exceeded APPLY_TIMEOUT_MS; user can resume polling
- * done        - update.currentVersion === target version (dialog still open
- *               until user explicitly refreshes)
+ * applying    - update started (or resumed); phase follows the polled status
+ * timeout     - applying exceeded APPLY_TIMEOUT_MS; user can keep waiting
+ * done        - the running version changed (dialog stays open until the user
+ *               refreshes)
+ * failed      - the updater stopped but the version did not change
  */
-type ApplyPhase = "idle" | "confirming" | "applying" | "timeout" | "done";
+type ApplyPhase =
+  "idle" | "confirming" | "applying" | "timeout" | "done" | "failed";
 
-const POLL_INTERVAL_MS = 5_000;
-const POLL_MAX_INTERVAL_MS = 30_000;
+/** Snapshot taken when an update starts, used to judge the outcome. */
+type ApplyRun = {
+  fromVersion?: string;
+  startedAt: number;
+  sawUpdating: boolean;
+};
+
 const APPLY_TIMEOUT_MS = 5 * 60 * 1_000;
 const APPLY_REQUEST_TIMEOUT_MS = 5_000;
+/** An idle updater this long after the POST, never seen running, is a failure. */
+const FAILURE_GRACE_MS = 15_000;
 
 function normalizeVersion(version?: string | null): string | undefined {
   const normalized = version?.trim().replace(/^v/, "");
@@ -34,81 +52,94 @@ function normalizeVersion(version?: string | null): string | undefined {
 
 export function VersionStatus({
   update,
+  status,
   loading,
   error,
   onRetry,
+  onApplyingChange,
 }: VersionStatusProps) {
   const [phase, setPhase] = useState<ApplyPhase>("idle");
   const [applyTargetVersion, setApplyTargetVersion] = useState<string>();
+  const runRef = useRef<ApplyRun>({ startedAt: 0, sawUpdating: false });
   const latest = update?.latest;
   const latestVersion = normalizeVersion(latest?.version);
-  const serverTargetVersion = update?.updateInProgress
-    ? normalizeVersion(update.targetVersion)
-    : undefined;
+  const runningVersion =
+    normalizeVersion(status?.version) ??
+    normalizeVersion(update?.currentVersion);
   const targetVersion =
-    normalizeVersion(applyTargetVersion) ?? serverTargetVersion ?? latestVersion;
-  const consecutiveErrorsRef = useRef(0);
+    normalizeVersion(applyTargetVersion) ??
+    normalizeVersion(status?.updateTarget) ??
+    latestVersion;
 
-  // Resume an update that was already running before this page loaded.
+  function beginRun() {
+    runRef.current = {
+      fromVersion: runningVersion,
+      startedAt: Date.now(),
+      sawUpdating: status?.updating === true,
+    };
+  }
+
+  // Resume an update that was already running before this page loaded. Status
+  // alone is enough, so read-only users see the dialog too.
   useEffect(() => {
-    if (phase !== "idle" || !update?.updateInProgress) return;
-    const target = normalizeVersion(update.targetVersion);
+    if (phase !== "idle" || status?.updating !== true) return;
+    const target = normalizeVersion(status.updateTarget) ?? latestVersion;
     if (!target) return;
+    runRef.current = {
+      fromVersion: runningVersion,
+      startedAt: Date.now(),
+      sawUpdating: true,
+    };
     setApplyTargetVersion(target);
     setPhase("applying");
-  }, [phase, update?.targetVersion, update?.updateInProgress]);
+  }, [
+    phase,
+    status?.updating,
+    status?.updateTarget,
+    latestVersion,
+    runningVersion,
+  ]);
 
-  // Detect success: poll handler will trigger this through onRetry/update.
+  // Derive the outcome from the polled status. An unknown updater state
+  // (null) and missing status (failed requests while the API restarts) never
+  // count as failure.
   useEffect(() => {
     if (phase !== "applying" && phase !== "timeout") return;
-    if (!update || !targetVersion) return;
-    if (normalizeVersion(update.currentVersion) === targetVersion) {
+    if (!status) return;
+    const run = runRef.current;
+    if (status.updating === true) {
+      run.sawUpdating = true;
+      return;
+    }
+    const current = normalizeVersion(status.version);
+    const changed =
+      Boolean(current) &&
+      (current === targetVersion ||
+        (run.fromVersion !== undefined && current !== run.fromVersion));
+    if (changed) {
       setPhase("done");
+      return;
     }
-  }, [phase, update, targetVersion]);
+    if (
+      status.updating === false &&
+      run.fromVersion !== undefined &&
+      current === run.fromVersion &&
+      (run.sawUpdating || Date.now() - run.startedAt >= FAILURE_GRACE_MS)
+    ) {
+      setPhase("failed");
+    }
+  }, [phase, status, targetVersion]);
 
-  // Poll the version endpoint while applying. Failures (server restarting) are
-  // expected and ignored — the next tick will retry.
+  // Tell the dashboard an update is being applied so a 401 while the API
+  // restarts does not bounce the user to the login page.
+  const applying = phase === "applying" || phase === "timeout";
   useEffect(() => {
-    if (phase !== "applying") return;
-    consecutiveErrorsRef.current = 0;
-    let cancelled = false;
-    let timer: ReturnType<typeof setTimeout> | undefined;
+    onApplyingChange?.(applying);
+    return () => onApplyingChange?.(false);
+  }, [applying, onApplyingChange]);
 
-    async function tick() {
-      let success = false;
-      try {
-        await onRetry();
-        success = true;
-      } catch {
-        // Server is probably restarting; keep polling with backoff.
-      }
-      if (cancelled) return;
-
-      let nextInterval: number;
-      if (success) {
-        consecutiveErrorsRef.current = 0;
-        nextInterval = POLL_INTERVAL_MS;
-      } else {
-        consecutiveErrorsRef.current += 1;
-        nextInterval = Math.min(
-          POLL_INTERVAL_MS * Math.pow(2, consecutiveErrorsRef.current - 1),
-          POLL_MAX_INTERVAL_MS,
-        );
-      }
-      timer = setTimeout(tick, nextInterval);
-    }
-
-    // Wait one interval before the first check: the POST just fired, the API
-    // is about to die, and the initial onRetry is redundant noise.
-    timer = setTimeout(tick, POLL_INTERVAL_MS);
-    return () => {
-      cancelled = true;
-      if (timer) clearTimeout(timer);
-    };
-  }, [phase, onRetry]);
-
-  // Watchdog so the UI surfaces "taking too long" without abandoning the poll.
+  // Watchdog so the UI surfaces "taking too long" while status keeps saying
+  // the updater is running (or stays unknown).
   useEffect(() => {
     if (phase !== "applying") return;
     const id = setTimeout(() => setPhase("timeout"), APPLY_TIMEOUT_MS);
@@ -117,10 +148,11 @@ export function VersionStatus({
 
   async function startApply() {
     if (!targetVersion) return;
+    beginRun();
     setPhase("applying");
     // Fire-and-forget POST. We bound the request so we don't hang on a slow
-    // server death; even if this throws, the polling loop above carries on
-    // and will eventually observe the new version.
+    // server death; even if this throws, the polled status carries on and
+    // will eventually show the outcome.
     try {
       const controller = new AbortController();
       const timer = setTimeout(
@@ -137,12 +169,15 @@ export function VersionStatus({
         clearTimeout(timer);
       }
     } catch {
-      // Expected while the API is restarting; polling continues.
+      // Expected while the API is restarting; status polling continues.
     }
   }
 
   const isBlocking =
-    phase === "applying" || phase === "timeout" || phase === "done";
+    phase === "applying" ||
+    phase === "timeout" ||
+    phase === "done" ||
+    phase === "failed";
 
   if (!update) {
     return (
@@ -187,7 +222,8 @@ export function VersionStatus({
           <div className="min-w-0">
             <p className="pc-eyebrow">Version</p>
             <p className="mt-2 font-mono text-sm text-link">
-              v{normalizeVersion(update.currentVersion) ?? update.currentVersion}
+              v
+              {normalizeVersion(update.currentVersion) ?? update.currentVersion}
             </p>
           </div>
           {phase === "idle" ? (
@@ -231,10 +267,13 @@ export function VersionStatus({
             <UpdateBlockingDialog
               phase={phase}
               targetVersion={targetVersion}
+              runningVersion={runningVersion}
               onRefresh={() => window.location.reload()}
-              onRetryContinue={() => {
-                setPhase("applying");
-                void onRetry();
+              onRetryContinue={() => setPhase("applying")}
+              onDismiss={() => {
+                setApplyTargetVersion(undefined);
+                setPhase("idle");
+                onRetry();
               }}
             />,
             document.body,
@@ -247,17 +286,21 @@ export function VersionStatus({
 // ─── Blocking update dialog ─────────────────────────────────────────────────
 
 type UpdateBlockingDialogProps = {
-  phase: "applying" | "timeout" | "done";
+  phase: "applying" | "timeout" | "done" | "failed";
   targetVersion: string;
+  runningVersion?: string;
   onRefresh: () => void;
   onRetryContinue: () => void;
+  onDismiss: () => void;
 };
 
 function UpdateBlockingDialog({
   phase,
   targetVersion,
+  runningVersion,
   onRefresh,
   onRetryContinue,
+  onDismiss,
 }: UpdateBlockingDialogProps) {
   const dialogRef = useRef<HTMLDivElement>(null);
   const previousFocusRef = useRef<Element | null>(null);
@@ -332,9 +375,11 @@ function UpdateBlockingDialog({
   const title =
     phase === "done"
       ? "Update complete"
-      : phase === "timeout"
-        ? "Still updating"
-        : "Installing update";
+      : phase === "failed"
+        ? "Update failed"
+        : phase === "timeout"
+          ? "Still updating"
+          : "Installing update";
 
   const headingId = "update-dialog-title";
   const descId = "update-dialog-desc";
@@ -394,6 +439,22 @@ function UpdateBlockingDialog({
               className="pc-spinner pc-update-spinner absolute inset-0 m-auto"
               aria-hidden
             />
+          ) : phase === "failed" ? (
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              className="absolute inset-0 m-auto h-10 w-10 text-signal"
+              aria-hidden
+            >
+              <circle cx="12" cy="12" r="10" />
+              <line x1="15" y1="9" x2="9" y2="15" />
+              <line x1="9" y1="9" x2="15" y2="15" />
+            </svg>
           ) : phase === "timeout" ? (
             <svg
               xmlns="http://www.w3.org/2000/svg"
@@ -434,7 +495,7 @@ function UpdateBlockingDialog({
               "pc-title text-xl",
               phase === "done"
                 ? "text-ok"
-                : phase === "timeout"
+                : phase === "failed" || phase === "timeout"
                   ? "text-signal"
                   : "text-mist",
             ].join(" ")}
@@ -448,9 +509,11 @@ function UpdateBlockingDialog({
         <p id={descId} className="text-sm leading-6 text-mute">
           {phase === "done"
             ? "ProxyCore has been updated. Refresh the page to load the new version."
-            : phase === "timeout"
-              ? "The update is taking longer than expected but is still in progress. Do not close or reload this tab — editing is locked until it is safe to continue."
-              : "ProxyCore is being updated. Do not close or reload this tab — editing is locked until it is safe to continue."}
+            : phase === "failed"
+              ? `The update stopped but ProxyCore is still running v${runningVersion ?? "unknown"}, so the new version was not installed. Check the updater logs, then try again.`
+              : phase === "timeout"
+                ? "The update is taking longer than expected but is still in progress. Do not close or reload this tab — editing is locked until it is safe to continue."
+                : "ProxyCore is being updated. Do not close or reload this tab — editing is locked until it is safe to continue."}
         </p>
 
         {/* Actions */}
@@ -463,6 +526,15 @@ function UpdateBlockingDialog({
               autoFocus
             >
               Refresh page
+            </button>
+          ) : phase === "failed" ? (
+            <button
+              type="button"
+              className="pc-btn w-full"
+              onClick={onDismiss}
+              autoFocus
+            >
+              Close
             </button>
           ) : phase === "timeout" ? (
             <>
@@ -490,9 +562,11 @@ function UpdateBlockingDialog({
         <div className="sr-only" aria-live="polite" aria-atomic="true">
           {phase === "applying"
             ? `Installing update to version ${targetVersion}. Do not reload the page.`
-            : phase === "timeout"
-              ? `Update to version ${targetVersion} is taking longer than expected but is still in progress.`
-              : `Update to version ${targetVersion} is complete. Refresh the page to load the new version.`}
+            : phase === "failed"
+              ? `Update to version ${targetVersion} failed. The running version did not change.`
+              : phase === "timeout"
+                ? `Update to version ${targetVersion} is taking longer than expected but is still in progress.`
+                : `Update to version ${targetVersion} is complete. Refresh the page to load the new version.`}
         </div>
       </div>
     </div>

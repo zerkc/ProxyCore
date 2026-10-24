@@ -83,6 +83,12 @@ export type StatusPayload = {
   certificates: DashboardCertificate[];
   desiredRevision?: { revisionNumber: number; checksum: string };
   appliedRevision?: { revisionNumber: number; checksum: string };
+  /** Running build version. */
+  version?: string;
+  /** true/false when the updater answered; null when it could not be asked. */
+  updating?: boolean | null;
+  /** Target version while an update is running. */
+  updateTarget?: string;
 };
 
 export type UpdateRelease = {
