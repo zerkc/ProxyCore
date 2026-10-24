@@ -136,24 +136,29 @@ function isActiveJob(job: JobRecord): boolean {
   );
 }
 
+// The reconcile target is the revision of the most recent successful job, not
+// revisions.latest(): latest() is the highest revision_number, but the Go API
+// reuses an older revision (keeping its old number) when a snapshot checksum
+// matches, so the highest number is not necessarily the one applied last.
+// Reconcile jobs are applied jobs too, which keeps the target stable after a repair.
 async function latestAppliedRevision(
   revisions: RevisionStore,
   jobs: JobRecord[],
 ): Promise<RevisionRecord | undefined> {
-  const latest = await revisions.latest();
-  if (latest?.appliedAt) return latest;
+  const appliedJobs = jobs
+    .filter((job) => job.status === "applied")
+    .sort((left, right) => jobSettledAt(right) - jobSettledAt(left));
+  for (const job of appliedJobs) {
+    const revision = await revisions.get(job.revisionId);
+    if (revision?.appliedAt) return revision;
+  }
 
-  const appliedRevisions = await Promise.all(
-    jobs
-      .filter((job) => job.status === "applied")
-      .map((job) => revisions.get(job.revisionId)),
-  );
-  return appliedRevisions
-    .filter((revision): revision is RevisionRecord => Boolean(revision?.appliedAt))
-    .sort(
-      (left, right) =>
-        (right.appliedAt?.getTime() ?? 0) - (left.appliedAt?.getTime() ?? 0),
-    )[0];
+  const latest = await revisions.latest();
+  return latest?.appliedAt ? latest : undefined;
+}
+
+function jobSettledAt(job: JobRecord): number {
+  return (job.finishedAt ?? job.createdAt).getTime();
 }
 
 function wait(milliseconds: number, signal?: AbortSignal): Promise<void> {

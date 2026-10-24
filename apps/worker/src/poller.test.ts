@@ -54,6 +54,47 @@ class SuccessfulControl implements ControlClient {
   }
 }
 
+class PathDriftControl implements ControlClient {
+  readonly probedPaths: string[] = [];
+
+  constructor(private readonly driftingPath?: string) {}
+
+  async execute(request: ControlRequest): Promise<ControlResponse> {
+    if (request.service === "nginx" && request.operation === "health") {
+      this.probedPaths.push(request.candidatePath ?? "");
+    }
+    return {
+      requestId: request.requestId,
+      operation: request.operation,
+      ok: true,
+      output:
+        request.service === "nginx" && request.operation === "health"
+          ? {
+              status:
+                request.candidatePath === this.driftingPath
+                  ? "drift"
+                  : "healthy",
+            }
+          : { service: request.service, operation: request.operation },
+    };
+  }
+}
+
+async function appliedJob(
+  jobs: InMemoryJobStore,
+  revisionId: string,
+  patch: { finishedAt?: Date; createdAt?: Date; correlationId?: string },
+) {
+  const job = await jobs.enqueue({
+    revisionId,
+    target: "combined",
+    correlationId: patch.correlationId ?? `ordinary-${revisionId}`,
+  });
+  return jobs.update(job.id, { status: "applied", ...patch });
+}
+
+const candidateRoot = "/var/lib/proxycore/candidates";
+
 describe("worker polling", () => {
   it("wakes before the reconciliation interval when notified", async () => {
     const wakeup = new WorkerWakeup();
@@ -171,6 +212,106 @@ describe("worker polling", () => {
     } finally {
       await rm(root, { recursive: true, force: true });
     }
+  });
+
+  it("reconciles the revision of the newest applied job, not the highest revision number", async () => {
+    const revisions = new InMemoryRevisionStore();
+    const justApplied = await revisions.create(reconciliationSnapshot());
+    const olderApplied = await revisions.create(reconciliationSnapshot());
+    await revisions.markApplied(justApplied.id);
+    await revisions.markApplied(olderApplied.id);
+    const jobs = new InMemoryJobStore();
+    await appliedJob(jobs, olderApplied.id, {
+      finishedAt: new Date("2026-01-01T00:00:00Z"),
+    });
+    await appliedJob(jobs, justApplied.id, {
+      finishedAt: new Date("2026-01-01T00:05:00Z"),
+    });
+    const control = new PathDriftControl(
+      join(candidateRoot, olderApplied.id, "nginx"),
+    );
+    const orchestrator = new ApplyOrchestrator({ jobs, revisions, control });
+
+    const result = await pollOnce({ jobs, revisions, orchestrator });
+
+    expect(result).toBeUndefined();
+    expect(control.probedPaths).toEqual([
+      join(candidateRoot, justApplied.id, "nginx"),
+    ]);
+    expect(
+      (await jobs.list()).some((job) =>
+        job.correlationId?.startsWith("reconcile-nginx:"),
+      ),
+    ).toBe(false);
+  });
+
+  it("targets the revision of a newest applied reconcile job", async () => {
+    const revisions = new InMemoryRevisionStore();
+    const repaired = await revisions.create(reconciliationSnapshot());
+    const other = await revisions.create(reconciliationSnapshot());
+    await revisions.markApplied(repaired.id);
+    await revisions.markApplied(other.id);
+    const jobs = new InMemoryJobStore();
+    await appliedJob(jobs, other.id, {
+      finishedAt: new Date("2026-01-01T00:00:00Z"),
+    });
+    await appliedJob(jobs, repaired.id, {
+      finishedAt: new Date("2026-01-01T00:05:00Z"),
+      correlationId: `reconcile-nginx:${repaired.id}`,
+    });
+    const control = new PathDriftControl();
+    const orchestrator = new ApplyOrchestrator({ jobs, revisions, control });
+
+    await pollOnce({ jobs, revisions, orchestrator });
+
+    expect(control.probedPaths).toEqual([
+      join(candidateRoot, repaired.id, "nginx"),
+    ]);
+  });
+
+  it("falls back to the latest applied revision when no applied job exists", async () => {
+    const revisions = new InMemoryRevisionStore();
+    await revisions.create(reconciliationSnapshot());
+    const latest = await revisions.create(reconciliationSnapshot());
+    await revisions.markApplied(latest.id);
+    const jobs = new InMemoryJobStore();
+    const control = new PathDriftControl();
+    const orchestrator = new ApplyOrchestrator({ jobs, revisions, control });
+
+    await pollOnce({ jobs, revisions, orchestrator });
+
+    expect(control.probedPaths).toEqual([
+      join(candidateRoot, latest.id, "nginx"),
+    ]);
+  });
+
+  it("orders applied jobs by finishedAt, falling back to createdAt, not list order", async () => {
+    const revisions = new InMemoryRevisionStore();
+    const newest = await revisions.create(reconciliationSnapshot());
+    const middle = await revisions.create(reconciliationSnapshot());
+    const oldest = await revisions.create(reconciliationSnapshot());
+    for (const revision of [newest, middle, oldest]) {
+      await revisions.markApplied(revision.id);
+    }
+    const jobs = new InMemoryJobStore();
+    await appliedJob(jobs, oldest.id, {
+      finishedAt: new Date("2026-01-01T00:00:00Z"),
+    });
+    await appliedJob(jobs, newest.id, {
+      finishedAt: new Date("2026-01-01T00:09:00Z"),
+    });
+    // No finishedAt: createdAt (earlier than newest's finishedAt) is used.
+    await appliedJob(jobs, middle.id, {
+      createdAt: new Date("2026-01-01T00:03:00Z"),
+    });
+    const control = new PathDriftControl();
+    const orchestrator = new ApplyOrchestrator({ jobs, revisions, control });
+
+    await pollOnce({ jobs, revisions, orchestrator });
+
+    expect(control.probedPaths).toEqual([
+      join(candidateRoot, newest.id, "nginx"),
+    ]);
   });
 
   it("does not reconcile a healthy applied revision", async () => {
