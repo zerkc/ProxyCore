@@ -24,9 +24,9 @@ Stop the worker's nginx reconcile from reverting a freshly applied configuration
 
 ## Tasks
 - [x] T1.7a Worker: `latestAppliedRevision` uses the most recent applied job; tests (revision 43 just applied while 45 is an older applied revision with a probe that reports drift only for 45: no `reconcile-nginx` job is enqueued and the probe targets 43; no applied job falls back to `latest()`; keep the existing case at `poller.test.ts:132-176`).
-- [x] T1.7b Release: bump `0.6.14` to `0.6.15`.
+- [x] T1.7b Release: no separate release. The fix ships inside the T3a PR (user decision), which carries the `0.6.15` bump.
   - T1.7a evidence: commit 2a13b99. RED: 3 of 4 new tests failed before the fix (newest-applied-job target, reconcile-job target, finishedAt/createdAt ordering); the no-applied-job fallback test passed already, as expected since it keeps the old behavior. GREEN: `TZ=UTC bunx vitest run apps/worker packages/db` 30 passed, 7 skipped; `bun run typecheck` clean.
-  - T1.7b evidence: commit 356cc6b; `cd apps/api && go build ./...` OK.
+  - T1.7b: the standalone bump commit (356cc6b on `fix/reconcile-last-applied`) was dropped; the T3a bump `9aad7d9` covers it.
 
 ## Authorized scope
 apps/worker/src/poller.ts, apps/worker/src/poller.test.ts, the version files.
@@ -35,13 +35,13 @@ apps/worker/src/poller.ts, apps/worker/src/poller.test.ts, the version files.
 `bun run typecheck` clean, `TZ=UTC bunx vitest run` green for apps/worker, and the new test fails before the fix.
 
 ## Progress
-T1.7a and T1.7b done and committed. Deviation: the old fallback that sorted applied revisions by `appliedAt` was dropped; fallback is now `latest()` with `appliedAt`, as the Decisions state.
+T1.7a done and committed (cherry-picked into `feat/worker-go-stores`). Deviation: the old fallback that sorted applied revisions by `appliedAt` was dropped; fallback is now `latest()` with `appliedAt`, as the Decisions state.
 
 ## Route declaration
 Delegated direct (one writer).
 
 ## Delivery
-Own branch `fix/reconcile-last-applied` off `main`, own PR with bump `0.6.15`, merge, tag `v0.6.15`, user tests. The Bun-to-Go migration branches rebase on it and shift their bumps by one.
+User decision: this fix ships in the same PR as bun-to-go-migration T3a (`feat/worker-go-stores`, bump `0.6.15`, tag `v0.6.15`). The standalone branch `fix/reconcile-last-applied` is kept only as a source and is not published.
 
 ## Next step
-Open the PR, merge, tag `v0.6.15`, user tests.
+Ship with the T3a PR, then user tests: after updating, re-apply the intended change once.
