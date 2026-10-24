@@ -29,7 +29,17 @@ func (h heartbeat) prepare() error {
 }
 
 func (h heartbeat) beat() error {
-	return os.WriteFile(h.path, []byte(isoTime(h.now())), 0o644)
+	// Write-then-rename so a concurrent reader (the healthcheck) never sees a
+	// truncated, empty file.
+	tmp := h.path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(isoTime(h.now())), 0o644); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, h.path); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
 }
 
 // tick beats every interval from its own goroutine until ctx is done, so a long
