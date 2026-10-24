@@ -89,6 +89,17 @@ export type StatusPayload = {
   updating?: boolean | null;
   /** Target version while an update is running. */
   updateTarget?: string;
+  /** Running step; only present while updating and when the updater reports it. */
+  updateProgress?: UpdateProgress;
+};
+
+export type UpdateProgress = {
+  /** Updater step name (pull, preflight, restart, verify, bootstrap). */
+  step: string;
+  /** Steps finished so far. */
+  completed: number;
+  /** Fixed number of steps in the update. */
+  total: number;
 };
 
 export type UpdateRelease = {
@@ -144,4 +155,5 @@ export type TopologyNodeList = {
   nodes: TopologyNode[];
 };
 
-export type TopologySyncWarningCode = "NODE_OUTDATED" | "NODE_NEVER_SYNCED" | "NODE_SYNC_UNVERIFIED";
+export type TopologySyncWarningCode =
+  "NODE_OUTDATED" | "NODE_NEVER_SYNCED" | "NODE_SYNC_UNVERIFIED";

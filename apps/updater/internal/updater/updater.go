@@ -89,7 +89,27 @@ type Status struct {
 	StartedAt     time.Time    `json:"startedAt"`
 	FinishedAt    *time.Time   `json:"finishedAt,omitempty"`
 	Steps         []StepResult `json:"steps"`
+
+	// CurrentStep is the step being run (or, once failed, the step that
+	// failed); empty before the first step and after a successful run.
+	CurrentStep string `json:"currentStep,omitempty"`
+	// CompletedSteps counts the steps that finished successfully so far.
+	CompletedSteps int `json:"completedSteps"`
+	// TotalSteps is the fixed number of steps in the pipeline.
+	TotalSteps int `json:"totalSteps"`
 }
+
+// Step names, in pipeline order. pipelineSteps is the single source for both
+// the order Apply runs them in and Status.TotalSteps.
+const (
+	stepPull      = "pull"
+	stepPreflight = "preflight"
+	stepRestart   = "restart"
+	stepVerify    = "verify"
+	stepBootstrap = "bootstrap"
+)
+
+var pipelineSteps = []string{stepPull, stepPreflight, stepRestart, stepVerify, stepBootstrap}
 
 // StepResult records the outcome of one logical step of the update.
 type StepResult struct {
@@ -151,6 +171,7 @@ func (u *Updater) Last() *Status {
 		return nil
 	}
 	clone := *u.last
+	clone.Steps = append([]StepResult(nil), u.last.Steps...)
 	return &clone
 }
 
@@ -182,6 +203,7 @@ func (u *Updater) Apply(ctx context.Context, targetVersion string) (*Status, err
 		Status:        "running",
 		TargetVersion: targetVersion,
 		StartedAt:     time.Now().UTC(),
+		TotalSteps:    len(pipelineSteps),
 	}
 	u.last = status
 	u.mu.Unlock()
@@ -198,6 +220,9 @@ func (u *Updater) Apply(ctx context.Context, targetVersion string) (*Status, err
 
 	runStep := func(name string, fn func() (string, error)) {
 		step := StepResult{Name: name, Status: "ok", StartedAt: time.Now().UTC()}
+		u.mu.Lock()
+		status.CurrentStep = name
+		u.mu.Unlock()
 		out, err := fn()
 		step.Duration = time.Since(step.StartedAt)
 		step.DurationMs = step.Duration.Milliseconds()
@@ -209,16 +234,18 @@ func (u *Updater) Apply(ctx context.Context, targetVersion string) (*Status, err
 		steps = append(steps, step)
 		u.opts.Logger.Printf("updater: %s status=%s duration=%s err=%q",
 			name, step.Status, step.Duration, step.Error)
+		u.mu.Lock()
 		if err != nil {
-			u.mu.Lock()
 			status.Steps = append([]StepResult(nil), steps...)
 			status.Status = "failed"
-			u.mu.Unlock()
+		} else {
+			status.CompletedSteps++
 		}
+		u.mu.Unlock()
 	}
 
 	// Updates always pull registry images; building from source is install-only.
-	runStep("pull", func() (string, error) {
+	runStep(stepPull, func() (string, error) {
 		args := append([]string{"compose"}, u.composeArgs()...)
 		args = append(args, "pull")
 		args = append(args, u.opts.Services...)
@@ -232,14 +259,14 @@ func (u *Updater) Apply(ctx context.Context, targetVersion string) (*Status, err
 	// step. Instead refuse to replace a legacy PostgreSQL installation that
 	// has not been converted: starting the SQLite runtime against an empty
 	// volume would look like data loss.
-	runStep("preflight", func() (string, error) {
+	runStep(stepPreflight, func() (string, error) {
 		return u.preflightLegacyPostgres(ctx)
 	})
 	if lastStepFailed(steps) {
 		return u.fail(status, steps), ErrStepFailed
 	}
 
-	runStep("restart", func() (string, error) {
+	runStep(stepRestart, func() (string, error) {
 		// --no-deps avoids recreating postgres / control / coredns.
 		// --force-recreate guarantees the container is replaced even if the
 		// image tag is identical (defensive; pull above should have changed it).
@@ -252,7 +279,7 @@ func (u *Updater) Apply(ctx context.Context, targetVersion string) (*Status, err
 		return u.fail(status, steps), ErrStepFailed
 	}
 
-	runStep("verify", func() (string, error) {
+	runStep(stepVerify, func() (string, error) {
 		if err := u.waitHealthy(ctx); err != nil {
 			return "", err
 		}
@@ -265,7 +292,7 @@ func (u *Updater) Apply(ctx context.Context, targetVersion string) (*Status, err
 	// Bootstrap: atomically write a request to the shared volume so the
 	// updater-bootstrap sidecar can build/pull the new image and replace this
 	// container. We do NOT wait for the sidecar — it will recreate us.
-	runStep("bootstrap", func() (string, error) {
+	runStep(stepBootstrap, func() (string, error) {
 		if u.opts.BootstrapRequestFile == "" {
 			return "bootstrap request file not configured; skipping", nil
 		}
@@ -289,6 +316,7 @@ func (u *Updater) Apply(ctx context.Context, targetVersion string) (*Status, err
 	u.mu.Lock()
 	status.Steps = append([]StepResult(nil), steps...)
 	status.Status = "ok"
+	status.CurrentStep = ""
 	u.mu.Unlock()
 	return status, nil
 }

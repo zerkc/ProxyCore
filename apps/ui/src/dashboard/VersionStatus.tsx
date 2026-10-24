@@ -1,11 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { api } from "../api";
-import type { StatusPayload, UpdatePayload } from "./types";
+import type { StatusPayload, UpdatePayload, UpdateProgress } from "./types";
 
 type RuntimeStatus = Pick<
   StatusPayload,
-  "version" | "updating" | "updateTarget"
+  "version" | "updating" | "updateTarget" | "updateProgress"
 >;
 
 type VersionStatusProps = {
@@ -50,6 +50,49 @@ function normalizeVersion(version?: string | null): string | undefined {
   return normalized || undefined;
 }
 
+const STEP_LABELS: Record<string, string> = {
+  pull: "Downloading new images",
+  preflight: "Checking your installation",
+  restart: "Restarting services",
+  verify: "Verifying the new version",
+  bootstrap: "Finishing up",
+};
+
+function stepLabel(step: string): string {
+  return STEP_LABELS[step] ?? (step || "Starting update");
+}
+
+/**
+ * Folds a polled progress report into the last known one: clamped to
+ * 0..total and never behind what was already shown for the same total.
+ */
+function mergeProgress(
+  previous: UpdateProgress | undefined,
+  incoming: UpdateProgress,
+): UpdateProgress | undefined {
+  const total = Math.floor(incoming.total);
+  if (!Number.isFinite(total) || total <= 0) return previous;
+  const reported = Number.isFinite(incoming.completed)
+    ? Math.floor(incoming.completed)
+    : 0;
+  const completed = Math.min(Math.max(reported, 0), total);
+  if (previous && previous.total === total && completed < previous.completed) {
+    return previous;
+  }
+  return { step: incoming.step, completed, total };
+}
+
+function sameProgress(a?: UpdateProgress, b?: UpdateProgress): boolean {
+  return (
+    a === b ||
+    (a !== undefined &&
+      b !== undefined &&
+      a.step === b.step &&
+      a.completed === b.completed &&
+      a.total === b.total)
+  );
+}
+
 export function VersionStatus({
   update,
   status,
@@ -60,6 +103,7 @@ export function VersionStatus({
 }: VersionStatusProps) {
   const [phase, setPhase] = useState<ApplyPhase>("idle");
   const [applyTargetVersion, setApplyTargetVersion] = useState<string>();
+  const [progress, setProgress] = useState<UpdateProgress>();
   const runRef = useRef<ApplyRun>({ startedAt: 0, sawUpdating: false });
   const latest = update?.latest;
   const latestVersion = normalizeVersion(latest?.version);
@@ -129,6 +173,19 @@ export function VersionStatus({
       setPhase("failed");
     }
   }, [phase, status, targetVersion]);
+
+  // Keep the last known progress through failed status requests and unknown
+  // (null) updater state; only a new report or leaving the flow changes it.
+  // Adjusted during render (not in an effect) so the bar never lags a poll.
+  const incoming =
+    status?.updating === true ? status.updateProgress : undefined;
+  let nextProgress = progress;
+  if (phase === "idle" || phase === "confirming") {
+    nextProgress = undefined;
+  } else if (phase === "applying" && incoming) {
+    nextProgress = mergeProgress(progress, incoming);
+  }
+  if (!sameProgress(nextProgress, progress)) setProgress(nextProgress);
 
   // Tell the dashboard an update is being applied so a 401 while the API
   // restarts does not bounce the user to the login page.
@@ -268,6 +325,7 @@ export function VersionStatus({
               phase={phase}
               targetVersion={targetVersion}
               runningVersion={runningVersion}
+              progress={progress}
               onRefresh={() => window.location.reload()}
               onRetryContinue={() => setPhase("applying")}
               onDismiss={() => {
@@ -289,6 +347,8 @@ type UpdateBlockingDialogProps = {
   phase: "applying" | "timeout" | "done" | "failed";
   targetVersion: string;
   runningVersion?: string;
+  /** Determinate progress; absent means show the indeterminate spinner. */
+  progress?: UpdateProgress;
   onRefresh: () => void;
   onRetryContinue: () => void;
   onDismiss: () => void;
@@ -298,6 +358,7 @@ function UpdateBlockingDialog({
   phase,
   targetVersion,
   runningVersion,
+  progress,
   onRefresh,
   onRetryContinue,
   onDismiss,
@@ -434,7 +495,7 @@ function UpdateBlockingDialog({
       >
         {/* Status indicator */}
         <div className="relative flex h-12 w-12 items-center justify-center">
-          {phase === "applying" ? (
+          {phase === "applying" && progress ? null : phase === "applying" ? (
             <span
               className="pc-spinner pc-update-spinner absolute inset-0 m-auto"
               aria-hidden
@@ -516,6 +577,10 @@ function UpdateBlockingDialog({
                 : "ProxyCore is being updated. Do not close or reload this tab — editing is locked until it is safe to continue."}
         </p>
 
+        {phase === "applying" && progress ? (
+          <UpdateProgressBar progress={progress} />
+        ) : null}
+
         {/* Actions */}
         <div className="mt-2 flex w-full flex-col gap-2">
           {phase === "done" ? (
@@ -569,6 +634,32 @@ function UpdateBlockingDialog({
                 : `Update to version ${targetVersion} is complete. Refresh the page to load the new version.`}
         </div>
       </div>
+    </div>
+  );
+}
+
+function UpdateProgressBar({ progress }: { progress: UpdateProgress }) {
+  const label = stepLabel(progress.step);
+  const percent = Math.round((progress.completed / progress.total) * 100);
+  return (
+    <div className="w-full">
+      <div
+        role="progressbar"
+        aria-label="Update progress"
+        aria-valuemin={0}
+        aria-valuemax={progress.total}
+        aria-valuenow={progress.completed}
+        aria-valuetext={`${label}, ${progress.completed} of ${progress.total} steps done`}
+        className="h-1.5 w-full overflow-hidden rounded-none bg-line/60"
+      >
+        <div
+          className="h-full bg-signal transition-[width] duration-500"
+          style={{ width: `${percent}%` }}
+        />
+      </div>
+      <p className="mt-2 text-xs text-mist">
+        {`${label} · ${progress.completed} of ${progress.total} steps done`}
+      </p>
     </div>
   );
 }

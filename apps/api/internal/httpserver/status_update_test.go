@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -164,3 +165,132 @@ func TestStatusDoesNotBlockOnSlowUpdater(t *testing.T) {
 }
 
 func boolPtr(v bool) *bool { return &v }
+
+// updateProgressBody decodes the optional updateProgress object of GET /api/status.
+type updateProgressBody struct {
+	Step      string `json:"step"`
+	Completed int    `json:"completed"`
+	Total     int    `json:"total"`
+}
+
+func TestStatusReportsUpdateProgressOnlyWhileUpdating(t *testing.T) {
+	tests := []struct {
+		name         string
+		status       httpserver.UpdaterStatus
+		err          error
+		wantProgress *updateProgressBody
+	}{
+		{
+			name: "running with progress",
+			status: httpserver.UpdaterStatus{
+				Status: "running", TargetVersion: "v0.2.0",
+				CurrentStep: "restart", CompletedSteps: 2, TotalSteps: 5,
+			},
+			wantProgress: &updateProgressBody{Step: "restart", Completed: 2, Total: 5},
+		},
+		{
+			name:         "running at the first step has zero completed",
+			status:       httpserver.UpdaterStatus{Status: "running", CurrentStep: "pull", TotalSteps: 5},
+			wantProgress: &updateProgressBody{Step: "pull", Completed: 0, Total: 5},
+		},
+		{
+			name:   "running from an old updater without progress fields",
+			status: httpserver.UpdaterStatus{Status: "running", TargetVersion: "v0.2.0"},
+		},
+		{
+			name:   "finished update does not report progress",
+			status: httpserver.UpdaterStatus{Status: "ok", CurrentStep: "bootstrap", CompletedSteps: 5, TotalSteps: 5},
+		},
+		{
+			name: "unknown updater state does not report progress",
+			err:  errors.New("connection refused"),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			updater := &mockUpdaterWithStatusClient{
+				statusFunc: func(context.Context) (httpserver.UpdaterStatus, error) { return tt.status, tt.err },
+			}
+			env := newSQLiteHTTPTestServer(t, httpserver.WithUpdaterClient(updater))
+			cookie := sqliteOwnerCookie(t, env.Handler)
+
+			_, raw := getStatusUpdate(t, env, cookie)
+			encoded, present := raw["updateProgress"]
+			if tt.wantProgress == nil {
+				if present {
+					t.Fatalf("updateProgress must be absent, got %s", encoded)
+				}
+				return
+			}
+			if !present {
+				t.Fatal("updateProgress is missing")
+			}
+			var got updateProgressBody
+			if err := json.Unmarshal(encoded, &got); err != nil {
+				t.Fatal(err)
+			}
+			if got != *tt.wantProgress {
+				t.Fatalf("updateProgress=%+v, want %+v", got, *tt.wantProgress)
+			}
+		})
+	}
+}
+
+func TestStatusUpdateProgressDecodesOldAndNewUpdaterPayloads(t *testing.T) {
+	payloads := map[string]string{
+		"old updater": `{"status":"running","targetVersion":"v0.2.0","steps":[]}`,
+		"new updater": `{"status":"running","targetVersion":"v0.2.0","steps":[],"currentStep":"verify","completedSteps":3,"totalSteps":5}`,
+	}
+	for name, payload := range payloads {
+		t.Run(name, func(t *testing.T) {
+			updaterServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(payload))
+			}))
+			t.Cleanup(updaterServer.Close)
+			client := &httpserver.UpdaterHTTPClient{URL: updaterServer.URL + "/internal/apply", Client: updaterServer.Client()}
+			env := newSQLiteHTTPTestServer(t, httpserver.WithUpdaterClient(client))
+			cookie := sqliteOwnerCookie(t, env.Handler)
+
+			body, raw := getStatusUpdate(t, env, cookie)
+			if body.Updating == nil || !*body.Updating {
+				t.Fatalf("updating=%v, want true", body.Updating)
+			}
+			_, present := raw["updateProgress"]
+			if want := name == "new updater"; present != want {
+				t.Fatalf("updateProgress present=%v, want %v (%s)", present, want, raw["updateProgress"])
+			}
+		})
+	}
+}
+
+func TestStatusUpdateProgressIsReadableByNodeAndNonOwner(t *testing.T) {
+	updater := &mockUpdaterWithStatusClient{
+		statusFunc: func(context.Context) (httpserver.UpdaterStatus, error) {
+			return httpserver.UpdaterStatus{Status: "running", TargetVersion: "v0.2.0", CurrentStep: "pull", TotalSteps: 5}, nil
+		},
+	}
+
+	t.Run("node", func(t *testing.T) {
+		env := newSQLiteHTTPTestServer(t, httpserver.WithUpdaterClient(updater))
+		cookie := sqliteOwnerCookie(t, env.Handler)
+		moveIdentityToRole(t, env, domain.TopologyRoleNode)
+
+		if _, raw := getStatusUpdate(t, env, cookie); len(raw["updateProgress"]) == 0 {
+			t.Fatal("updateProgress is missing for a node")
+		}
+	})
+
+	t.Run("operator", func(t *testing.T) {
+		env := newSQLiteHTTPTestServer(t, httpserver.WithUpdaterClient(updater))
+		_ = sqliteOwnerCookie(t, env.Handler)
+		if _, err := env.Auth.CreateUser(context.Background(), auth.User{}, "operatoruser", "correct horse battery staple", auth.RoleOperator); err != nil {
+			t.Fatalf("create operator: %v", err)
+		}
+		cookie := sqliteLoginCookie(t, env.Handler, "operatoruser", "correct horse battery staple")
+
+		if _, raw := getStatusUpdate(t, env, cookie); len(raw["updateProgress"]) == 0 {
+			t.Fatal("updateProgress is missing for a non-owner")
+		}
+	})
+}

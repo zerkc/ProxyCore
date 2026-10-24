@@ -14,7 +14,7 @@ import {
 
 type RuntimeStatus = Pick<
   StatusPayload,
-  "version" | "updating" | "updateTarget"
+  "version" | "updating" | "updateTarget" | "updateProgress"
 >;
 
 const update: UpdatePayload = {
@@ -245,5 +245,85 @@ describe("VersionStatus update flow", () => {
     await clickText(body(), "Close");
     expect(byRole(body(), "dialog")).toHaveLength(0);
     expect(onRetry).toHaveBeenCalled();
+  });
+
+  describe("progress bar", () => {
+    const running = (
+      step: string,
+      completed: number,
+      total = 5,
+    ): RuntimeStatus => ({
+      version: "0.6.11",
+      updating: true,
+      updateTarget: "0.6.12",
+      updateProgress: { step, completed, total },
+    });
+
+    const bar = () => byRole(body(), "progressbar")[0];
+    const spinners = () =>
+      body().findAll((el) => el.className.includes("pc-update-spinner"));
+
+    it("shows an accessible determinate bar that advances per step", async () => {
+      const container = await mount(render({ status: running("pull", 0) }));
+      expect(bar().getAttribute("aria-valuemin")).toBe("0");
+      expect(bar().getAttribute("aria-valuemax")).toBe("5");
+      expect(bar().getAttribute("aria-valuenow")).toBe("0");
+      expect(dialogText()).toContain("Downloading new images");
+      expect(dialogText()).toContain("0 of 5");
+      expect(spinners()).toHaveLength(0);
+
+      await rerender(container, render({ status: running("restart", 2) }));
+      expect(bar().getAttribute("aria-valuenow")).toBe("2");
+      expect(dialogText()).toContain("Restarting services");
+      expect(dialogText()).toContain("2 of 5");
+    });
+
+    it("maps known steps to plain English and shows unknown steps raw", async () => {
+      const container = await mount(
+        render({ status: running("preflight", 1) }),
+      );
+      expect(dialogText()).toContain("Checking your installation");
+      await rerender(container, render({ status: running("verify", 3) }));
+      expect(dialogText()).toContain("Verifying the new version");
+      await rerender(container, render({ status: running("bootstrap", 4) }));
+      expect(dialogText()).toContain("Finishing up");
+      await rerender(container, render({ status: running("mystery", 4) }));
+      expect(dialogText()).toContain("mystery");
+    });
+
+    it("never moves backwards while applying", async () => {
+      const container = await mount(render({ status: running("verify", 3) }));
+      await rerender(container, render({ status: running("restart", 2) }));
+      expect(bar().getAttribute("aria-valuenow")).toBe("3");
+    });
+
+    it("keeps the last known progress when status is missing or updating is null", async () => {
+      const container = await mount(render({ status: running("restart", 2) }));
+      await rerender(container, render({ status: undefined }));
+      expect(bar().getAttribute("aria-valuenow")).toBe("2");
+      await rerender(
+        container,
+        render({ status: { version: "0.6.11", updating: null } }),
+      );
+      expect(bar().getAttribute("aria-valuenow")).toBe("2");
+    });
+
+    it("clamps out-of-range values to 0..total", async () => {
+      const container = await mount(render({ status: running("verify", 9) }));
+      expect(bar().getAttribute("aria-valuenow")).toBe("5");
+      await rerender(container, render({ status: running("verify", -3) }));
+      expect(bar().getAttribute("aria-valuenow")).toBe("5");
+    });
+
+    it("falls back to the indeterminate spinner without progress", async () => {
+      await mount(
+        render({
+          status: { version: "0.6.11", updating: true, updateTarget: "0.6.12" },
+        }),
+      );
+      expect(byRole(body(), "progressbar")).toHaveLength(0);
+      expect(spinners()).toHaveLength(1);
+      expect(dialogText()).toContain("Installing update");
+    });
   });
 });
