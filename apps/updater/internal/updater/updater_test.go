@@ -598,3 +598,139 @@ func TestApplyAlwaysPullsIgnoringBuildModeEnv(t *testing.T) {
 		}
 	}
 }
+
+// progressSnapshot is what Last() reported at one point of a run.
+type progressSnapshot struct {
+	current   string
+	completed int
+	total     int
+}
+
+func snapshotOf(u *Updater) progressSnapshot {
+	last := u.Last()
+	return progressSnapshot{current: last.CurrentStep, completed: last.CompletedSteps, total: last.TotalSteps}
+}
+
+func TestApplyPublishesProgressWhileRunning(t *testing.T) {
+	var u *Updater
+	var seen []progressSnapshot
+	exec := func(ctx context.Context, name string, args ...string) (string, error) {
+		// Observe only the first Exec call of each step: pull, restart and the
+		// (no-legacy-volume) preflight each call Exec at least once.
+		switch {
+		case containsArg(args, "pull"), containsArg(args, "up"):
+			seen = append(seen, snapshotOf(u))
+		case len(args) > 0 && args[0] == "volume":
+			seen = append(seen, snapshotOf(u))
+			return "", errFake("no such volume")
+		}
+		return "", nil
+	}
+	u = New(Options{
+		HealthTimeout: time.Second,
+		PollInterval:  10 * time.Millisecond,
+		Exec:          exec,
+		HTTPGet: func(ctx context.Context, url string) (int, error) {
+			seen = append(seen, snapshotOf(u))
+			return 200, nil
+		},
+		BootstrapRequestFile: filepath.Join(t.TempDir(), "request.json"),
+		Logger:               &recordingLogger{},
+	})
+
+	status, err := u.Apply(context.Background(), "0.1.5")
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	total := len(pipelineSteps)
+	want := []progressSnapshot{
+		{"pull", 0, total},
+		{"preflight", 1, total},
+		{"restart", 2, total},
+		{"verify", 3, total},
+	}
+	if len(seen) != len(want) {
+		t.Fatalf("observed %d snapshots, want %d: %+v", len(seen), len(want), seen)
+	}
+	for i := range want {
+		if seen[i] != want[i] {
+			t.Errorf("snapshot %d = %+v, want %+v", i, seen[i], want[i])
+		}
+	}
+	ran := make([]string, 0, len(status.Steps))
+	for _, step := range status.Steps {
+		ran = append(ran, step.Name)
+	}
+	if strings.Join(ran, ",") != strings.Join(pipelineSteps, ",") {
+		t.Errorf("ran steps %v, want pipelineSteps %v", ran, pipelineSteps)
+	}
+	if final := snapshotOf(u); final != (progressSnapshot{"", total, total}) {
+		t.Errorf("final snapshot = %+v, want all %d steps completed and no current step", final, total)
+	}
+}
+
+func TestApplyProgressOnFailureKeepsFailedStep(t *testing.T) {
+	fc := &fakeCommander{result: map[string]fakeResult{"up": {Err: errFake("exit 1")}}}
+	u := New(Options{
+		Exec:    fc.Exec,
+		HTTPGet: func(ctx context.Context, url string) (int, error) { return 200, nil },
+		Logger:  &recordingLogger{},
+	})
+
+	if _, err := u.Apply(context.Background(), "0.1.5"); err == nil {
+		t.Fatal("expected error after restart failure")
+	}
+	want := progressSnapshot{"restart", 2, len(pipelineSteps)}
+	if got := snapshotOf(u); got != want {
+		t.Errorf("snapshot after failure = %+v, want %+v", got, want)
+	}
+}
+
+func TestStatusProgressJSONFields(t *testing.T) {
+	raw, err := json.Marshal(Status{Status: "running", CurrentStep: "pull", CompletedSteps: 0, TotalSteps: 5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded["currentStep"] != "pull" || decoded["completedSteps"] != float64(0) || decoded["totalSteps"] != float64(5) {
+		t.Errorf("unexpected progress JSON: %s", raw)
+	}
+}
+
+func TestLastReturnsIsolatedCopyDuringRun(t *testing.T) {
+	release := make(chan struct{})
+	entered := make(chan struct{})
+	var once sync.Once
+	u := New(Options{
+		Exec: func(ctx context.Context, name string, args ...string) (string, error) {
+			once.Do(func() { close(entered) })
+			<-release
+			return "", nil
+		},
+		HTTPGet: func(ctx context.Context, url string) (int, error) { return 200, nil },
+		Logger:  &recordingLogger{},
+	})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = u.Apply(context.Background(), "0.1.5")
+	}()
+	<-entered
+
+	first := u.Last()
+	first.CurrentStep = "tampered"
+	first.CompletedSteps = 99
+	if got := snapshotOf(u); got.current != "pull" || got.completed != 0 {
+		t.Errorf("mutating a Last() copy leaked into the updater: %+v", got)
+	}
+	// Poll concurrently with the run; `go test -race` flags unsynchronised access.
+	for i := 0; i < 50; i++ {
+		_ = u.Last()
+	}
+	close(release)
+	<-done
+}
