@@ -48,8 +48,8 @@ new image and recreates the service. To roll back to the TypeScript control
 without changing the image, set `PROXYCORE_CONTROL_IMPL=bun` in the control
 service environment and recreate it (`docker compose up -d control`). That
 switch and the TS source are removed in a later release. The TypeScript control
-does not handle SIGTERM as PID 1, so under that rollback `docker stop` waits
-the grace period and exits 137, as it did before 0.6.21.
+does not handle SIGTERM as PID 1, so under that rollback `docker stop` exits
+non-zero (137 or 139 depending on the host), as it did before 0.6.21.
 
 Saving a zone or DNS record creates its revision and queues an immediate
 combined CoreDNS/Nginx apply. Consecutive saves are intentionally not batched;
