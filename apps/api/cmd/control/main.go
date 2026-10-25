@@ -1,6 +1,6 @@
 // Command control is the Go port of the control server (apps/control/src/index.ts):
-// it serves the fixed service-control operations on a Unix socket. The Docker
-// backend is not ported yet, so only the fallback backend is available.
+// it serves the fixed service-control operations on a Unix socket, either with the
+// fixed fallback or, for CONTROL_BACKEND=docker, with the Docker backend.
 package main
 
 import (
