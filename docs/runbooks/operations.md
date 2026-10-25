@@ -39,6 +39,18 @@ worker so an in-flight multi-candidate apply can finish on `docker stop`;
 existing installs keep Docker's default 10 s because their host `compose.yaml`
 is not rewritten by dashboard updates.
 
+Since 0.6.21 the control helper (the Unix-socket service that stages, promotes
+and reloads Nginx and CoreDNS through the Docker API) is also a Go binary,
+`/usr/local/bin/proxycore-control`, inside the same `proxycore-runtime` image;
+the unchanged `bun run control` command execs it. Existing installs keep their
+host `compose.yaml` and need no refresh: a normal dashboard update pulls the
+new image and recreates the service. To roll back to the TypeScript control
+without changing the image, set `PROXYCORE_CONTROL_IMPL=bun` in the control
+service environment and recreate it (`docker compose up -d control`). That
+switch and the TS source are removed in a later release. The TypeScript control
+does not handle SIGTERM as PID 1, so under that rollback `docker stop` exits
+non-zero (137 or 139 depending on the host), as it did before 0.6.21.
+
 Saving a zone or DNS record creates its revision and queues an immediate
 combined CoreDNS/Nginx apply. Consecutive saves are intentionally not batched;
 inspect `/api/status` when several edits are made in succession.
