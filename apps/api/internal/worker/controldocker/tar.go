@@ -98,23 +98,22 @@ func allZero(block []byte) bool {
 }
 
 // parseTarSize mirrors Number.parseInt(field-up-to-NUL.trim(), 8) || 0: the
-// leading octal digits count, anything else yields 0. A size that cannot fit an
-// int, or a negative one, reports !ok (the TS loop would not terminate sanely).
+// leading octal digits count, anything else yields 0. A size above 1 GiB reports !ok (the TS loop would not terminate sanely).
 func parseTarSize(field []byte) (int, bool) {
 	text := string(field)
 	if i := strings.IndexByte(text, 0); i >= 0 {
 		text = text[:i]
 	}
 	text = strings.TrimSpace(text)
-	size := 0
+	var size int64
 	for _, c := range []byte(text) {
 		if c < '0' || c > '7' {
 			break
 		}
-		size = size*8 + int(c-'0')
-		if size > 1<<40 {
+		size = size*8 + int64(c-'0')
+		if size > 1<<30 {
 			return 0, false
 		}
 	}
-	return size, true
+	return int(size), true
 }
