@@ -205,3 +205,7 @@ func MarshalResponse(r Response) []byte {
 	b.WriteString("}\n")
 	return []byte(b.String())
 }
+
+// QuoteJS is the exported JSON.stringify-compatible string encoder, for backends
+// that build raw JSON outputs.
+func QuoteJS(s string) string { return quoteJS(s) }
