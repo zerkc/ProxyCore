@@ -23,6 +23,9 @@ var _ Docker = (*Client)(nil)
 // NewClient connects to the Docker daemon on a Unix socket and negotiates the
 // API version on first use. It does not contact the daemon.
 func NewClient(socketPath string) (*Client, error) {
+	if socketPath == "" {
+		socketPath = "/var/run/docker.sock"
+	}
 	api, err := client.NewClientWithOpts(
 		client.WithHost("unix://"+socketPath),
 		client.WithAPIVersionNegotiation(),

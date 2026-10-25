@@ -218,3 +218,11 @@ func TestClientGetArchiveReadsTheWholeStream(t *testing.T) {
 		t.Fatalf("requests = %v", seen)
 	}
 }
+
+func TestNewClientDefaultsAnEmptySocketPath(t *testing.T) {
+	c, err := NewClient("")
+	if err != nil {
+		t.Fatalf("NewClient(\"\") = %v, want the default socket", err)
+	}
+	_ = c.Close()
+}
