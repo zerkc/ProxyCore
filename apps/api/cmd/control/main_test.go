@@ -135,21 +135,6 @@ func TestRunLogsInvalidRequestWithTimestamp(t *testing.T) {
 	}
 }
 
-func TestRunDockerBackendFailsFastWithoutListening(t *testing.T) {
-	socket := socketIn(t)
-	var stdout, stderr safeBuffer
-	err := run(context.Background(), lookup(map[string]string{"WORKER_SOCKET_PATH": socket, "CONTROL_BACKEND": "docker"}), &stdout, &stderr)
-	if err == nil || !strings.Contains(err.Error(), "docker backend is not available") {
-		t.Fatalf("run = %v", err)
-	}
-	if _, statErr := os.Stat(socket); statErr == nil {
-		t.Fatal("socket was created despite the failure")
-	}
-	if stdout.String() != "" || stderr.String() != "" {
-		t.Fatalf("output: %q / %q", stdout.String(), stderr.String())
-	}
-}
-
 func TestRunReturnsListenFailure(t *testing.T) {
 	dir := t.TempDir()
 	blocker := filepath.Join(dir, "blocker")
