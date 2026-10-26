@@ -552,14 +552,14 @@ run_arch() {
     check_arch
   ) 2>&1
 }
-for supported in x86_64 amd64 aarch64 arm64; do
+for supported in x86_64 amd64 aarch64 arm64 armv7l armv7 armhf; do
   output=$(run_arch "$supported") || { printf '%s was refused: %s\n' "$supported" "$output" >&2; exit 1; }
   [ -z "$output" ] || { printf '%s printed output: %s\n' "$supported" "$output" >&2; exit 1; }
 done
-for arm32 in armv7l armv6l; do
+for arm32 in armv6l armv6; do
   output=$(run_arch "$arm32") && { printf '%s was accepted\n' "$arm32" >&2; exit 1; }
   case "$output" in
-    *'bun-based worker'*'64-bit OS'*) ;;
+    *ARMv7*'GOARM=7'*'Raspberry Pi 1'*) ;;
     *) printf '%s refusal is not actionable: %s\n' "$arm32" "$output" >&2; exit 1 ;;
   esac
   output=$(run_arch "$arm32" 1) || { printf '%s override was refused: %s\n' "$arm32" "$output" >&2; exit 1; }
