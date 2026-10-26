@@ -88,3 +88,5 @@ Decision (user): every task ships on its own, in this order: own branch off `mai
 
 ## Next step
 T4: control helper to Go. Note the same host-compose limitation applies: existing installs run `bun run control` on the runtime image from their unrefreshed host `compose.yaml`, so T4/T5 must again ship the Go binary inside `proxycore-runtime` behind the same command (or accept a one-time manual compose refresh). Before it, the user should test the 0.6.17 release against the real control socket.
+
+T5a follow-ups (from the independent verifier, not blocking): the updater verify step only polls the API health URL, so a crash-looping worker or control would not fail an update; no CI test runs the `bun` compat shim against the built image (add a small `docker run` check for `bun run worker|control` and for rejecting other arguments).

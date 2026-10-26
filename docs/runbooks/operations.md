@@ -50,7 +50,10 @@ binary (so it is PID 1 and receives `docker stop` signals directly), and
 prints an error with exit code 1 for anything else. It is not Bun. To remove
 the shim dependency from an old host, refresh `compose.yaml` by re-running the
 installer; the shim itself goes away in a later release. To roll back, pin an
-earlier image with `PROXYCORE_VERSION`.
+earlier image with `PROXYCORE_VERSION`; with a refreshed (0.6.22+) `compose.yaml`
+the earliest usable version is 0.6.21, because older images do not contain
+`/usr/local/bin/proxycore-control`. Hosts still on an old compose can go back
+to any earlier version.
 
 Saving a zone or DNS record creates its revision and queues an immediate
 combined CoreDNS/Nginx apply. Consecutive saves are intentionally not batched;
