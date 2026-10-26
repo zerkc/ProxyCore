@@ -29,27 +29,28 @@ committed; there is no LISTEN/NOTIFY. It also reconciles the durable queue every
 and are re-queued after the lease expires, so a missed notification or a
 restart does not discard desired state or an outstanding apply.
 
-Since 0.6.17 the worker is the Go binary `/usr/local/bin/proxycore-worker`,
-shipped inside the `proxycore-runtime` image; the unchanged `bun run worker`
-command execs it. To roll back to the TypeScript worker without changing the
-image, set `PROXYCORE_WORKER_IMPL=bun` in the worker service environment and
-recreate it (`docker compose up -d worker`). That switch and the TS source are
-removed in a later release. Fresh installs set `stop_grace_period: 120s` on the
-worker so an in-flight multi-candidate apply can finish on `docker stop`;
-existing installs keep Docker's default 10 s because their host `compose.yaml`
-is not rewritten by dashboard updates.
+The worker is the Go binary `/usr/local/bin/proxycore-worker` and the control
+helper (the Unix-socket service that stages, promotes and reloads Nginx and
+CoreDNS through the Docker API) is the Go binary
+`/usr/local/bin/proxycore-control`; both ship in the `proxycore-runtime` image.
+Fresh installs set `stop_grace_period: 120s` on the worker so an in-flight
+multi-candidate apply can finish on `docker stop`; existing installs keep
+Docker's default 10 s because their host `compose.yaml` is not rewritten by
+dashboard updates.
 
-Since 0.6.21 the control helper (the Unix-socket service that stages, promotes
-and reloads Nginx and CoreDNS through the Docker API) is also a Go binary,
-`/usr/local/bin/proxycore-control`, inside the same `proxycore-runtime` image;
-the unchanged `bun run control` command execs it. Existing installs keep their
-host `compose.yaml` and need no refresh: a normal dashboard update pulls the
-new image and recreates the service. To roll back to the TypeScript control
-without changing the image, set `PROXYCORE_CONTROL_IMPL=bun` in the control
-service environment and recreate it (`docker compose up -d control`). That
-switch and the TS source are removed in a later release. The TypeScript control
-does not handle SIGTERM as PID 1, so under that rollback `docker stop` exits
-non-zero (137 or 139 depending on the host), as it did before 0.6.21.
+Since 0.6.22 the `proxycore-runtime` image contains no Bun, Node or TypeScript
+sources, and the `PROXYCORE_WORKER_IMPL=bun` and `PROXYCORE_CONTROL_IMPL=bun`
+rollback switches no longer exist. New installs call the Go binaries directly
+(`command: ["/usr/local/bin/proxycore-worker"]` and
+`["/usr/local/bin/proxycore-control"]`). Installs created earlier still have
+`command: ["bun","run","worker"]` and `["bun","run","control"]` in their host
+`compose.yaml`; the image keeps a tiny shell script at `/usr/local/bin/bun`
+only for them. It understands exactly those two commands, `exec`s the Go
+binary (so it is PID 1 and receives `docker stop` signals directly), and
+prints an error with exit code 1 for anything else. It is not Bun. To remove
+the shim dependency from an old host, refresh `compose.yaml` by re-running the
+installer; the shim itself goes away in a later release. To roll back, pin an
+earlier image with `PROXYCORE_VERSION`.
 
 Saving a zone or DNS record creates its revision and queues an immediate
 combined CoreDNS/Nginx apply. Consecutive saves are intentionally not batched;
