@@ -41,11 +41,12 @@ Release images are multi-arch manifests on GHCR
 | ---------------------------- | ---------------------------------------------------------------------- |
 | linux/amd64 (x86_64)         | Fully supported                                                        |
 | linux/arm64 (aarch64)        | Fully supported (Raspberry Pi 3/4/5 with a 64-bit OS)                  |
-| linux/arm/v7 (armv7l, armv6l)| Not supported: api, nginx, coredns, updater and migrate images exist, but the bun-based worker/control runtime does not (Bun has no 32-bit ARM build). The installer refuses to run; use a 64-bit OS. |
+| linux/arm/v7 (armv7l)        | Supported since 0.6.22 (Raspberry Pi 2, or a Pi 3/4/5 with a 32-bit OS). Every image has an arm/v7 variant. |
+| armv6l (Pi 1, Zero)          | Not supported: binaries target GOARM=7; the installer refuses to run   |
 | linux/386 (i386, i686)       | Not supported; the installer refuses to run                            |
 
-`PROXYCORE_ALLOW_UNSUPPORTED_ARCH=1` lets the installer continue on 32-bit ARM,
-but the worker will not start there; it exists only for experiments.
+`PROXYCORE_ALLOW_UNSUPPORTED_ARCH=1` lets the installer continue on ARMv6,
+but the stack will probably not start there; it exists only for experiments.
 
 ### Install modes
 

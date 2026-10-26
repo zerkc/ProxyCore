@@ -152,15 +152,14 @@ services:
     profiles: [tools]
 
   worker:
-    # Owns the build of the shared bun runtime image (worker + control sources).
+    # Owns the build of the shared runtime image (Go worker + Go control binaries).
     # The control service reuses this image and only overrides the command.
     build:
       context: .
       dockerfile: infra/compose/Dockerfile.runtime
     image: ${PROXYCORE_RUNTIME_IMAGE:-${PROXYCORE_IMAGE_REPO:-ghcr.io/zerkc}/proxycore-runtime:${PROXYCORE_VERSION:-latest}}
-    command: ["bun", "run", "worker"]
+    command: ["/usr/local/bin/proxycore-worker"]
     environment:
-      NODE_ENV: production
       # Same file as the api. The worker retries until the api has migrated the
       # schema to the version it expects, so start order does not matter.
       PROXYCORE_SQLITE_PATH: /var/lib/proxycore-db/proxycore.db
@@ -200,9 +199,8 @@ services:
     # No build section: reuses the image the worker service builds (build mode)
     # or pulls (pull mode); both services share one runtime image reference.
     image: ${PROXYCORE_RUNTIME_IMAGE:-${PROXYCORE_IMAGE_REPO:-ghcr.io/zerkc}/proxycore-runtime:${PROXYCORE_VERSION:-latest}}
-    command: ["bun", "run", "control"]
+    command: ["/usr/local/bin/proxycore-control"]
     environment:
-      NODE_ENV: production
       WORKER_SOCKET_PATH: /run/proxycore/control.sock
       CONTROL_BACKEND: docker
       CANDIDATE_ROOT: /var/lib/proxycore/candidates

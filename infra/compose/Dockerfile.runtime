@@ -1,27 +1,11 @@
 # syntax=docker/dockerfile:1.10
-# Supported platforms: linux/amd64 and linux/arm64 only (Bun publishes no
-# arm/v7 or 386 builds). Dependencies are installed on BUILDPLATFORM so the
-# arm64 image never runs `bun install` under QEMU; this relies on the runtime
-# dependencies being pure JavaScript (no per-platform native addons).
-FROM --platform=$BUILDPLATFORM oven/bun:1.3.14-alpine AS deps
+# Runtime image shared by the compose `worker` and `control` services. It holds
+# two static Go binaries on plain Alpine; there is no Bun, Node or TypeScript.
+# Supported platforms: linux/amd64, linux/arm64 and linux/arm/v7. Both Go
+# stages run on BUILDPLATFORM and cross-compile (CGO_ENABLED=0), so QEMU is
+# never needed for the compile.
 
-WORKDIR /app
-
-# Lockfile and workspace markers first — these rarely change. apps/ui/package.json
-# is needed so --filter '!@proxycore/ui' can resolve the workspace name.
-COPY package.json bun.lock bunfig.toml tsconfig.json ./
-COPY apps/ui/package.json ./apps/ui/package.json
-COPY packages ./packages
-
-# Install with cache mount — repeat builds skip redownloading deps entirely.
-# Source is NOT copied yet, so source changes won't bust this layer.
-RUN --mount=type=cache,id=bun-runtime,target=/root/.bun/install/cache \
-    bun install --frozen-lockfile --production --filter '!@proxycore/ui'
-
-# Go worker (apps/api/cmd/worker). The compose `worker` service on existing
-# installs still runs `bun run worker` from the host compose.yaml, which the
-# dashboard update never rewrites, so the Go binary ships inside this image and
-# the `worker` script below execs it. Static binary (CGO_ENABLED=0): it
+# Go worker (apps/api/cmd/worker). Static binary (CGO_ENABLED=0): it
 # cross-compiles on BUILDPLATFORM for TARGETOS/TARGETARCH, no QEMU.
 FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS worker-build
 ARG TARGETOS
@@ -43,10 +27,9 @@ RUN --mount=type=cache,id=go-mod,target=/go/pkg/mod \
     && CGO_ENABLED=0 GOOS="${TARGETOS:-linux}" GOARCH="${TARGETARCH:-$(go env GOARCH)}" go build -trimpath \
        -ldflags="-s -w" -o /out/proxycore-worker ./cmd/worker
 
-# Go control (apps/api/cmd/control), shipped the same way for the same reason:
-# existing installs run `bun run control` from their unrefreshed host
-# compose.yaml. Reuses the worker-build stage (same module download and
-# GOMAXPROCS/GOGC settings) so the module cache is hot.
+# Go control (apps/api/cmd/control), built the same way. Reuses the
+# worker-build stage (same module download and GOMAXPROCS/GOGC settings) so the
+# module cache is hot.
 FROM worker-build AS control-build
 ARG TARGETOS
 ARG TARGETARCH
@@ -57,30 +40,24 @@ RUN --mount=type=cache,id=go-mod,target=/go/pkg/mod \
     && CGO_ENABLED=0 GOOS="${TARGETOS:-linux}" GOARCH="${TARGETARCH:-$(go env GOARCH)}" go build -trimpath \
        -ldflags="-s -w" -o /out/proxycore-control ./cmd/control
 
-FROM oven/bun:1.3.14-alpine
-
+# Runtime: busybox `sh`, `test`, `stat` and `date` (compose healthchecks) plus
+# the two binaries. Runs as root like the previous image: the worker writes
+# candidates the nginx and coredns containers read, and control needs the
+# Docker socket and owns the control socket directory.
+FROM alpine:3.22
 WORKDIR /app
-
-COPY package.json bun.lock bunfig.toml tsconfig.json ./
-COPY apps/ui/package.json ./apps/ui/package.json
-COPY packages ./packages
-COPY --from=deps /app/node_modules ./node_modules
-
-# Source last — changes here only invalidate layers below this point.
-COPY apps/worker ./apps/worker
-COPY apps/control ./apps/control
+RUN mkdir -p /run/proxycore /var/lib/proxycore/candidates
 
 COPY --from=worker-build /out/proxycore-worker /usr/local/bin/proxycore-worker
 COPY --from=control-build /out/proxycore-control /usr/local/bin/proxycore-control
 
-# `bun run worker` / `bun run control` exec the Go binaries.
-# PROXYCORE_WORKER_IMPL=bun and PROXYCORE_CONTROL_IMPL=bun are the rollback
-# switches to the TypeScript processes (source kept for this release). Every
-# branch uses `exec` so SIGTERM from `docker stop` reaches the process itself.
-# Only this image's /app/package.json is rewritten, never the repo's.
-RUN bun -e 'const f="package.json";const p=await Bun.file(f).json();p.scripts.worker="if [ \"$PROXYCORE_WORKER_IMPL\" = bun ]; then exec bun run apps/worker/src/index.ts; fi; exec /usr/local/bin/proxycore-worker";p.scripts.control="if [ \"$PROXYCORE_CONTROL_IMPL\" = bun ]; then exec bun run apps/control/src/index.ts; fi; exec /usr/local/bin/proxycore-control";await Bun.write(f,JSON.stringify(p,null,2)+"\n")' \
-    && bun -e 'const s=(await Bun.file("package.json").json()).scripts;console.log(s.worker);console.log(s.control)' \
-    && test -x /usr/local/bin/proxycore-worker && test -x /usr/local/bin/proxycore-control
+# Backward compatibility only: host compose.yaml files written by older
+# installers still run `bun run worker` / `bun run control` and are never
+# refreshed by dashboard updates. The script is not Bun; see its header.
+COPY infra/compose/bun-compat.sh /usr/local/bin/bun
+RUN chmod 0755 /usr/local/bin/bun \
+    && test -x /usr/local/bin/proxycore-worker \
+    && test -x /usr/local/bin/proxycore-control
 
-# Default process; compose overrides it per service (worker / control).
-CMD ["bun", "run", "worker"]
+# Default process; compose overrides it for control. Nothing here uses the shim.
+CMD ["/usr/local/bin/proxycore-worker"]

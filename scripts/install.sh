@@ -23,17 +23,18 @@
 #   SKIP_BUILD=1       Skip image pull/build entirely (update config only; the
 #                      name is kept for compatibility and applies to both modes)
 #   PROXYCORE_ALLOW_UNSUPPORTED_ARCH=1
-#                      Continue on a 32-bit ARM host although the bun-based
-#                      worker has no image for it (the install will not work)
+#                      Continue on an ARMv6 host (armv6l) although no image
+#                      is published for it (the install will not work)
 #   PROXYCORE_SKIP_MEMORY_CHECK=1
 #                      Silence the low-memory/swap warning shown before builds
 #   BUILDX_NO_DEFAULT_ATTESTATIONS
 #                      Build mode only. Defaults to 1 for the build phase (no
 #                      provenance/SBOM attestations); set it to 0 to keep them
 #
-# Supported hosts: linux/amd64 and linux/arm64 (Raspberry Pi 3/4/5 with a 64-bit
-# OS). 32-bit ARM (armv7l/armv6l) and 32-bit x86 are refused: Bun, which the
-# worker/control runtime needs, publishes no 32-bit images.
+# Supported hosts: linux/amd64, linux/arm64 and 32-bit ARMv7 (armv7l, e.g. a
+# Raspberry Pi 2 or a Pi 3/4/5 running a 32-bit OS). ARMv6 (armv6l, Pi 1/Zero)
+# and 32-bit x86 are refused: the Go binaries are built for GOARM=7 and no
+# image is published for them.
 #
 # The script is idempotent: first run installs, later runs pull + recreate. The
 # api applies SQLite schema migrations on start. Installs that still hold a
@@ -538,19 +539,19 @@ validate_install_mode() {
 check_arch() {
   host_arch="${PROXYCORE_UNAME_M:-$(uname -m)}"
   case "$host_arch" in
-    x86_64|amd64|aarch64|arm64) return 0 ;;
-    armv7l|armv7|armv6l|armv6|armhf|arm)
+    x86_64|amd64|aarch64|arm64|armv7l|armv7|armhf) return 0 ;;
+    armv6l|armv6|arm)
       if [ "${PROXYCORE_ALLOW_UNSUPPORTED_ARCH:-0}" = "1" ]; then
-        warn "32-bit ARM host (${host_arch}): the bun-based worker/control image is not published for it, so the stack will not start. Continuing because PROXYCORE_ALLOW_UNSUPPORTED_ARCH=1"
+        warn "ARMv6 or unidentified 32-bit ARM host (${host_arch}): images are published for ARMv7 and newer only (GOARM=7), so the stack will probably not start. Continuing because PROXYCORE_ALLOW_UNSUPPORTED_ARCH=1"
         return 0
       fi
-      die "32-bit ARM host (${host_arch}) is not supported: the bun-based worker is not available on 32-bit ARM. Reinstall a 64-bit OS (Raspberry Pi 3/4/5 support arm64) and run this installer again. Set PROXYCORE_ALLOW_UNSUPPORTED_ARCH=1 to continue anyway"
+      die "ARMv6 or unidentified 32-bit ARM host (${host_arch}) is not supported: the images are built for ARMv7 (GOARM=7) and newer, which excludes Raspberry Pi 1 and Zero. Use an ARMv7 or newer host (a 64-bit OS also works on Raspberry Pi 3/4/5) and run this installer again. Set PROXYCORE_ALLOW_UNSUPPORTED_ARCH=1 to continue anyway"
       ;;
     i386|i486|i586|i686)
-      die "32-bit x86 host (${host_arch}) is not supported; use a linux/amd64 or linux/arm64 host"
+      die "32-bit x86 host (${host_arch}) is not supported; use a linux/amd64, linux/arm64 or linux/arm/v7 host"
       ;;
     *)
-      warn "unrecognized architecture '${host_arch}'; published images cover linux/amd64 and linux/arm64 only"
+      warn "unrecognized architecture '${host_arch}'; published images cover linux/amd64, linux/arm64 and linux/arm/v7 only"
       return 0
       ;;
   esac
