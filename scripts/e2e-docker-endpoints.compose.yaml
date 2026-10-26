@@ -38,10 +38,8 @@ services:
       context: ..
       dockerfile: infra/compose/Dockerfile.runtime
     image: pcep-e2e-runtime:local
-    # `bun run worker` execs the Go worker shipped in the runtime image.
-    command: ["bun", "run", "worker"]
+    command: ["/usr/local/bin/proxycore-worker"]
     environment:
-      NODE_ENV: production
       PROXYCORE_SQLITE_PATH: /var/lib/proxycore-db/proxycore.db
       PROXYCORE_MASTER_KEY_BASE64: ${PCEP_MASTER_KEY:?}
       WORKER_SOCKET_PATH: /run/proxycore/control.sock
@@ -62,9 +60,8 @@ services:
 
   control:
     image: pcep-e2e-runtime:local
-    command: ["bun", "run", "control"]
+    command: ["/usr/local/bin/proxycore-control"]
     environment:
-      NODE_ENV: production
       WORKER_SOCKET_PATH: /run/proxycore/control.sock
       CANDIDATE_ROOT: /var/lib/proxycore/candidates
     volumes:

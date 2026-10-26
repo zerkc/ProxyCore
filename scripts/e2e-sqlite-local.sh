@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # Local SQLite smoke test: Go API and worker share one WAL file. No Docker.
-# The worker is the Go one by default (apps/api/cmd/worker); WORKER_IMPL=bun
-# runs the legacy Bun worker instead.
+# The worker is the Go one (apps/api/cmd/worker).
 # Everything lives under a mktemp -d directory that is removed on exit; children
 # are killed by the EXIT trap. Exits non-zero when any step FAILs.
 set -euo pipefail
@@ -160,30 +159,16 @@ JOB_ID="$(jq -r '.id // .job.id // empty' "$BODY" 2>/dev/null || true)"
   || bail "create apply job" "POST /api/apply -> $code: $(snippet)"
 
 echo "== worker =="
-WORKER_IMPL="${WORKER_IMPL:-go}"
 WORKER_CMD=()
 worker_skip=""
-case "$WORKER_IMPL" in
-  bun)
-    if command -v bun >/dev/null 2>&1; then
-      WORKER_CMD=(bun --no-env-file "$ROOT/apps/worker/src/index.ts")
-    else
-      worker_skip="bun not on PATH"
-    fi ;;
-  go)
-    if ! command -v go >/dev/null 2>&1; then
-      worker_skip="go not on PATH"
-    elif (cd "$ROOT/apps/api" && go build -o "$TMP/proxycore-worker" ./cmd/worker) >"$TMP/worker-build.log" 2>&1; then
-      WORKER_CMD=("$TMP/proxycore-worker")
-    else
-      record FAIL "worker build" "go build ./cmd/worker failed: $(tail -n 5 "$TMP/worker-build.log" | tr '\n' ' ')"
-      worker_skip="go worker did not build"
-    fi ;;
-  *)
-    record FAIL "worker impl" "WORKER_IMPL must be bun or go, got '$WORKER_IMPL'"
-    worker_skip="unknown WORKER_IMPL" ;;
-esac
-echo "worker implementation: $WORKER_IMPL"
+if ! command -v go >/dev/null 2>&1; then
+  worker_skip="go not on PATH"
+elif (cd "$ROOT/apps/api" && go build -o "$TMP/proxycore-worker" ./cmd/worker) >"$TMP/worker-build.log" 2>&1; then
+  WORKER_CMD=("$TMP/proxycore-worker")
+else
+  record FAIL "worker build" "go build ./cmd/worker failed: $(tail -n 5 "$TMP/worker-build.log" | tr '\n' ' ')"
+  worker_skip="go worker did not build"
+fi
 if (( ${#WORKER_CMD[@]} == 0 )); then
   record SKIPPED "worker start" "$worker_skip"
   record SKIPPED "worker reaches apply job" "$worker_skip"

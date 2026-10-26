@@ -31,7 +31,7 @@ NEW_PASSWORD="$(openssl rand -hex 18)"
 source "$ROOT/scripts/lib/e2e-docker.sh"
 
 # --- worker schema guard ----------------------------------------------------
-# `bun run worker` in the runtime image execs the Go worker, which refuses to
+# The runtime image runs the Go worker, which refuses to
 # start when the SQLite schema is newer than schemawait.ExpectedVersion. The
 # constant is compiled into the binary, so unlike the old Bun hook it cannot be
 # patched inside the container: if the migrations moved ahead of it (a product
